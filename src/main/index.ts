@@ -73,8 +73,8 @@ function createWindow(): void {
       const runUpdateCheck = async (): Promise<void> => {
         if (!db || !shouldCheckForUpdate(db)) return
         try {
-          await checkForUpdates()
-          recordUpdateCheck(db)
+          const didCheck = await checkForUpdates()
+          if (didCheck) recordUpdateCheck(db)
         } catch (err) {
           console.error('[Main] Update check failed:', err)
         }

@@ -67,10 +67,17 @@ export function initUpdater(mainWindow: BrowserWindow): void {
 }
 
 /**
- * Check for updates. Returns the result from electron-updater.
+ * Check for updates. Returns whether the check was actually performed.
+ * In dev mode (app not packaged), electron-updater silently skips the check
+ * and returns null without emitting any events.
  */
-export async function checkForUpdates(): Promise<void> {
+export async function checkForUpdates(): Promise<boolean> {
+  if (!app.isPackaged) {
+    console.log('[Updater] Skipping update check in dev mode (app not packaged)')
+    return false
+  }
   await autoUpdater.checkForUpdates()
+  return true
 }
 
 /**

@@ -668,12 +668,18 @@ export function registerIpcHandlers(
   })
 
   // ── Update handlers ─────────────────────────────────────────
-  ipcMain.handle('update:check', async () => {
+  ipcMain.handle('update:check', async (event) => {
     try {
-      await checkForUpdates()
-      recordUpdateCheck(db)
+      const didCheck = await checkForUpdates()
+      if (didCheck) {
+        recordUpdateCheck(db)
+      } else {
+        // Dev mode: electron-updater skips silently, so notify the renderer directly
+        event.sender.send('update:not-available')
+      }
     } catch (err) {
       console.error('[IPC] Update check failed:', err)
+      event.sender.send('update:error', err instanceof Error ? err.message : 'Update check failed')
     }
   })
 
