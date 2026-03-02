@@ -21,7 +21,7 @@
     "build:win": "electron-vite build && vite build --config vite.mobile.config.ts && electron-builder --win",
     "build:linux": "electron-vite build && vite build --config vite.mobile.config.ts && electron-builder --linux",
     "prepare": "husky",
-    "dev:mobile": "vite --config vite.mobile.config.ts",
+    "dev:mobile": "vite --config vite.mobile.config.ts --host",
     "build:mobile": "vite build --config vite.mobile.config.ts",
     "release": "bash scripts/release.sh"
   },
