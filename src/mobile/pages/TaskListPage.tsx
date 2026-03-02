@@ -1,7 +1,8 @@
 import { useState, useMemo } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { TaskStatus } from '@shared/constants'
 import { useTaskStore, type Task } from '../stores/task-store'
-import { useAgentStore } from '../stores/agent-store'
+import { useAgentStore, type SessionStatus } from '../stores/agent-store'
 import { TaskListItem } from '../components/TaskListItem'
 import { isSnoozed } from '../lib/utils'
 import type { Route } from '../App'
@@ -18,7 +19,14 @@ export function TaskListPage({ onNavigate }: { onNavigate: (route: Route) => voi
   const tasks = useTaskStore((s) => s.tasks)
   const isLoading = useTaskStore((s) => s.isLoading)
   const fetchTasks = useTaskStore((s) => s.fetchTasks)
-  const sessions = useAgentStore((s) => s.sessions)
+  // Only extract session statuses — avoids re-rendering on every streaming message
+  const sessionStatuses = useAgentStore(useShallow((s) => {
+    const result: Record<string, SessionStatus> = {}
+    for (const [taskId, session] of s.sessions) {
+      result[taskId] = session.status
+    }
+    return result
+  }))
   const [filter, setFilter] = useState('all')
   const [search, setSearch] = useState('')
   const [showCompleted, setShowCompleted] = useState(false)
@@ -108,7 +116,7 @@ export function TaskListPage({ onNavigate }: { onNavigate: (route: Route) => voi
                 key={task.id}
                 task={task}
                 onSelect={() => onNavigate({ page: 'detail', taskId: task.id })}
-                session={sessions.get(task.id)}
+                sessionStatus={sessionStatuses[task.id]}
               />
             ))}
 
@@ -126,7 +134,7 @@ export function TaskListPage({ onNavigate }: { onNavigate: (route: Route) => voi
                     key={task.id}
                     task={task}
                     onSelect={() => onNavigate({ page: 'detail', taskId: task.id })}
-                    session={sessions.get(task.id)}
+                    sessionStatus={sessionStatuses[task.id]}
                   />
                 ))}
               </>

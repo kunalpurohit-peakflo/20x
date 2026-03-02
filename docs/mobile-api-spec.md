@@ -247,6 +247,89 @@ Get a single agent by ID.
 
 ---
 
+### Skills
+
+#### `GET /api/skills`
+
+List all configured skills (available to agents).
+
+**Response:** `200 OK`
+
+```json
+[
+  {
+    "id": "skill_abc123",
+    "name": "Code Review",
+    "description": "Reviews pull requests",
+    "agent_id": "agent_abc123"
+  }
+]
+```
+
+| Field       | Type            | Description |
+|-------------|-----------------|-------------|
+| `id`        | `string`        | Skill ID |
+| `name`      | `string`        | Display name |
+| `description`| `string`       | What the skill does |
+| `agent_id`  | `string \| null`| Agent this skill belongs to (null = available to all) |
+
+---
+
+### GitHub
+
+#### `GET /api/github/org`
+
+Get the configured GitHub organization name.
+
+**Response:** `200 OK`
+
+```json
+{
+  "org": "peakflo"
+}
+```
+
+| Field | Type     | Description |
+|-------|----------|-------------|
+| `org` | `string` | GitHub org name (empty string if not configured) |
+
+---
+
+#### `POST /api/github/repos`
+
+Fetch repositories for a GitHub organization.
+
+**Request Body:**
+
+```json
+{
+  "org": "peakflo"
+}
+```
+
+| Field | Type     | Required | Description |
+|-------|----------|----------|-------------|
+| `org` | `string` | Yes      | GitHub organization name |
+
+**Response:** `200 OK`
+
+```json
+[
+  {
+    "name": "20x",
+    "fullName": "peakflo/20x",
+    "defaultBranch": "main",
+    "cloneUrl": "https://github.com/peakflo/20x.git",
+    "description": "AI agent platform",
+    "isPrivate": true
+  }
+]
+```
+
+**Error:** `400` — `org` is required. `500` — GitHub not configured.
+
+---
+
 ### Agent Sessions
 
 #### `GET /api/sessions`
@@ -465,6 +548,36 @@ This is how the three user interactions map to API calls:
 | Select an answer to agent question | Question options in transcript | `POST /approve` with `approved: true` |
 | Approve a risky action | Permission banner | `POST /approve` with `approved: true` |
 | Reject a risky action | Permission banner | `POST /approve` with `approved: false` |
+
+---
+
+#### `POST /api/sessions/:sessionId/sync`
+
+Replay messages from a running session. Used to re-sync the client transcript after a reconnect.
+
+**Path Parameters:**
+
+| Param       | Type     | Description |
+|-------------|----------|-------------|
+| `sessionId` | `string` | Active session ID |
+
+**Response:** `200 OK`
+
+```json
+{
+  "success": true,
+  "status": "working"
+}
+```
+
+| Field     | Type            | Description |
+|-----------|-----------------|-------------|
+| `success` | `boolean`       | Always true on success |
+| `status`  | `SessionStatus` | Current session status |
+
+The server replays the full message history via WebSocket `agent:output` events.
+
+**Error:** `404` — Session not found or not running.
 
 ---
 

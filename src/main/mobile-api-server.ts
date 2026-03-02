@@ -9,6 +9,7 @@ import { createServer, type IncomingMessage, type ServerResponse, type Server as
 import { join } from 'path'
 import { existsSync, readFileSync, statSync } from 'fs'
 import { WebSocketServer, WebSocket } from 'ws'
+import { randomUUID, timingSafeEqual } from 'crypto'
 import type { DatabaseManager } from './database'
 import type { AgentManager } from './agent-manager'
 import type { GitHubManager } from './github-manager'
@@ -22,6 +23,15 @@ let githubRef: GitHubManager | null = null
 let authToken: string | null = null
 
 const wsClients = new Set<WebSocket>()
+
+/** Timing-safe comparison to prevent token-length side-channel leaks. */
+function safeTokenMatch(provided: string | null | undefined, expected: string): boolean {
+  if (!provided) return false
+  const a = Buffer.from(provided)
+  const b = Buffer.from(expected)
+  if (a.length !== b.length) return false
+  return timingSafeEqual(a, b)
+}
 
 // ── Public API ───────────────────────────────────────────────
 
@@ -37,8 +47,13 @@ export function startMobileApiServer(
   agentRef = agentManager
   githubRef = githubManager
 
-  // Read auth token from settings (optional)
+  // Read or generate auth token — auth is always required
   authToken = db.getSetting('mobile_auth_token') ?? null
+  if (!authToken) {
+    authToken = randomUUID()
+    db.setSetting('mobile_auth_token', authToken)
+    console.log(`[MobileAPI] No auth token configured — generated new token: ${authToken}`)
+  }
 
   return new Promise((resolve, reject) => {
     server = createServer(handleHttpRequest)
@@ -51,7 +66,7 @@ export function startMobileApiServer(
       if (authToken) {
         const url = new URL(req.url || '/', `http://localhost`)
         const token = url.searchParams.get('token')
-        if (token !== authToken) {
+        if (!safeTokenMatch(token, authToken)) {
           socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n')
           socket.destroy()
           return
@@ -130,10 +145,21 @@ const MIME: Record<string, string> = {
 // ── HTTP request handler ─────────────────────────────────────
 
 function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
-  // CORS headers for development (Vite dev server on different port)
-  res.setHeader('Access-Control-Allow-Origin', '*')
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+  // CORS — only allow localhost origins (for Vite dev server).
+  // The mobile SPA is served from the same origin and doesn't need CORS.
+  const origin = req.headers.origin
+  if (origin) {
+    try {
+      const originUrl = new URL(origin)
+      if (originUrl.hostname === 'localhost' || originUrl.hostname === '127.0.0.1') {
+        res.setHeader('Access-Control-Allow-Origin', origin)
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+      }
+    } catch {
+      // invalid origin header — ignore
+    }
+  }
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204)
@@ -141,26 +167,26 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
     return
   }
 
-  // Auth check
-  if (authToken) {
-    const authHeader = req.headers.authorization
-    if (!authHeader || authHeader !== `Bearer ${authToken}`) {
-      res.writeHead(401, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: 'Unauthorized' }))
-      return
-    }
-  }
-
   const url = new URL(req.url || '/', `http://localhost`)
   const pathname = url.pathname
 
-  // API routes
+  // API routes — require auth
   if (pathname.startsWith('/api/')) {
+    if (authToken) {
+      const authHeader = req.headers.authorization
+      const provided = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null
+      if (!safeTokenMatch(provided, authToken)) {
+        res.writeHead(401, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Unauthorized' }))
+        return
+      }
+    }
     handleApiRoute(req, res, pathname, url)
     return
   }
 
-  // Static file serving for mobile SPA
+  // Static file serving for mobile SPA — no auth needed
+  // (the SPA reads the token from the URL hash fragment and sends it with API calls)
   serveMobileSPA(res, pathname)
 }
 
@@ -171,9 +197,19 @@ function handleApiRoute(req: IncomingMessage, res: ServerResponse, pathname: str
 
   // Collect body for POST requests
   if (req.method === 'POST') {
+    const MAX_BODY = 1_048_576 // 1 MB
     let body = ''
-    req.on('data', (chunk) => { body += chunk })
+    let overflow = false
+    req.on('data', (chunk) => {
+      body += chunk
+      if (body.length > MAX_BODY) { overflow = true; req.destroy() }
+    })
     req.on('end', async () => {
+      if (overflow) {
+        res.writeHead(413)
+        res.end(JSON.stringify({ error: 'Request body too large' }))
+        return
+      }
       let params: Record<string, unknown> = {}
       if (body) {
         try { params = JSON.parse(body) } catch { /* ignore */ }
@@ -266,7 +302,7 @@ function routeGet(pathname: string, url: URL): unknown {
 
   // GET /api/agents
   if (pathname === '/api/agents') {
-    return db.getAgents()
+    return db.getAgents().map(stripSensitiveAgentFields)
   }
 
   // GET /api/agents/:id
@@ -274,7 +310,7 @@ function routeGet(pathname: string, url: URL): unknown {
   if (agentMatch) {
     const agent = db.getAgent(agentMatch[1])
     if (!agent) throw Object.assign(new Error('Agent not found'), { status: 404 })
-    return agent
+    return stripSensitiveAgentFields(agent)
   }
 
   // GET /api/skills
@@ -408,6 +444,13 @@ function getActiveSessions(): Array<{ sessionId: string; agentId: string; taskId
     }
   }
   return results
+}
+
+/** Strip sensitive fields (api_keys, secret_ids) from agent config before sending over the network. */
+function stripSensitiveAgentFields(agent: ReturnType<DatabaseManager['getAgent']>) {
+  if (!agent) return agent
+  const { api_keys: _keys, secret_ids: _secrets, ...safeConfig } = (agent.config || {}) as Record<string, unknown>
+  return { ...agent, config: safeConfig }
 }
 
 function serveMobileSPA(res: ServerResponse, pathname: string): void {

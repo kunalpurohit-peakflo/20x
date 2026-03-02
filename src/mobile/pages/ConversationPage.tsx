@@ -2,6 +2,7 @@ import { useRef, useEffect, useCallback, useMemo, useState } from 'react'
 import { useTaskStore } from '../stores/task-store'
 import { useAgentStore } from '../stores/agent-store'
 import { api } from '../api/client'
+import { useSessionControls } from '../hooks/useSessionControls'
 import { MessageBubble } from '../components/MessageBubble'
 import { ChatInput } from '../components/ChatInput'
 import { cn } from '../lib/utils'
@@ -11,8 +12,6 @@ export function ConversationPage({ taskId, onNavigate }: { taskId: string; onNav
   const task = useTaskStore((s) => s.tasks.find((t) => t.id === taskId))
   const session = useAgentStore((s) => s.sessions.get(taskId))
   const initSession = useAgentStore((s) => s.initSession)
-  const endSession = useAgentStore((s) => s.endSession)
-  const clearMessageDedup = useAgentStore((s) => s.clearMessageDedup)
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const isAtBottomRef = useRef(true)
@@ -83,53 +82,24 @@ export function ConversationPage({ taskId, onNavigate }: { taskId: string; onNav
     [session]
   )
 
-  // Session controls
-  const handleStart = useCallback(async () => {
-    if (!task?.agent_id) return
-    initSession(task.id, '', task.agent_id)
-    try {
-      const { sessionId } = await api.sessions.start(task.agent_id, task.id)
-      initSession(task.id, sessionId, task.agent_id)
-    } catch (e) {
-      console.error('Failed to start session:', e)
-    }
-  }, [task, initSession])
+  // Session controls (shared hook provides double-click protection and rollback)
+  const { handleStart: _startSession, handleResume: _resumeSession, handleStop: _stopSession, handleRestart: _restartSession, busyRef } = useSessionControls(taskId)
 
-  const handleResume = useCallback(async () => {
-    if (!task?.agent_id || !task.session_id) return
-    clearMessageDedup(task.id)
-    initSession(task.id, '', task.agent_id)
-    try {
-      const { sessionId } = await api.sessions.resume(task.session_id, task.agent_id, task.id)
-      initSession(task.id, sessionId, task.agent_id)
-    } catch (e) {
-      console.error('Failed to resume session:', e)
-    }
-  }, [task, initSession, clearMessageDedup])
+  const handleStart = useCallback(() => {
+    if (task?.agent_id) _startSession(task.agent_id)
+  }, [task?.agent_id, _startSession])
 
-  const handleStop = useCallback(async () => {
-    if (!session?.sessionId) return
-    try {
-      await api.sessions.stop(session.sessionId)
-      endSession(taskId)
-    } catch (e) {
-      console.error('Failed to stop session:', e)
-    }
-  }, [session, taskId, endSession])
+  const handleResume = useCallback(() => {
+    if (task?.agent_id && task?.session_id) _resumeSession(task.agent_id, task.session_id)
+  }, [task?.agent_id, task?.session_id, _resumeSession])
 
-  const handleRestart = useCallback(async () => {
-    if (!task?.agent_id || !session?.sessionId) return
-    try {
-      await api.sessions.stop(session.sessionId)
-      endSession(taskId)
-      clearMessageDedup(taskId)
-      initSession(task.id, '', task.agent_id)
-      const { sessionId } = await api.sessions.start(task.agent_id, task.id)
-      initSession(task.id, sessionId, task.agent_id)
-    } catch (e) {
-      console.error('Failed to restart session:', e)
-    }
-  }, [task, session, taskId, endSession, clearMessageDedup, initSession])
+  const handleStop = useCallback(() => {
+    if (session?.sessionId) _stopSession(session.sessionId)
+  }, [session?.sessionId, _stopSession])
+
+  const handleRestart = useCallback(() => {
+    if (task?.agent_id && session?.sessionId) _restartSession(task.agent_id, session.sessionId)
+  }, [task?.agent_id, session?.sessionId, _restartSession])
 
   // Auto-scroll to bottom when new messages arrive (only if user is at bottom)
   useEffect(() => {

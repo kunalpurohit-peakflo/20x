@@ -197,7 +197,7 @@ export const settingsApi = {
 
 export const mobileApi = {
   getInfo: (): Promise<{ url: string; port: number }> => {
-    return window.electronAPI.mobile.getInfo()
+    return window.electronAPI?.mobile?.getInfo() ?? Promise.resolve({ url: '', port: 0 })
   }
 }
 

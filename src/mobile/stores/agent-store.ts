@@ -57,12 +57,22 @@ export interface Agent {
   updated_at: string
 }
 
-// Module-level dedup tracking
+// Module-level dedup tracking (capped to prevent unbounded growth)
+const MAX_TRACKED_TASKS = 50
 const seenIds = new Map<string, Set<string>>()
 const stepStartTimes = new Map<string, number>()
 
 function getSeen(taskId: string): Set<string> {
-  if (!seenIds.has(taskId)) seenIds.set(taskId, new Set())
+  if (!seenIds.has(taskId)) {
+    // Evict oldest entries when limit is reached (Maps preserve insertion order)
+    while (seenIds.size >= MAX_TRACKED_TASKS) {
+      const oldest = seenIds.keys().next().value
+      if (oldest === undefined) break
+      seenIds.delete(oldest)
+      stepStartTimes.delete(oldest)
+    }
+    seenIds.set(taskId, new Set())
+  }
   return seenIds.get(taskId)!
 }
 
@@ -101,28 +111,22 @@ export const useAgentStore = create<AgentState>((set, get) => {
 
   onEvent('agent:status', (payload) => {
     const event = payload as { sessionId: string; agentId: string; taskId: string; status: SessionStatus }
-    const state = get()
-    const session = findBySessionId(state.sessions, event.sessionId)
-      || state.sessions.get(event.taskId)
-    if (!session) return
+    set((state) => {
+      const session = findBySessionId(state.sessions, event.sessionId)
+        || state.sessions.get(event.taskId)
+      if (!session) return state
 
-    const updated = { ...session, status: event.status }
-    if (!session.sessionId && event.sessionId) updated.sessionId = event.sessionId
-    set({ sessions: new Map(state.sessions).set(session.taskId, updated) })
+      const updated = { ...session, status: event.status }
+      if (!session.sessionId && event.sessionId) updated.sessionId = event.sessionId
+      return { sessions: new Map(state.sessions).set(session.taskId, updated) }
+    })
   })
 
   onEvent('agent:output', (payload) => {
     const event = payload as { sessionId: string; taskId?: string; type: string; data: Record<string, unknown> }
-    const state = get()
-    const session = findBySessionId(state.sessions, event.sessionId)
-      || (event.taskId ? state.sessions.get(event.taskId) : undefined)
-    if (!session) return
-
-    const resolvedSession = (!session.sessionId && event.sessionId)
-      ? { ...session, sessionId: event.sessionId }
-      : session
-
     const data = event.data
+
+    // Parse content from event payload (no store state needed)
     let role: 'user' | 'assistant' | 'system' = 'system'
     let content = ''
     let msgId = ''
@@ -138,77 +142,85 @@ export const useAgentStore = create<AgentState>((set, get) => {
     if (!content && !data.tool && !data.questions && !data.todos) return
     if (!msgId) msgId = `${role}-${content.slice(0, 50)}-${Date.now()}`
 
-    const taskId = resolvedSession.taskId
-    const seen = getSeen(taskId)
+    set((state) => {
+      const session = findBySessionId(state.sessions, event.sessionId)
+        || (event.taskId ? state.sessions.get(event.taskId) : undefined)
+      if (!session) return state
 
-    // Absorb step-start
-    if (data.partType === 'step-start') {
-      seen.add(msgId)
-      stepStartTimes.set(taskId, Date.now())
-      return
-    }
+      const resolvedSession = (!session.sessionId && event.sessionId)
+        ? { ...session, sessionId: event.sessionId }
+        : session
 
-    // Absorb step-finish — annotate last assistant message
-    if (data.partType === 'step-finish') {
-      seen.add(msgId)
-      const msgs = resolvedSession.messages
-      if (msgs.length === 0) return
+      const taskId = resolvedSession.taskId
+      const seen = getSeen(taskId)
 
-      const now = Date.now()
-      const startTime = stepStartTimes.get(taskId)
-      const durationMs = startTime ? now - startTime : undefined
-      const tokens = data.stepTokens as StepMeta['tokens'] | undefined
-      stepStartTimes.delete(taskId)
-
-      let targetIdx = -1
-      for (let i = msgs.length - 1; i >= 0; i--) {
-        if (msgs[i].role === 'assistant') { targetIdx = i; break }
+      // Absorb step-start
+      if (data.partType === 'step-start') {
+        seen.add(msgId)
+        stepStartTimes.set(taskId, Date.now())
+        return state
       }
-      if (targetIdx === -1) return
 
-      const updated = [...msgs]
-      updated[targetIdx] = { ...updated[targetIdx], stepMeta: { durationMs, tokens } }
-      set({
-        sessions: new Map(state.sessions).set(taskId, { ...resolvedSession, messages: updated })
-      })
-      return
-    }
+      // Absorb step-finish — annotate last assistant message
+      if (data.partType === 'step-finish') {
+        seen.add(msgId)
+        const msgs = resolvedSession.messages
+        if (msgs.length === 0) return state
 
-    // Streaming update — replace existing message content
-    if (data.update && seen.has(msgId)) {
-      set({
+        const now = Date.now()
+        const startTime = stepStartTimes.get(taskId)
+        const durationMs = startTime ? now - startTime : undefined
+        const tokens = data.stepTokens as StepMeta['tokens'] | undefined
+        stepStartTimes.delete(taskId)
+
+        let targetIdx = -1
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          if (msgs[i].role === 'assistant') { targetIdx = i; break }
+        }
+        if (targetIdx === -1) return state
+
+        const updated = [...msgs]
+        updated[targetIdx] = { ...updated[targetIdx], stepMeta: { durationMs, tokens } }
+        return {
+          sessions: new Map(state.sessions).set(taskId, { ...resolvedSession, messages: updated })
+        }
+      }
+
+      // Streaming update — replace existing message content
+      if (data.update && seen.has(msgId)) {
+        return {
+          sessions: new Map(state.sessions).set(taskId, {
+            ...resolvedSession,
+            messages: resolvedSession.messages.map((m): AgentMessage => {
+              if (m.id !== msgId) return m
+              const keepPartType = m.partType === 'todowrite' || m.partType === 'question'
+              const newPartType = keepPartType ? m.partType : ((data.partType as string) || m.partType)
+              const newTool = data.tool ? { ...m.tool, ...(data.tool as AgentMessage['tool']) } as AgentMessage['tool'] : m.tool
+              return { ...m, content, partType: newPartType, tool: newTool }
+            })
+          })
+        }
+      }
+
+      if (seen.has(msgId)) return state
+      seen.add(msgId)
+
+      return {
         sessions: new Map(state.sessions).set(taskId, {
           ...resolvedSession,
-          messages: resolvedSession.messages.map((m): AgentMessage => {
-            if (m.id !== msgId) return m
-            const keepPartType = m.partType === 'todowrite' || m.partType === 'question'
-            const newPartType = keepPartType ? m.partType : ((data.partType as string) || m.partType)
-            const newTool = data.tool ? { ...m.tool, ...(data.tool as AgentMessage['tool']) } as AgentMessage['tool'] : m.tool
-            return { ...m, content, partType: newPartType, tool: newTool }
-          })
+          messages: [
+            ...resolvedSession.messages,
+            {
+              id: msgId,
+              role,
+              content,
+              timestamp: new Date(),
+              partType: data.partType as string,
+              tool: data.tool as AgentMessage['tool']
+            }
+          ]
         })
-      })
-      return
-    }
-
-    if (seen.has(msgId)) return
-    seen.add(msgId)
-
-    set({
-      sessions: new Map(state.sessions).set(taskId, {
-        ...resolvedSession,
-        messages: [
-          ...resolvedSession.messages,
-          {
-            id: msgId,
-            role,
-            content,
-            timestamp: new Date(),
-            partType: data.partType as string,
-            tool: data.tool as AgentMessage['tool']
-          }
-        ]
-      })
+      }
     })
   })
 
@@ -247,26 +259,27 @@ export const useAgentStore = create<AgentState>((set, get) => {
 
         if (activeSessions.length === 0) return
 
-        const state = get()
-        const nextSessions = new Map(state.sessions)
+        set((state) => {
+          const nextSessions = new Map(state.sessions)
 
-        for (const active of activeSessions) {
-          const existing = state.sessions.get(active.taskId)
-          // Skip if we already have this session connected with messages
-          if (existing?.sessionId === active.sessionId && existing.messages.length > 0) continue
+          for (const active of activeSessions) {
+            const existing = state.sessions.get(active.taskId)
+            // Skip if we already have this session connected with messages
+            if (existing?.sessionId === active.sessionId && existing.messages.length > 0) continue
 
-          // Initialize session in the store so WebSocket events are captured
-          seenIds.delete(active.taskId)
-          nextSessions.set(active.taskId, {
-            sessionId: active.sessionId,
-            agentId: active.agentId,
-            taskId: active.taskId,
-            status: active.status as SessionStatus,
-            messages: []
-          })
-        }
+            // Initialize session in the store so WebSocket events are captured
+            seenIds.delete(active.taskId)
+            nextSessions.set(active.taskId, {
+              sessionId: active.sessionId,
+              agentId: active.agentId,
+              taskId: active.taskId,
+              status: active.status as SessionStatus,
+              messages: []
+            })
+          }
 
-        set({ sessions: nextSessions })
+          return { sessions: nextSessions }
+        })
 
         // Replay messages from each active session (will arrive via WebSocket)
         for (const active of activeSessions) {

@@ -3,6 +3,7 @@
  * In production the SPA is served by the mobile-api-server (same origin).
  * In dev mode (Vite on a different port), we point directly at the Electron server.
  */
+import { getAuthToken } from './auth'
 
 const MOBILE_API_PORT = '20620'
 const BASE =
@@ -10,8 +11,15 @@ const BASE =
     ? `http://${window.location.hostname}:${MOBILE_API_PORT}`
     : ''
 
+function authHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {}
+  const token = getAuthToken()
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  return headers
+}
+
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`)
+  const res = await fetch(`${BASE}${path}`, { headers: authHeaders() })
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }))
     throw new Error(body.error || res.statusText)
@@ -22,7 +30,7 @@ async function get<T>(path: string): Promise<T> {
 async function post<T>(path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: body ? JSON.stringify(body) : undefined
   })
   if (!res.ok) {
@@ -38,12 +46,12 @@ export const api = {
       const qs = params ? '?' + new URLSearchParams(params).toString() : ''
       return get<unknown[]>(`/api/tasks${qs}`)
     },
-    get: (id: string) => get<unknown>(`/api/tasks/${id}`),
-    update: (id: string, data: unknown) => post<unknown>(`/api/tasks/${id}`, data)
+    get: (id: string) => get<unknown>(`/api/tasks/${encodeURIComponent(id)}`),
+    update: (id: string, data: unknown) => post<unknown>(`/api/tasks/${encodeURIComponent(id)}`, data)
   },
   agents: {
     list: () => get<unknown[]>('/api/agents'),
-    get: (id: string) => get<unknown>(`/api/agents/${id}`)
+    get: (id: string) => get<unknown>(`/api/agents/${encodeURIComponent(id)}`)
   },
   skills: {
     list: () => get<unknown[]>('/api/skills')
@@ -58,16 +66,16 @@ export const api = {
     start: (agentId: string, taskId: string, skipInitialPrompt?: boolean) =>
       post<{ sessionId: string }>('/api/sessions/start', { agentId, taskId, skipInitialPrompt }),
     resume: (sessionId: string, agentId: string, taskId: string) =>
-      post<{ sessionId: string }>(`/api/sessions/${sessionId}/resume`, { agentId, taskId }),
+      post<{ sessionId: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/resume`, { agentId, taskId }),
     send: (sessionId: string, message: string, taskId?: string, agentId?: string) =>
-      post<{ success: boolean; newSessionId?: string }>(`/api/sessions/${sessionId}/send`, { message, taskId, agentId }),
+      post<{ success: boolean; newSessionId?: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/send`, { message, taskId, agentId }),
     approve: (sessionId: string, approved: boolean, message?: string) =>
-      post<{ success: boolean }>(`/api/sessions/${sessionId}/approve`, { approved, message }),
+      post<{ success: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}/approve`, { approved, message }),
     sync: (sessionId: string) =>
-      post<{ success: boolean; status: string }>(`/api/sessions/${sessionId}/sync`),
+      post<{ success: boolean; status: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/sync`),
     abort: (sessionId: string) =>
-      post<{ success: boolean }>(`/api/sessions/${sessionId}/abort`),
+      post<{ success: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}/abort`),
     stop: (sessionId: string) =>
-      post<{ success: boolean }>(`/api/sessions/${sessionId}/stop`)
+      post<{ success: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}/stop`)
   }
 }

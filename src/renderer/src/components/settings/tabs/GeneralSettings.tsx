@@ -27,14 +27,19 @@ export function GeneralSettings() {
         // Load minimize to tray
         const tray = await window.electronAPI?.app?.getMinimizeToTray()
         setMinimizeToTray(tray || false)
-
-        // Load mobile web URL
-        const info = await mobileApi.getInfo()
-        setMobileUrl(info.url)
       } catch (error) {
         console.error('Failed to load app preferences:', error)
       } finally {
         setLoading(false)
+      }
+
+      // Load mobile URL separately so its failure doesn't block other settings
+      try {
+        const info = await mobileApi.getInfo()
+        setMobileUrl(info.url)
+      } catch (error) {
+        console.error('Failed to load mobile URL:', error)
+        setMobileUrl('')
       }
     }
     loadSettings()
@@ -154,8 +159,10 @@ export function GeneralSettings() {
                 </svg>
               </button>
             </div>
-          ) : (
+          ) : loading ? (
             <span className="text-sm text-muted-foreground">Loading...</span>
+          ) : (
+            <span className="text-sm text-muted-foreground">Unavailable</span>
           )}
         </div>
       </div>

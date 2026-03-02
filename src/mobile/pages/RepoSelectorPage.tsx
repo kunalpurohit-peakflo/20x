@@ -66,7 +66,7 @@ export function RepoSelectorPage({
     return repos.filter(
       (r) =>
         r.name.toLowerCase().includes(q) ||
-        r.description.toLowerCase().includes(q)
+        (r.description || '').toLowerCase().includes(q)
     )
   }, [repos, search])
 
@@ -81,8 +81,8 @@ export function RepoSelectorPage({
 
   const handleConfirm = useCallback(async () => {
     if (!task) return
-    await updateTask(task.id, { repos: Array.from(selected) })
-    onNavigate({ page: 'detail', taskId })
+    const success = await updateTask(task.id, { repos: Array.from(selected) })
+    if (success) onNavigate({ page: 'detail', taskId })
   }, [task, selected, updateTask, onNavigate, taskId])
 
   return (

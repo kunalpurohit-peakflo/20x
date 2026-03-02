@@ -42,23 +42,33 @@ interface TaskState {
   tasks: Task[]
   isLoading: boolean
   fetchTasks: () => Promise<void>
-  updateTask: (id: string, data: Record<string, unknown>) => Promise<void>
+  updateTask: (id: string, data: Record<string, unknown>) => Promise<boolean>
 }
 
 export const useTaskStore = create<TaskState>((set, get) => {
   // Listen to WebSocket events
   onEvent('task:updated', (payload) => {
     const { taskId, updates } = payload as { taskId: string; updates: Partial<Task> }
-    set({
-      tasks: get().tasks.map((t) =>
-        t.id === taskId ? { ...t, ...updates } : t
-      )
-    })
+    const found = get().tasks.some((t) => t.id === taskId)
+    if (found) {
+      set((state) => ({
+        tasks: state.tasks.map((t) =>
+          t.id === taskId ? { ...t, ...updates } : t
+        )
+      }))
+    } else {
+      // Task not yet in the list (created on desktop) — fetch to pick it up
+      get().fetchTasks()
+    }
   })
 
   onEvent('task:created', (payload) => {
     const { task } = payload as { task: Task }
-    set({ tasks: [task, ...get().tasks] })
+    set((state) => {
+      // Deduplicate — task may already exist from a concurrent fetchTasks()
+      if (state.tasks.some((t) => t.id === task.id)) return state
+      return { tasks: [task, ...state.tasks] }
+    })
   })
 
   return {
@@ -78,11 +88,13 @@ export const useTaskStore = create<TaskState>((set, get) => {
     updateTask: async (id, data) => {
       try {
         const updated = (await api.tasks.update(id, data)) as Task
-        set({
-          tasks: get().tasks.map((t) => (t.id === id ? updated : t))
-        })
+        set((state) => ({
+          tasks: state.tasks.map((t) => (t.id === id ? updated : t))
+        }))
+        return true
       } catch (e) {
         console.error('Failed to update task:', e)
+        return false
       }
     }
   }

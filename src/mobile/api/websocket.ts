@@ -2,6 +2,7 @@
  * WebSocket client with auto-reconnect.
  * Dispatches events to registered handlers.
  */
+import { getAuthToken } from './auth'
 
 type EventHandler = (payload: unknown) => void
 
@@ -9,10 +10,21 @@ const handlers = new Map<string, Set<EventHandler>>()
 let ws: WebSocket | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let reconnectDelay = 1000
+let hasConnectedBefore = false
 let onStatusChange: ((connected: boolean) => void) | null = null
+let onReconnect: (() => void) | null = null
+let onFirstConnect: (() => void) | null = null
 
 export function setStatusChangeHandler(fn: (connected: boolean) => void): void {
   onStatusChange = fn
+}
+
+export function setReconnectHandler(fn: () => void): void {
+  onReconnect = fn
+}
+
+export function setFirstConnectHandler(fn: () => void): void {
+  onFirstConnect = fn
 }
 
 export function connectWebSocket(): void {
@@ -25,14 +37,23 @@ export function connectWebSocket(): void {
   const host = window.location.port !== MOBILE_API_PORT
     ? `${window.location.hostname}:${MOBILE_API_PORT}`
     : window.location.host
-  const url = `${protocol}//${host}/ws`
+  let url = `${protocol}//${host}/ws`
+  const token = getAuthToken()
+  if (token) url += `?token=${encodeURIComponent(token)}`
 
   ws = new WebSocket(url)
 
   ws.onopen = () => {
     console.log('[WS] Connected')
+    const isReconnect = hasConnectedBefore
+    hasConnectedBefore = true
     reconnectDelay = 1000
     onStatusChange?.(true)
+    if (isReconnect) {
+      onReconnect?.()
+    } else {
+      onFirstConnect?.()
+    }
   }
 
   ws.onmessage = (event) => {

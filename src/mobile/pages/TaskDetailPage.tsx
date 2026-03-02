@@ -4,6 +4,7 @@ import { Markdown } from '@/components/ui/Markdown'
 import { useTaskStore } from '../stores/task-store'
 import { useAgentStore } from '../stores/agent-store'
 import { api } from '../api/client'
+import { useSessionControls } from '../hooks/useSessionControls'
 import { Badge } from '../components/Badge'
 import { PriorityBadge } from '../components/PriorityBadge'
 import { TaskStatusDot } from '../components/TaskStatusDot'
@@ -19,9 +20,9 @@ export function TaskDetailPage({ taskId, onNavigate }: { taskId: string; onNavig
   const session = useAgentStore((s) => s.sessions.get(taskId))
   const initSession = useAgentStore((s) => s.initSession)
   const endSession = useAgentStore((s) => s.endSession)
-  const clearMessageDedup = useAgentStore((s) => s.clearMessageDedup)
 
   const [skillsExpanded, setSkillsExpanded] = useState(false)
+  const { handleStart: _startSession, handleResume: _resumeSession, handleStop: _stopSession, busyRef } = useSessionControls(taskId)
 
   // Session is already synced and running (from desktop or elsewhere)
   const isSessionRunning = session?.sessionId && (session.status === 'working' || session.status === 'waiting_approval')
@@ -32,9 +33,10 @@ export function TaskDetailPage({ taskId, onNavigate }: { taskId: string; onNavig
   }, [task, updateTask])
 
   const handleTriage = useCallback(async () => {
-    if (!task || task.agent_id) return
+    if (!task || task.agent_id || busyRef.current) return
     const defaultAgent = agents.find((a) => a.is_default) || agents[0]
     if (!defaultAgent) return
+    busyRef.current = true
     try {
       await updateTask(task.id, { status: TaskStatus.Triaging })
       initSession(task.id, '', defaultAgent.id)
@@ -42,9 +44,12 @@ export function TaskDetailPage({ taskId, onNavigate }: { taskId: string; onNavig
       initSession(task.id, sessionId, defaultAgent.id)
     } catch (e) {
       console.error('Failed to triage:', e)
+      endSession(task.id)
       await updateTask(task.id, { status: TaskStatus.NotStarted })
+    } finally {
+      busyRef.current = false
     }
-  }, [task, agents, updateTask, initSession])
+  }, [task, agents, updateTask, initSession, endSession])
 
   const handleUpdateSkillIds = useCallback(async (ids: string[] | null) => {
     if (!task) return
@@ -56,38 +61,18 @@ export function TaskDetailPage({ taskId, onNavigate }: { taskId: string; onNavig
     await updateTask(task.id, { repos: task.repos.filter((r) => r !== repo) })
   }, [task, updateTask])
 
-  const handleStart = useCallback(async () => {
-    if (!task?.agent_id) return
-    initSession(task.id, '', task.agent_id)
-    try {
-      const { sessionId } = await api.sessions.start(task.agent_id, task.id)
-      initSession(task.id, sessionId, task.agent_id)
-    } catch (e) {
-      console.error('Failed to start session:', e)
-    }
-  }, [task, initSession])
+  // Session controls (shared hook provides double-click protection and rollback)
+  const handleStart = useCallback(() => {
+    if (task?.agent_id) _startSession(task.agent_id)
+  }, [task?.agent_id, _startSession])
 
-  const handleResume = useCallback(async () => {
-    if (!task?.agent_id || !task.session_id) return
-    clearMessageDedup(task.id)
-    initSession(task.id, '', task.agent_id)
-    try {
-      const { sessionId } = await api.sessions.resume(task.session_id, task.agent_id, task.id)
-      initSession(task.id, sessionId, task.agent_id)
-    } catch (e) {
-      console.error('Failed to resume session:', e)
-    }
-  }, [task, initSession, clearMessageDedup])
+  const handleResume = useCallback(() => {
+    if (task?.agent_id && task?.session_id) _resumeSession(task.agent_id, task.session_id)
+  }, [task?.agent_id, task?.session_id, _resumeSession])
 
-  const handleStop = useCallback(async () => {
-    if (!session?.sessionId) return
-    try {
-      await api.sessions.stop(session.sessionId)
-      endSession(taskId)
-    } catch (e) {
-      console.error('Failed to stop session:', e)
-    }
-  }, [session, taskId, endSession])
+  const handleStop = useCallback(() => {
+    if (session?.sessionId) _stopSession(session.sessionId)
+  }, [session?.sessionId, _stopSession])
 
   if (!task) {
     return (
