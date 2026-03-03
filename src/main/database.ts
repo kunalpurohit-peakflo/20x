@@ -642,6 +642,12 @@ const SCHEMA_VERSION = 3
 
 export class DatabaseManager {
   public db!: Database.Database
+  private dbPath!: string
+
+  /** Returns the resolved database file path (available after initialize()). */
+  getDbPath(): string {
+    return this.dbPath
+  }
 
   close(): void {
     if (this.db?.open) {
@@ -653,6 +659,7 @@ export class DatabaseManager {
   initialize(): void {
     const userDataPath = app.getPath('userData')
     const dbPath = join(userDataPath, 'pf-desktop.db')
+    this.dbPath = dbPath
 
     this.db = new Database(dbPath)
     this.db.pragma('journal_mode = WAL')
