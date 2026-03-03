@@ -6,6 +6,7 @@ import { existsSync, copyFileSync, mkdirSync, writeFileSync, readFileSync, readd
 import { Agent as UndiciAgent } from 'undici'
 import type { BrowserWindow } from 'electron'
 import type { DatabaseManager, AgentMcpServerEntry, OutputFieldRecord, SecretRecord, SkillRecord, TaskRecord } from './database'
+import type { DatabaseAsync } from './database-async'
 import { TaskStatus } from '../shared/constants'
 import type { WorktreeManager } from './worktree-manager'
 import type { GitHubManager } from './github-manager'
@@ -45,12 +46,21 @@ interface AgentSession {
   seenMessageIds: Set<string>
   seenPartIds: Set<string>
   partContentLengths: Map<string, string>
-  pollTimer?: ReturnType<typeof setTimeout>
   learningMode?: boolean
   isTriageSession?: boolean
   adapter?: CodingAgentAdapter
   secretSessionToken?: string
   pollingStarted?: boolean
+}
+
+/** Entry tracked by the centralized polling coordinator */
+interface PollingEntry {
+  sessionId: string
+  adapter: CodingAgentAdapter
+  config: SessionConfig
+  seenMessageIds: Set<string>
+  seenPartIds: Set<string>
+  partContentLengths: Map<string, string>
 }
 
 export class AgentManager extends EventEmitter {
@@ -60,15 +70,30 @@ export class AgentManager extends EventEmitter {
   private serverStarting: Promise<void> | null = null  // Track server startup
   private sdkLoading: Promise<void> | null = null  // Track SDK loading
   private db: DatabaseManager
+  private dbAsync: DatabaseAsync | null = null  // Worker-thread DB for non-blocking hot-path operations
   private mainWindow: BrowserWindow | null = null
   private adapters: Map<string, CodingAgentAdapter> = new Map()  // Adapter instances
   private worktreeManager: WorktreeManager | null = null
   private githubManager: GitHubManager | null = null
   private externalListeners: Array<(channel: string, data: unknown) => void> = []
 
+  // ── Centralized Polling Coordinator ──
+  // Instead of N independent setTimeout loops (one per session),
+  // a single timer sequentially polls all active sessions, preventing
+  // simultaneous sync DB calls from stacking up and starving the event loop.
+  private pollingEntries: Map<string, PollingEntry> = new Map()
+  private pollingTimer: ReturnType<typeof setTimeout> | null = null
+  private pollingInProgress = false
+  private static readonly POLL_INTERVAL_MS = 2000
+
   constructor(db: DatabaseManager) {
     super()
     this.db = db
+  }
+
+  /** Sets the async (worker-thread) database for non-blocking hot-path operations */
+  setAsyncDatabase(dbAsync: DatabaseAsync): void {
+    this.dbAsync = dbAsync
   }
 
   private async loadSDK(): Promise<void> {
@@ -1056,209 +1081,280 @@ export class AgentManager extends EventEmitter {
     return adapterSessionId
   }
 
+  // ── Centralized Polling Coordinator ──────────────────────────────
+  //
+  // Instead of N independent setTimeout loops (one per session that can fire
+  // simultaneously, stacking sync DB calls and starving the event loop),
+  // a SINGLE timer sequentially polls all registered sessions.
+
   /**
-   * Polls adapter for new messages and forwards to renderer
+   * Registers a session for centralized polling and starts the coordinator
+   * if it isn't already running.
    */
   private startAdapterPolling(
     initialSessionId: string,
     adapter: CodingAgentAdapter,
     config: SessionConfig
   ): void {
-    const seenMessageIds = new Set<string>()
-    const seenPartIds = new Set<string>()
-    const partContentLengths = new Map<string, string>()
-    let currentSessionId = initialSessionId // Persists across poll iterations
+    const entry: PollingEntry = {
+      sessionId: initialSessionId,
+      adapter,
+      config,
+      seenMessageIds: new Set<string>(),
+      seenPartIds: new Set<string>(),
+      partContentLengths: new Map<string, string>()
+    }
 
-    const poll = async (): Promise<void> => {
+    this.pollingEntries.set(initialSessionId, entry)
+    console.log(`[AgentManager] Registered session ${initialSessionId} for polling (${this.pollingEntries.size} active)`)
+
+    // Start the coordinator if not already running
+    this.ensurePollingCoordinator()
+  }
+
+  /**
+   * Unregisters a session from the polling coordinator.
+   */
+  private stopAdapterPolling(sessionId: string): void {
+    this.pollingEntries.delete(sessionId)
+    console.log(`[AgentManager] Unregistered session ${sessionId} from polling (${this.pollingEntries.size} remaining)`)
+
+    // Stop coordinator if no sessions left
+    if (this.pollingEntries.size === 0 && this.pollingTimer) {
+      clearTimeout(this.pollingTimer)
+      this.pollingTimer = null
+      console.log('[AgentManager] Polling coordinator stopped (no active sessions)')
+    }
+  }
+
+  /**
+   * Ensures the single polling coordinator timer is running.
+   */
+  private ensurePollingCoordinator(): void {
+    if (this.pollingTimer) return // Already running
+
+    const tick = async (): Promise<void> => {
+      if (this.pollingInProgress) return // Guard against re-entrant ticks
+      this.pollingInProgress = true
+
       try {
-        // Find current session ID (might have changed due to re-keying)
-        let sessionId = currentSessionId
-        const sessionByOldId = this.sessions.get(sessionId)
-        if (!sessionByOldId) {
-          // Session might have been re-keyed, find it by taskId
-          for (const [sid, sess] of this.sessions.entries()) {
-            if (sess.taskId === config.taskId) {
-              sessionId = sid
-              currentSessionId = sid // Update persistent reference
-              break
-            }
-          }
+        // Snapshot current entries (entries may be removed during iteration)
+        const entries = [...this.pollingEntries.values()]
+
+        // Poll each session SEQUENTIALLY — never concurrently — to avoid
+        // stacking sync DB calls that starve the event loop.
+        for (const entry of entries) {
+          // Check if entry was removed while we were iterating
+          if (!this.pollingEntries.has(entry.sessionId)) continue
+
+          await this.pollSingleSession(entry)
         }
-
-        // Early exit if session was destroyed (e.g. by stopSession)
-        const activeSession = this.sessions.get(sessionId)
-        if (!activeSession) {
-          console.log(`[AgentManager] Session ${sessionId} no longer exists, stopping adapter polling`)
-          return
-        }
-
-        // Poll for new messages
-        const newParts = await adapter.pollMessages(
-          sessionId,
-          seenMessageIds,
-          seenPartIds,
-          partContentLengths,
-          config
-        )
-
-        // Check if the real session ID has been provided by the adapter
-        const realSessionId = newParts.find(p => p.realSessionId)?.realSessionId
-        if (realSessionId && realSessionId !== sessionId) {
-          console.log(`[AgentManager] Session ID updated: ${sessionId} -> ${realSessionId}`)
-
-          // Update database with real session ID
-          this.db.updateTask(config.taskId, { session_id: realSessionId })
-
-          // Re-key the sessions map
-          const session = this.sessions.get(sessionId)
-          if (session) {
-            this.sessions.delete(sessionId)
-            this.sessions.set(realSessionId, session)
-            sessionId = realSessionId // Update local variable for subsequent code
-            currentSessionId = realSessionId // Update persistent reference for future iterations
-          }
-        }
-
-        // Forward to renderer (skip user messages - already added when sent)
-        for (const part of newParts) {
-          // Skip user messages - they're added to UI when sent via doSendAdapterMessage
-          if (part.role === 'user') {
-            console.log(`[AgentManager] Skipping user message from adapter: id=${part.id}, content=${(part.text || part.content || '').slice(0, 200)}`)
-            continue
-          }
-
-          console.log(`[AgentManager] Sending to UI: id=${part.id}, partType=${part.type}, update=${part.update}, contentLength=${(part.content || part.text || '').length}`)
-          this.sendToRenderer('agent:output', {
-            sessionId,
-            taskId: config.taskId,
-            type: 'message',
-            data: {
-              id: part.id,
-              role: part.role || 'assistant', // Use part role if available
-              content: part.content || part.text || '',
-              partType: part.type,
-              tool: part.tool,
-              update: part.update // Pass through update flag
-            }
-          })
-        }
-
-        // Check for pending approval (ACP adapters only)
-        if ('getPendingApproval' in adapter && typeof adapter.getPendingApproval === 'function') {
-          const approval = (adapter as unknown as AcpAdapter).getPendingApproval(sessionId)
-          if (approval && !seenPartIds.has(`approval-${approval.toolCallId}`)) {
-            seenPartIds.add(`approval-${approval.toolCallId}`)
-
-            // Emit as a question message (like OpenCode questions)
-            this.sendToRenderer('agent:output', {
-              sessionId,
-              taskId: config.taskId,
-              type: 'message',
-              data: {
-                id: `question-${approval.toolCallId}`,
-                role: 'assistant',
-                content: approval.question,
-                partType: 'question',
-                tool: {
-                  name: 'permission',
-                  questions: [{
-                    header: 'Permission Required',
-                    question: approval.question,
-                    options: approval.options.map(opt => ({
-                      label: opt.name
-                    }))
-                  }]
-                }
-              }
-            })
-          }
-        }
-
-        // Check status
-        const status = await adapter.getStatus(sessionId, config)
-        const session = this.sessions.get(sessionId)
-
-        console.log(`[AgentManager] Polling session ${sessionId}: adapter status=${status.type}, session.status=${session?.status}`)
-
-        // Check for errors first (higher priority than idle)
-        if (status.type === SessionStatusType.ERROR) {
-          // Check if it's an incompatible session error
-          if (status.message?.includes('INCOMPATIBLE_SESSION_ID')) {
-            console.warn('[AgentManager] Incompatible session detected during polling:', sessionId)
-
-            // Clear the session_id in the database
-            this.db.updateTask(config.taskId, { session_id: null })
-
-            // Emit event to show dialog
-            this.sendToRenderer('agent:incompatible-session', {
-              taskId: config.taskId,
-              agentId: config.agentId,
-              error: status.message.replace('INCOMPATIBLE_SESSION_ID: ', '')
-            })
-
-            // Stop polling by not scheduling next poll
-            return
-          }
-
-          // Client not found means session was already stopped — exit silently
-          if (status.message?.includes('Client not found')) {
-            console.log(`[AgentManager] Client not found for session ${sessionId}, stopping polling`)
-            return
-          }
-
-          // Regular error (e.g., rate limit) - send to UI and stop polling to allow recovery
-          this.sendToRenderer('agent:output', {
-            sessionId,
-            taskId: config.taskId,
-            type: 'message',
-            data: {
-              id: `error-${Date.now()}`,
-              role: 'system',
-              content: status.message || 'Unknown error',
-              partType: 'error'
-            }
-          })
-
-          if (session) {
-            session.status = 'error'
-            // Reset polling flag so it can be restarted on next message
-            session.pollingStarted = false
-
-            // Update task status to indicate error (but allow recovery)
-            this.sendToRenderer('agent:status', {
-              sessionId,
-              agentId: config.agentId,
-              taskId: config.taskId,
-              status: 'error'
-            })
-          }
-          // Stop polling - will be restarted when user sends a new message
-          return
-        } else if (status.type === SessionStatusType.IDLE && session) {
-          // Use transitionToIdle to extract output values and update status
-          console.log(`[AgentManager] Detected IDLE status for ${sessionId}, calling transitionToIdle`)
-          await this.transitionToIdle(sessionId, session)
-          // Stop polling - session is now idle
-          console.log(`[AgentManager] Stopping polling for idle session ${sessionId}`)
-          // Reset polling flag so it can be restarted on next message
-          session.pollingStarted = false
-          return
-        }
-      } catch (error: unknown) {
-        console.error('[AgentManager] Adapter polling error:', error)
+      } catch (error) {
+        console.error('[AgentManager] Polling coordinator error:', error)
+      } finally {
+        this.pollingInProgress = false
       }
 
-      // Schedule next poll (2 second interval like OpenCode)
-      const sess = this.sessions.get(currentSessionId)
-      if (sess) {
-        sess.pollTimer = setTimeout(poll, 2000)
+      // Schedule next tick if there are still active sessions
+      if (this.pollingEntries.size > 0) {
+        this.pollingTimer = setTimeout(tick, AgentManager.POLL_INTERVAL_MS)
+      } else {
+        this.pollingTimer = null
       }
     }
 
-    // Start polling after a short delay
-    const session = this.sessions.get(initialSessionId)
-    if (session) {
-      session.pollTimer = setTimeout(poll, 1000)
+    // Start after a short initial delay
+    this.pollingTimer = setTimeout(tick, 1000)
+    console.log('[AgentManager] Polling coordinator started')
+  }
+
+  /**
+   * Polls a single session for new messages and status changes.
+   * Extracted from the old per-session polling loop.
+   */
+  private async pollSingleSession(entry: PollingEntry): Promise<void> {
+    const { adapter, config } = entry
+
+    try {
+      // Resolve current session ID (might have changed due to re-keying)
+      let sessionId = entry.sessionId
+      const sessionByOldId = this.sessions.get(sessionId)
+      if (!sessionByOldId) {
+        // Session might have been re-keyed, find it by taskId
+        for (const [sid, sess] of this.sessions.entries()) {
+          if (sess.taskId === config.taskId) {
+            sessionId = sid
+            // Re-key the polling entry
+            this.pollingEntries.delete(entry.sessionId)
+            entry.sessionId = sid
+            this.pollingEntries.set(sid, entry)
+            break
+          }
+        }
+      }
+
+      // Early exit if session was destroyed (e.g. by stopSession)
+      const activeSession = this.sessions.get(sessionId)
+      if (!activeSession) {
+        console.log(`[AgentManager] Session ${sessionId} no longer exists, removing from polling`)
+        this.stopAdapterPolling(entry.sessionId)
+        return
+      }
+
+      // Poll for new messages
+      const newParts = await adapter.pollMessages(
+        sessionId,
+        entry.seenMessageIds,
+        entry.seenPartIds,
+        entry.partContentLengths,
+        config
+      )
+
+      // Check if the real session ID has been provided by the adapter
+      const realSessionId = newParts.find(p => p.realSessionId)?.realSessionId
+      if (realSessionId && realSessionId !== sessionId) {
+        console.log(`[AgentManager] Session ID updated: ${sessionId} -> ${realSessionId}`)
+
+        // Update database with real session ID (use async worker to avoid blocking event loop)
+        if (this.dbAsync) {
+          this.dbAsync.updateTask(config.taskId, { session_id: realSessionId })
+        } else {
+          this.db.updateTask(config.taskId, { session_id: realSessionId })
+        }
+
+        // Re-key the sessions map
+        const session = this.sessions.get(sessionId)
+        if (session) {
+          this.sessions.delete(sessionId)
+          this.sessions.set(realSessionId, session)
+
+          // Re-key the polling entry
+          this.pollingEntries.delete(sessionId)
+          entry.sessionId = realSessionId
+          this.pollingEntries.set(realSessionId, entry)
+
+          sessionId = realSessionId
+        }
+      }
+
+      // Forward to renderer (skip user messages - already added when sent)
+      for (const part of newParts) {
+        if (part.role === 'user') {
+          console.log(`[AgentManager] Skipping user message from adapter: id=${part.id}, content=${(part.text || part.content || '').slice(0, 200)}`)
+          continue
+        }
+
+        console.log(`[AgentManager] Sending to UI: id=${part.id}, partType=${part.type}, update=${part.update}, contentLength=${(part.content || part.text || '').length}`)
+        this.sendToRenderer('agent:output', {
+          sessionId,
+          taskId: config.taskId,
+          type: 'message',
+          data: {
+            id: part.id,
+            role: part.role || 'assistant',
+            content: part.content || part.text || '',
+            partType: part.type,
+            tool: part.tool,
+            update: part.update
+          }
+        })
+      }
+
+      // Check for pending approval (ACP adapters only)
+      if ('getPendingApproval' in adapter && typeof adapter.getPendingApproval === 'function') {
+        const approval = (adapter as unknown as AcpAdapter).getPendingApproval(sessionId)
+        if (approval && !entry.seenPartIds.has(`approval-${approval.toolCallId}`)) {
+          entry.seenPartIds.add(`approval-${approval.toolCallId}`)
+
+          this.sendToRenderer('agent:output', {
+            sessionId,
+            taskId: config.taskId,
+            type: 'message',
+            data: {
+              id: `question-${approval.toolCallId}`,
+              role: 'assistant',
+              content: approval.question,
+              partType: 'question',
+              tool: {
+                name: 'permission',
+                questions: [{
+                  header: 'Permission Required',
+                  question: approval.question,
+                  options: approval.options.map(opt => ({
+                    label: opt.name
+                  }))
+                }]
+              }
+            }
+          })
+        }
+      }
+
+      // Check status
+      const status = await adapter.getStatus(sessionId, config)
+      const session = this.sessions.get(sessionId)
+
+      console.log(`[AgentManager] Polling session ${sessionId}: adapter status=${status.type}, session.status=${session?.status}`)
+
+      // Check for errors first (higher priority than idle)
+      if (status.type === SessionStatusType.ERROR) {
+        if (status.message?.includes('INCOMPATIBLE_SESSION_ID')) {
+          console.warn('[AgentManager] Incompatible session detected during polling:', sessionId)
+          if (this.dbAsync) {
+            this.dbAsync.updateTask(config.taskId, { session_id: null })
+          } else {
+            this.db.updateTask(config.taskId, { session_id: null })
+          }
+          this.sendToRenderer('agent:incompatible-session', {
+            taskId: config.taskId,
+            agentId: config.agentId,
+            error: status.message.replace('INCOMPATIBLE_SESSION_ID: ', '')
+          })
+          this.stopAdapterPolling(sessionId)
+          return
+        }
+
+        if (status.message?.includes('Client not found')) {
+          console.log(`[AgentManager] Client not found for session ${sessionId}, stopping polling`)
+          this.stopAdapterPolling(sessionId)
+          return
+        }
+
+        // Regular error (e.g., rate limit)
+        this.sendToRenderer('agent:output', {
+          sessionId,
+          taskId: config.taskId,
+          type: 'message',
+          data: {
+            id: `error-${Date.now()}`,
+            role: 'system',
+            content: status.message || 'Unknown error',
+            partType: 'error'
+          }
+        })
+
+        if (session) {
+          session.status = 'error'
+          session.pollingStarted = false
+          this.sendToRenderer('agent:status', {
+            sessionId,
+            agentId: config.agentId,
+            taskId: config.taskId,
+            status: 'error'
+          })
+        }
+        this.stopAdapterPolling(sessionId)
+        return
+      } else if (status.type === SessionStatusType.IDLE && session) {
+        console.log(`[AgentManager] Detected IDLE status for ${sessionId}, calling transitionToIdle`)
+        await this.transitionToIdle(sessionId, session)
+        console.log(`[AgentManager] Stopping polling for idle session ${sessionId}`)
+        session.pollingStarted = false
+        this.stopAdapterPolling(sessionId)
+        return
+      }
+    } catch (error: unknown) {
+      console.error('[AgentManager] Adapter polling error:', error)
     }
   }
 
@@ -1474,17 +1570,24 @@ export class AgentManager extends EventEmitter {
     session.status = 'idle'
     console.log(`[AgentManager] Session ${sessionId} → idle`)
 
+    // Helper: use async worker DB when available, fall back to sync
+    const dbGetTask = (id: string) =>
+      this.dbAsync ? this.dbAsync.getTask(id) : Promise.resolve(this.db.getTask(id))
+    const dbUpdateTask = (id: string, data: Record<string, unknown>) =>
+      this.dbAsync ? this.dbAsync.updateTask(id, data) : Promise.resolve(this.db.updateTask(id, data))
+
     // In learning mode, skip output extraction, task status, and renderer notification
     if (session.learningMode) return
 
     // In triage mode, set status back to NotStarted (now with agent_id assigned) and return early
     if (session.isTriageSession) {
       console.log(`[AgentManager] Triage session completed for task ${session.taskId}, reverting to NotStarted`)
-      this.db.updateTask(session.taskId, { status: TaskStatus.NotStarted, session_id: null })
+      await dbUpdateTask(session.taskId, { status: TaskStatus.NotStarted, session_id: null })
 
+      const triageTask = await dbGetTask(session.taskId)
       this.sendToRenderer('task:updated', {
         taskId: session.taskId,
-        updates: this.db.getTask(session.taskId) || { status: TaskStatus.NotStarted, session_id: null }
+        updates: triageTask || { status: TaskStatus.NotStarted, session_id: null }
       })
 
       this.sendToRenderer('agent:status', {
@@ -1497,7 +1600,7 @@ export class AgentManager extends EventEmitter {
     }
 
     // Check if task exists (e.g., orchestrator-session doesn't have a real task)
-    const task = this.db.getTask(session.taskId)
+    const task = await dbGetTask(session.taskId)
     if (!task) {
       console.log(`[AgentManager] No task found for ${session.taskId}, sending idle status only`)
       this.sendToRenderer('agent:status', {
@@ -1518,7 +1621,7 @@ export class AgentManager extends EventEmitter {
       }
 
       // Mark task as completed
-      this.db.updateTask(session.taskId, { status: TaskStatus.Completed })
+      await dbUpdateTask(session.taskId, { status: TaskStatus.Completed })
 
       this.sendToRenderer('task:updated', {
         taskId: session.taskId,
@@ -1540,7 +1643,7 @@ export class AgentManager extends EventEmitter {
 
     // Check again if task is still in a state where we should update it
     // (frontend might have already completed it during feedback flow)
-    const taskAfterExtract = this.db.getTask(session.taskId)
+    const taskAfterExtract = await dbGetTask(session.taskId)
     if (taskAfterExtract?.status === TaskStatus.AgentLearning || taskAfterExtract?.status === TaskStatus.Completed) {
       console.log(`[AgentManager] Task already in final state (${taskAfterExtract.status}), skipping status update`)
       this.sendToRenderer('agent:status', {
@@ -1552,10 +1655,10 @@ export class AgentManager extends EventEmitter {
     // Update task status to ready_for_review (only if task exists)
     if (task) {
       console.log(`[AgentManager] Updating task ${session.taskId} status to ReadyForReview`)
-      this.db.updateTask(session.taskId, { status: TaskStatus.ReadyForReview })
+      await dbUpdateTask(session.taskId, { status: TaskStatus.ReadyForReview })
 
       // Get updated task with output fields and notify renderer
-      const updatedTask = this.db.getTask(session.taskId)
+      const updatedTask = await dbGetTask(session.taskId)
       this.sendToRenderer('task:updated', {
         taskId: session.taskId,
         updates: {
@@ -1579,11 +1682,8 @@ export class AgentManager extends EventEmitter {
 
     console.log(`[AgentManager] Aborting session ${sessionId}`)
 
-    // Stop polling timer
-    if (session.pollTimer) {
-      clearTimeout(session.pollTimer)
-      session.pollTimer = undefined
-    }
+    // Stop polling for this session
+    this.stopAdapterPolling(sessionId)
 
     // Abort via adapter
     const adapter = this.getAdapter(session.agentId)
@@ -1619,10 +1719,8 @@ export class AgentManager extends EventEmitter {
 
     console.log(`[AgentManager] Destroying session ${sessionId} (resetTaskStatus=${resetTaskStatus})`)
 
-    if (session.pollTimer) {
-      clearTimeout(session.pollTimer)
-      session.pollTimer = undefined
-    }
+    // Stop polling for this session
+    this.stopAdapterPolling(sessionId)
 
     // Destroy via adapter
     const adapter = this.getAdapter(session.agentId)
@@ -1873,6 +1971,14 @@ export class AgentManager extends EventEmitter {
 
   stopAllSessions(): void {
     console.log(`[AgentManager] Stopping all ${this.sessions.size} sessions`)
+
+    // Stop the centralized polling coordinator first
+    if (this.pollingTimer) {
+      clearTimeout(this.pollingTimer)
+      this.pollingTimer = null
+    }
+    this.pollingEntries.clear()
+
     for (const sessionId of [...this.sessions.keys()]) {
       // Don't reset task status during app shutdown - preserve current status
       this.stopSession(sessionId, false)
