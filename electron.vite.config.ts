@@ -11,7 +11,8 @@ export default defineConfig({
         external: ['better-sqlite3'],
         input: {
           index: resolve(__dirname, 'src/main/index.ts'),
-          'mcp-servers/task-management-mcp': resolve(__dirname, 'src/main/mcp-servers/task-management-mcp.ts')
+          'mcp-servers/task-management-mcp': resolve(__dirname, 'src/main/mcp-servers/task-management-mcp.ts'),
+          'database-worker': resolve(__dirname, 'src/main/database-worker.ts')
         },
         output: {
           entryFileNames: '[name].js'
