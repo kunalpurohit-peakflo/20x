@@ -368,6 +368,12 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
                 toolObj.questions = questions
               }
 
+              // Detect ExitPlanMode → set planreview type
+              if (toolName === 'ExitPlanMode') {
+                partType = 'planreview'
+                toolObj.title = 'Plan Review'
+              }
+
               message.parts.push({ type: partType as MessagePartType, tool: toolObj })
               if (contentPart.id) toolUseParts.set(contentPart.id, toolObj)
             } else if (contentPart.type === 'tool_result' && contentPart.tool_use_id) {
@@ -375,8 +381,11 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
               const matchingTool = toolUseParts.get(contentPart.tool_use_id)
               if (matchingTool) {
                 matchingTool.status = 'success'
+                // Plan content should not be truncated (cap at 50K for safety)
+                const isPlan = matchingTool.name === 'ExitPlanMode'
                 matchingTool.output = contentPart.content
-                  ? String(contentPart.content).slice(0, 2000) : undefined
+                  ? (isPlan ? String(contentPart.content).slice(0, 50000) : String(contentPart.content).slice(0, 2000))
+                  : undefined
               }
               // Don't push a separate part — result is merged into tool_use
             }
@@ -1072,6 +1081,18 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
             continue
           }
 
+          // Detect ExitPlanMode → render as plan review
+          if (toolName === 'ExitPlanMode') {
+            partContentLengths.set(toolPartId, `pending:${toolName}`)
+            parts.push({
+              id: toolPartId,
+              type: 'planreview' as MessagePartType,
+              content: 'Plan Review',
+              tool: { name: toolName, status: 'pending', title: 'Plan Review', input },
+            })
+            continue
+          }
+
           // Regular tool call
           partContentLengths.set(toolPartId, `pending:${toolName}`)
           parts.push({
@@ -1114,17 +1135,23 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
 
           // Check if we already sent the pending tool call
           const previousContent = partContentLengths.get(toolPartId)
+          // Plan content should not be truncated (cap at 50K for safety)
+          const isPlanReview = previousContent?.endsWith(':ExitPlanMode')
+          const outputContent = isPlanReview
+            ? resultContent.slice(0, 50000)
+            : resultContent.slice(0, 2000)
+
           if (previousContent) {
             // Update the existing tool part - mark as completed
             partContentLengths.set(toolPartId, `success:${resultContent.length}`)
             parts.push({
               id: toolPartId,
-              type: MessagePartType.TOOL,
-              content: `Tool completed`,
+              type: isPlanReview ? ('planreview' as MessagePartType) : MessagePartType.TOOL,
+              content: isPlanReview ? 'Plan Review' : `Tool completed`,
               tool: {
                 name: previousContent.split(':')[1] || 'tool',
                 status: 'success',
-                output: resultContent.slice(0, 2000),
+                output: outputContent,
               },
               update: true, // Mark as update to existing message
             })
@@ -1135,12 +1162,12 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
               partContentLengths.set(toolPartId, `success:${resultContent.length}`)
               parts.push({
                 id: toolPartId,
-                type: MessagePartType.TOOL,
-                content: `Tool result`,
+                type: isPlanReview ? ('planreview' as MessagePartType) : MessagePartType.TOOL,
+                content: isPlanReview ? 'Plan Review' : `Tool result`,
                 tool: {
-                  name: 'tool',
+                  name: isPlanReview ? 'ExitPlanMode' : 'tool',
                   status: 'success',
-                  output: resultContent.slice(0, 2000),
+                  output: outputContent,
                 },
               })
             }
@@ -1151,15 +1178,19 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
       const partId = `tool-${msgWithProps.tool_use_id || Date.now()}`
       const toolName = msgWithProps.tool_name || 'unknown'
       const status = msgWithProps.status || 'unknown'
-      const output = msgWithProps.output ? String(msgWithProps.output).slice(0, 2000) : undefined
+      const isPlanReview = toolName === 'ExitPlanMode'
+      const output = msgWithProps.output
+        ? (isPlanReview ? String(msgWithProps.output).slice(0, 50000) : String(msgWithProps.output).slice(0, 2000))
+        : undefined
+      const partType = isPlanReview ? ('planreview' as MessagePartType) : MessagePartType.TOOL
 
       if (seenPartIds.has(partId)) {
         // Tool_use was already emitted — send an UPDATE to merge the result into it
         partContentLengths.set(partId, `${status}:${output?.length || 0}`)
         parts.push({
           id: partId,
-          type: MessagePartType.TOOL,
-          content: `${toolName} — ${status}`,
+          type: partType,
+          content: isPlanReview ? 'Plan Review' : `${toolName} — ${status}`,
           tool: { name: toolName, status, output },
           update: true,
         })
@@ -1169,8 +1200,8 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
         partContentLengths.set(partId, `${status}:${output?.length || 0}`)
         parts.push({
           id: partId,
-          type: MessagePartType.TOOL,
-          content: `${toolName} — ${status}`,
+          type: partType,
+          content: isPlanReview ? 'Plan Review' : `${toolName} — ${status}`,
           tool: { name: toolName, status, output },
         })
       }
@@ -1245,6 +1276,8 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
         return 'Todo List'
       case 'AskUserQuestion':
         return 'Question'
+      case 'ExitPlanMode':
+        return 'Plan Review'
       default:
         return ''
     }

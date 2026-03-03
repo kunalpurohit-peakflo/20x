@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState, useMemo, useCallback } from 'react'
-import { StopCircle, Loader2, Terminal, Send, ChevronRight, ChevronDown, Wrench, AlertTriangle, CheckCircle2, Circle, Clock, RotateCcw, Code2, Eye, ListTodo } from 'lucide-react'
+import { StopCircle, Loader2, Terminal, Send, ChevronRight, ChevronDown, Wrench, AlertTriangle, CheckCircle2, Circle, Clock, RotateCcw, Code2, Eye, ListTodo, FileText } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import { Markdown } from '@/components/ui/Markdown'
 import type { AgentMessage } from '@/hooks/use-agent-session'
@@ -219,6 +219,46 @@ function TodoWriteMessage({ message }: { message: AgentMessage }) {
   )
 }
 
+function PlanReviewMessage({ message }: { message: AgentMessage }) {
+  const [expanded, setExpanded] = useState(true)
+  const tool = message.tool
+  const planContent = tool?.output || ''
+  const isPending = tool?.status === 'pending'
+
+  return (
+    <div className="rounded-md bg-[#161b22] border border-blue-500/30 overflow-hidden">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-2 px-4 py-2.5 border-b border-border/30 hover:bg-white/5 transition-colors"
+      >
+        {expanded
+          ? <ChevronDown className="h-3.5 w-3.5 text-blue-400 shrink-0" />
+          : <ChevronRight className="h-3.5 w-3.5 text-blue-400 shrink-0" />
+        }
+        <FileText className="h-3.5 w-3.5 text-blue-400 shrink-0" />
+        <span className="text-[10px] text-blue-400 font-medium uppercase tracking-wide">Plan</span>
+        {isPending && (
+          <Loader2 className="h-3 w-3 text-blue-400 animate-spin ml-auto" />
+        )}
+      </button>
+      {expanded && (
+        <div className="px-4 py-3 max-h-[60vh] overflow-y-auto">
+          {planContent ? (
+            <Markdown size="xs">{planContent}</Markdown>
+          ) : (
+            <span className="text-xs text-muted-foreground italic">
+              {isPending ? 'Loading plan...' : 'No plan content'}
+            </span>
+          )}
+        </div>
+      )}
+      <div className="px-4 pb-2">
+        <span className="text-[10px] text-muted-foreground">{message.timestamp.toLocaleTimeString()}</span>
+      </div>
+    </div>
+  )
+}
+
 function ToolCallMessage({ message }: { message: AgentMessage }) {
   const [expanded, setExpanded] = useState(false)
   const tool = message.tool!
@@ -277,6 +317,10 @@ function MessageBubble({ message, onAnswer, viewMode }: { message: AgentMessage;
 
   if (message.partType === 'todowrite' && message.tool?.todos) {
     return <TodoWriteMessage message={message} />
+  }
+
+  if (message.partType === 'planreview') {
+    return <PlanReviewMessage message={message} />
   }
 
   if (message.partType === 'tool' && message.tool) {
