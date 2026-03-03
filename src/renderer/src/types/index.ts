@@ -83,6 +83,17 @@ export interface McpServerTool {
   description: string
 }
 
+export interface McpOAuthMetadata {
+  client_id: string
+  client_secret: string
+  authorization_endpoint: string
+  token_endpoint: string
+  scopes?: string
+  issuer?: string
+  registration_endpoint?: string
+  revocation_endpoint?: string
+}
+
 export interface McpServer {
   id: string
   name: string
@@ -93,6 +104,7 @@ export interface McpServer {
   headers: Record<string, string>
   environment: Record<string, string>
   tools: McpServerTool[]
+  oauth_metadata: McpOAuthMetadata | Record<string, never>
   created_at: string
   updated_at: string
 }
@@ -110,6 +122,7 @@ export interface CreateMcpServerDTO {
   url?: string
   headers?: Record<string, string>
   environment?: Record<string, string>
+  oauth_metadata?: McpOAuthMetadata
 }
 
 export interface UpdateMcpServerDTO {
@@ -120,6 +133,7 @@ export interface UpdateMcpServerDTO {
   url?: string
   headers?: Record<string, string>
   environment?: Record<string, string>
+  oauth_metadata?: McpOAuthMetadata
 }
 
 export interface AgentConfig {

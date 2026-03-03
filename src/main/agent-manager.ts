@@ -64,6 +64,7 @@ export class AgentManager extends EventEmitter {
   private adapters: Map<string, CodingAgentAdapter> = new Map()  // Adapter instances
   private worktreeManager: WorktreeManager | null = null
   private githubManager: GitHubManager | null = null
+  private oauthManager: import('./oauth/oauth-manager').OAuthManager | null = null
   private externalListeners: Array<(channel: string, data: unknown) => void> = []
 
   constructor(db: DatabaseManager) {
@@ -101,6 +102,10 @@ export class AgentManager extends EventEmitter {
   setManagers(githubManager: GitHubManager, worktreeManager: WorktreeManager): void {
     this.githubManager = githubManager
     this.worktreeManager = worktreeManager
+  }
+
+  setOAuthManager(manager: import('./oauth/oauth-manager').OAuthManager): void {
+    this.oauthManager = manager
   }
 
   /**
@@ -223,10 +228,19 @@ export class AgentManager extends EventEmitter {
           env
         }
       } else if (mcpServer.type === 'remote') {
+        // Inject OAuth Bearer token if the server has one
+        let finalHeaders = { ...mcpServer.headers }
+        if (this.oauthManager && mcpServer.oauth_metadata && 'client_id' in mcpServer.oauth_metadata) {
+          const token = await this.oauthManager.getValidMcpServerToken(mcpServer.id)
+          if (token) {
+            finalHeaders = { ...finalHeaders, Authorization: `Bearer ${token}` }
+          }
+        }
+
         result[mcpServer.name] = {
           type: 'http',
           url: mcpServer.url,
-          headers: mcpServer.headers
+          headers: finalHeaders
         }
       }
     }

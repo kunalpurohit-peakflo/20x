@@ -9,6 +9,11 @@ export interface McpToolCallResult {
 
 export class McpToolCaller {
   private sessions = new Map<string, LocalMcpSession>()
+  private oauthManager?: import('./oauth/oauth-manager').OAuthManager
+
+  setOAuthManager(manager: import('./oauth/oauth-manager').OAuthManager): void {
+    this.oauthManager = manager
+  }
 
   async callTool(
     server: McpServerRecord,
@@ -257,6 +262,14 @@ export class McpToolCaller {
         'Content-Type': 'application/json',
         Accept: 'application/json, text/event-stream',
         ...server.headers
+      }
+
+      // Inject OAuth Bearer token if the server has an OAuth token
+      if (this.oauthManager) {
+        const token = await this.oauthManager.getValidMcpServerToken(server.id)
+        if (token) {
+          headers['Authorization'] = `Bearer ${token}`
+        }
       }
 
       // Initialize

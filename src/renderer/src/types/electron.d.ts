@@ -125,6 +125,10 @@ interface ElectronAPI {
     update: (id: string, data: UpdateMcpServerDTO) => Promise<McpServer | undefined>
     delete: (id: string) => Promise<boolean>
     testConnection: (data: { id?: string; name: string; type?: 'local' | 'remote'; command?: string; args?: string[]; url?: string; headers?: Record<string, string>; environment?: Record<string, string> }) => Promise<McpTestResult>
+    startOAuthFlow: (mcpServerId: string) => Promise<void>
+    getOAuthStatus: (mcpServerId: string) => Promise<{ connected: boolean; expiresAt?: string }>
+    revokeOAuthToken: (mcpServerId: string) => Promise<void>
+    discoverOAuthMetadata: (serverUrl: string) => Promise<Record<string, string> | null>
   }
   agents: {
     getAll: () => Promise<Agent[]>

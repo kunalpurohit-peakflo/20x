@@ -74,7 +74,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('mcp:update', id, data),
     delete: (id: string): Promise<boolean> => ipcRenderer.invoke('mcp:delete', id),
     testConnection: (data: { id?: string; name: string; type?: string; command?: string; args?: string[]; url?: string; headers?: Record<string, string>; environment?: Record<string, string> }): Promise<{ status: string; error?: string; toolCount?: number; tools?: { name: string; description: string }[] }> =>
-      ipcRenderer.invoke('mcp:testConnection', data)
+      ipcRenderer.invoke('mcp:testConnection', data),
+    startOAuthFlow: (mcpServerId: string): Promise<void> =>
+      ipcRenderer.invoke('mcp:startOAuthFlow', mcpServerId),
+    getOAuthStatus: (mcpServerId: string): Promise<{ connected: boolean; expiresAt?: string }> =>
+      ipcRenderer.invoke('mcp:getOAuthStatus', mcpServerId),
+    revokeOAuthToken: (mcpServerId: string): Promise<void> =>
+      ipcRenderer.invoke('mcp:revokeOAuthToken', mcpServerId),
+    discoverOAuthMetadata: (serverUrl: string): Promise<Record<string, string> | null> =>
+      ipcRenderer.invoke('mcp:discoverOAuthMetadata', serverUrl)
   },
   agentSession: {
     start: (agentId: string, taskId: string, workspaceDir?: string, skipInitialPrompt?: boolean): Promise<{ sessionId: string }> =>

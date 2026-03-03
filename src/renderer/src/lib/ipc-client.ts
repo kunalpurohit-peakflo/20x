@@ -46,6 +46,22 @@ export const mcpServerApi = {
 
   testConnection: (data: { id?: string; name: string; type?: 'local' | 'remote'; command?: string; args?: string[]; url?: string; headers?: Record<string, string>; environment?: Record<string, string> }): Promise<McpTestResult> => {
     return window.electronAPI.mcpServers.testConnection(data)
+  },
+
+  startOAuthFlow: (mcpServerId: string): Promise<void> => {
+    return window.electronAPI.mcpServers.startOAuthFlow(mcpServerId)
+  },
+
+  getOAuthStatus: (mcpServerId: string): Promise<{ connected: boolean; expiresAt?: string }> => {
+    return window.electronAPI.mcpServers.getOAuthStatus(mcpServerId)
+  },
+
+  revokeOAuthToken: (mcpServerId: string): Promise<void> => {
+    return window.electronAPI.mcpServers.revokeOAuthToken(mcpServerId)
+  },
+
+  discoverOAuthMetadata: (serverUrl: string): Promise<Record<string, string> | null> => {
+    return window.electronAPI.mcpServers.discoverOAuthMetadata(serverUrl)
   }
 }
 

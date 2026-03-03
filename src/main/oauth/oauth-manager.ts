@@ -11,7 +11,8 @@ import { shell } from 'electron'
 import type { DatabaseManager } from '../database'
 import { LocalOAuthServer } from './local-oauth-server'
 import type { OAuthProvider } from './oauth-provider'
-import { LinearProvider, HubSpotProvider } from './providers'
+import { LinearProvider, HubSpotProvider, McpOAuthProvider } from './providers'
+import type { McpOAuthMetadata } from '../database'
 
 interface PendingFlow {
   verifier: string
@@ -32,6 +33,7 @@ export class OAuthManager {
     // Register available providers
     this.registerProvider(new LinearProvider())
     this.registerProvider(new HubSpotProvider())
+    this.registerProvider(new McpOAuthProvider())
 
     this.startRefreshScheduler()
   }
@@ -180,7 +182,17 @@ export class OAuthManager {
       throw new Error('Token not found')
     }
 
-    // Get task source to retrieve client credentials
+    // For MCP server tokens, get credentials from the MCP server's oauth_metadata
+    if (tokenRecord.mcp_server_id) {
+      await this.refreshMcpServerToken(tokenRecord)
+      return
+    }
+
+    // For task source tokens, get credentials from task source config
+    if (!tokenRecord.source_id) {
+      throw new Error('Token has neither source_id nor mcp_server_id')
+    }
+
     const taskSource = this.db.getTaskSource(tokenRecord.source_id)
     if (!taskSource) {
       throw new Error('Task source not found')
@@ -291,6 +303,163 @@ export class OAuthManager {
     } finally {
       // Always stop the server
       server.stop()
+    }
+  }
+
+  // ── MCP Server OAuth ──────────────────────────────────────
+
+  /**
+   * Start OAuth flow for an MCP server using its stored oauth_metadata.
+   * Opens a localhost server, launches browser for authorization, and stores the token.
+   */
+  async startMcpServerOAuthFlow(mcpServerId: string): Promise<void> {
+    const mcpServer = this.db.getMcpServer(mcpServerId)
+    if (!mcpServer) throw new Error(`MCP server not found: ${mcpServerId}`)
+
+    const metadata = mcpServer.oauth_metadata as McpOAuthMetadata | undefined
+    if (!metadata?.client_id || !metadata?.authorization_endpoint || !metadata?.token_endpoint) {
+      throw new Error('MCP server has incomplete OAuth metadata. Configure client_id, authorization_endpoint, and token_endpoint.')
+    }
+
+    const provider = this.getProvider('mcp-server')
+    const config: Record<string, unknown> = { ...metadata }
+    const server = new LocalOAuthServer()
+
+    try {
+      const redirectUri = await server.start()
+      console.log(`[OAuthManager] MCP OAuth: local server started at ${redirectUri}`)
+
+      const { verifier, challenge } = this.generatePKCE()
+      const state = createId()
+
+      const authUrl = provider.generateAuthUrl(config, state, challenge, redirectUri)
+
+      console.log(`[OAuthManager] MCP OAuth: opening auth URL in browser`)
+      await shell.openExternal(authUrl)
+
+      console.log(`[OAuthManager] MCP OAuth: waiting for callback...`)
+      const callback = await server.waitForCallback()
+
+      if (callback.state !== state) {
+        throw new Error('OAuth state mismatch - possible CSRF attack')
+      }
+
+      console.log(`[OAuthManager] MCP OAuth: exchanging code for token`)
+      const data = await provider.exchangeCode(callback.code, verifier, config, redirectUri)
+
+      // Delete existing token for this MCP server if any
+      this.db.deleteOAuthTokenByMcpServer(mcpServerId)
+
+      // Store encrypted token linked to MCP server
+      this.db.createOAuthToken({
+        provider: 'mcp-server',
+        mcp_server_id: mcpServerId,
+        access_token: data.access_token,
+        refresh_token: data.refresh_token || null,
+        expires_in: data.expires_in,
+        scope: data.scope || null
+      })
+
+      console.log(`[OAuthManager] MCP OAuth flow completed successfully for server: ${mcpServer.name}`)
+    } finally {
+      server.stop()
+    }
+  }
+
+  /**
+   * Get a valid access token for an MCP server, refreshing if needed.
+   */
+  async getValidMcpServerToken(mcpServerId: string): Promise<string | null> {
+    const tokenRecord = this.db.getOAuthTokenByMcpServer(mcpServerId)
+    if (!tokenRecord) return null
+
+    const expiresAt = new Date(tokenRecord.expires_at).getTime()
+    const nowPlus5Min = Date.now() + 5 * 60 * 1000
+
+    if (expiresAt < nowPlus5Min) {
+      try {
+        await this.refreshMcpServerToken(tokenRecord)
+        const refreshed = this.db.getOAuthTokenByMcpServer(mcpServerId)
+        return refreshed?.access_token || null
+      } catch (error) {
+        console.error(`[OAuthManager] Failed to refresh MCP server token for ${mcpServerId}:`, error)
+        return null
+      }
+    }
+
+    return tokenRecord.access_token
+  }
+
+  /**
+   * Refresh an MCP server's OAuth token using credentials from oauth_metadata.
+   */
+  private async refreshMcpServerToken(tokenRecord: import('../database').OAuthTokenRecord): Promise<void> {
+    if (!tokenRecord.refresh_token) throw new Error('No refresh token available')
+    if (!tokenRecord.mcp_server_id) throw new Error('No MCP server ID on token')
+
+    const mcpServer = this.db.getMcpServer(tokenRecord.mcp_server_id)
+    if (!mcpServer) throw new Error('MCP server not found')
+
+    const metadata = mcpServer.oauth_metadata as McpOAuthMetadata | undefined
+    if (!metadata?.client_id || !metadata?.token_endpoint) {
+      this.db.deleteOAuthToken(tokenRecord.id)
+      throw new Error('MCP server OAuth metadata incomplete. Please re-authenticate.')
+    }
+
+    const provider = this.getProvider('mcp-server')
+    const data = await provider.refreshToken(
+      tokenRecord.refresh_token,
+      metadata.client_id,
+      metadata.client_secret || '',
+      metadata.token_endpoint
+    )
+
+    this.db.updateOAuthToken(
+      tokenRecord.id,
+      data.access_token,
+      data.refresh_token || tokenRecord.refresh_token,
+      data.expires_in
+    )
+  }
+
+  /**
+   * Revoke OAuth token for an MCP server.
+   */
+  async revokeMcpServerToken(mcpServerId: string): Promise<void> {
+    this.db.deleteOAuthTokenByMcpServer(mcpServerId)
+  }
+
+  /**
+   * Check if an MCP server has a valid OAuth token.
+   */
+  getMcpServerOAuthStatus(mcpServerId: string): { connected: boolean; expiresAt?: string } {
+    const token = this.db.getOAuthTokenByMcpServer(mcpServerId)
+    if (!token) return { connected: false }
+    return { connected: true, expiresAt: token.expires_at }
+  }
+
+  /**
+   * Discover OAuth metadata from an MCP server URL using the MCP spec.
+   * Fetches {origin}/.well-known/oauth-authorization-server
+   */
+  static async discoverOAuthMetadata(serverUrl: string): Promise<Partial<McpOAuthMetadata> | null> {
+    try {
+      const origin = new URL(serverUrl).origin
+      const wellKnownUrl = `${origin}/.well-known/oauth-authorization-server`
+      const response = await fetch(wellKnownUrl, {
+        signal: AbortSignal.timeout(10000)
+      })
+      if (!response.ok) return null
+      const data = await response.json() as Record<string, string>
+      return {
+        authorization_endpoint: data.authorization_endpoint,
+        token_endpoint: data.token_endpoint,
+        issuer: data.issuer,
+        registration_endpoint: data.registration_endpoint,
+        revocation_endpoint: data.revocation_endpoint
+      }
+    } catch {
+      return null
     }
   }
 

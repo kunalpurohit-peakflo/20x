@@ -243,6 +243,10 @@ app.whenReady().then(async () => {
 
   oauthManager = new OAuthManager(db)
 
+  // Wire OAuth manager into McpToolCaller and AgentManager for automatic token injection
+  mcpToolCaller.setOAuthManager(oauthManager)
+  agentManager.setOAuthManager(oauthManager)
+
   pluginRegistry = new PluginRegistry()
   pluginRegistry.register(new PeakfloPlugin())
   pluginRegistry.register(new LinearPlugin())

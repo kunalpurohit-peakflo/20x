@@ -55,6 +55,17 @@ export interface McpServerToolRecord {
   description: string
 }
 
+export interface McpOAuthMetadata {
+  client_id: string
+  client_secret: string
+  authorization_endpoint: string
+  token_endpoint: string
+  scopes?: string
+  issuer?: string
+  registration_endpoint?: string
+  revocation_endpoint?: string
+}
+
 export interface McpServerRow {
   id: string
   name: string
@@ -65,6 +76,7 @@ export interface McpServerRow {
   headers: string
   environment: string
   tools: string
+  oauth_metadata: string
   created_at: string
   updated_at: string
 }
@@ -79,6 +91,7 @@ export interface McpServerRecord {
   headers: Record<string, string>
   environment: Record<string, string>
   tools: McpServerToolRecord[]
+  oauth_metadata: McpOAuthMetadata | Record<string, never>
   created_at: string
   updated_at: string
 }
@@ -91,6 +104,7 @@ export interface CreateMcpServerData {
   url?: string
   headers?: Record<string, string>
   environment?: Record<string, string>
+  oauth_metadata?: McpOAuthMetadata
 }
 
 export interface UpdateMcpServerData {
@@ -101,6 +115,7 @@ export interface UpdateMcpServerData {
   url?: string
   headers?: Record<string, string>
   environment?: Record<string, string>
+  oauth_metadata?: McpOAuthMetadata
 }
 
 export interface CreateAgentData {
@@ -403,7 +418,8 @@ function deserializeMcpServer(row: McpServerRow): McpServerRecord {
     url: row.url ?? '',
     headers: JSON.parse(row.headers || '{}') as Record<string, string>,
     environment: JSON.parse(row.environment || '{}') as Record<string, string>,
-    tools: JSON.parse(row.tools || '[]') as McpServerToolRecord[]
+    tools: JSON.parse(row.tools || '[]') as McpServerToolRecord[],
+    oauth_metadata: JSON.parse(row.oauth_metadata || '{}') as McpOAuthMetadata | Record<string, never>
   }
 }
 
@@ -511,7 +527,8 @@ export interface UpdateSecretData {
 export interface OAuthTokenRow {
   id: string
   provider: string
-  source_id: string
+  source_id: string | null
+  mcp_server_id: string | null
   access_token: Buffer
   refresh_token: Buffer | null
   expires_at: string
@@ -524,7 +541,8 @@ export interface OAuthTokenRow {
 export interface OAuthTokenRecord {
   id: string
   provider: string
-  source_id: string
+  source_id: string | null
+  mcp_server_id: string | null
   access_token: string
   refresh_token: string | null
   expires_at: string
@@ -536,7 +554,8 @@ export interface OAuthTokenRecord {
 
 export interface CreateOAuthTokenData {
   provider: string
-  source_id: string
+  source_id?: string | null
+  mcp_server_id?: string | null
   access_token: string
   refresh_token: string | null
   expires_in: number
@@ -606,6 +625,7 @@ function deserializeOAuthToken(row: OAuthTokenRow): OAuthTokenRecord {
     id: row.id,
     provider: row.provider,
     source_id: row.source_id,
+    mcp_server_id: row.mcp_server_id ?? null,
     access_token: accessToken,
     refresh_token: refreshToken,
     expires_at: row.expires_at,
@@ -618,7 +638,7 @@ function deserializeOAuthToken(row: OAuthTokenRow): OAuthTokenRecord {
 
 // Bump this whenever new migrations are added so returning users skip
 // the full migration check on startup.
-const SCHEMA_VERSION = 2
+const SCHEMA_VERSION = 3
 
 export class DatabaseManager {
   public db!: Database.Database
@@ -934,6 +954,45 @@ export class DatabaseManager {
     }
     if (!mcpColumnNames.has('tools')) {
       this.db.exec(`ALTER TABLE mcp_servers ADD COLUMN tools TEXT NOT NULL DEFAULT '[]'`)
+    }
+    if (!mcpColumnNames.has('oauth_metadata')) {
+      this.db.exec(`ALTER TABLE mcp_servers ADD COLUMN oauth_metadata TEXT NOT NULL DEFAULT '{}'`)
+    }
+
+    // Migrate oauth_tokens: make source_id nullable and add mcp_server_id
+    const oauthTokenColumns = this.db.pragma('table_info(oauth_tokens)') as { name: string; notnull: number }[]
+    const hasMcpServerIdOAuth = oauthTokenColumns.some(col => col.name === 'mcp_server_id')
+
+    if (oauthTokenColumns.length > 0 && !hasMcpServerIdOAuth) {
+      this.db.exec(`
+        PRAGMA foreign_keys = OFF;
+
+        CREATE TABLE IF NOT EXISTS oauth_tokens_new (
+          id TEXT PRIMARY KEY,
+          provider TEXT NOT NULL,
+          source_id TEXT REFERENCES task_sources(id) ON DELETE CASCADE,
+          mcp_server_id TEXT REFERENCES mcp_servers(id) ON DELETE CASCADE,
+          access_token BLOB NOT NULL,
+          refresh_token BLOB,
+          expires_at TEXT NOT NULL,
+          scope TEXT,
+          token_type TEXT NOT NULL DEFAULT 'Bearer',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        INSERT INTO oauth_tokens_new (id, provider, source_id, access_token, refresh_token, expires_at, scope, token_type, created_at, updated_at)
+        SELECT id, provider, source_id, access_token, refresh_token, expires_at, scope, token_type, created_at, updated_at FROM oauth_tokens;
+
+        DROP TABLE oauth_tokens;
+        ALTER TABLE oauth_tokens_new RENAME TO oauth_tokens;
+
+        CREATE INDEX IF NOT EXISTS idx_oauth_tokens_source ON oauth_tokens(source_id);
+        CREATE INDEX IF NOT EXISTS idx_oauth_tokens_provider ON oauth_tokens(provider);
+        CREATE INDEX IF NOT EXISTS idx_oauth_tokens_mcp_server ON oauth_tokens(mcp_server_id);
+
+        PRAGMA foreign_keys = ON;
+      `)
     }
 
     // Migrate inline MCP servers from agent configs → mcp_servers table
@@ -1590,7 +1649,7 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
     const now = new Date().toISOString()
     const type = data.type ?? 'local'
     this.db.prepare(
-      'INSERT INTO mcp_servers (id, name, type, command, args, url, headers, environment, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      'INSERT INTO mcp_servers (id, name, type, command, args, url, headers, environment, oauth_metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
     ).run(
       id,
       data.name,
@@ -1600,6 +1659,7 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
       data.url ?? null,
       JSON.stringify(data.headers ?? {}),
       JSON.stringify(data.environment ?? {}),
+      JSON.stringify(data.oauth_metadata ?? {}),
       now,
       now
     )
@@ -1617,6 +1677,7 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
     if (data.url !== undefined) { setClauses.push('url = ?'); values.push(data.url || null) }
     if (data.headers !== undefined) { setClauses.push('headers = ?'); values.push(JSON.stringify(data.headers)) }
     if (data.environment !== undefined) { setClauses.push('environment = ?'); values.push(JSON.stringify(data.environment)) }
+    if (data.oauth_metadata !== undefined) { setClauses.push('oauth_metadata = ?'); values.push(JSON.stringify(data.oauth_metadata)) }
 
     if (setClauses.length === 0) return this.getMcpServer(id)
 
@@ -1933,12 +1994,13 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
       : data.refresh_token ? Buffer.from(data.refresh_token, 'utf8') : null
 
     this.db.prepare(`
-      INSERT INTO oauth_tokens (id, provider, source_id, access_token, refresh_token, expires_at, scope, token_type, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO oauth_tokens (id, provider, source_id, mcp_server_id, access_token, refresh_token, expires_at, scope, token_type, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       data.provider,
-      data.source_id,
+      data.source_id ?? null,
+      data.mcp_server_id ?? null,
       encryptedAccessToken,
       encryptedRefreshToken,
       expiresAt,
@@ -1994,6 +2056,18 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
 
   deleteOAuthTokenBySource(sourceId: string): boolean {
     const result = this.db.prepare('DELETE FROM oauth_tokens WHERE source_id = ?').run(sourceId)
+    return result.changes > 0
+  }
+
+  getOAuthTokenByMcpServer(mcpServerId: string): OAuthTokenRecord | undefined {
+    const row = this.db.prepare(
+      'SELECT * FROM oauth_tokens WHERE mcp_server_id = ?'
+    ).get(mcpServerId) as OAuthTokenRow | undefined
+    return row ? deserializeOAuthToken(row) : undefined
+  }
+
+  deleteOAuthTokenByMcpServer(mcpServerId: string): boolean {
+    const result = this.db.prepare('DELETE FROM oauth_tokens WHERE mcp_server_id = ?').run(mcpServerId)
     return result.changes > 0
   }
 }
