@@ -292,6 +292,7 @@ export class AgentManager extends EventEmitter {
       model: agent.config?.model,
       systemPrompt: agent.config?.system_prompt,
       mcpServers,
+      authMethod: agent.config?.auth_method,
       apiKeys: agent.config?.api_keys
     }
 
@@ -931,6 +932,7 @@ export class AgentManager extends EventEmitter {
       model: agent.config?.model,
       systemPrompt: agent.config?.system_prompt,
       mcpServers,
+      authMethod: agent.config?.auth_method,
       apiKeys: agent.config?.api_keys
     }
 
@@ -1379,6 +1381,7 @@ export class AgentManager extends EventEmitter {
       model: agent.config?.model,
       systemPrompt: baseSystemPrompt + taskContext,
       mcpServers,
+      authMethod: agent.config?.auth_method,
       apiKeys: agent.config?.api_keys
     }
 
