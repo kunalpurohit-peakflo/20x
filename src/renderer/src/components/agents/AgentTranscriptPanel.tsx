@@ -223,7 +223,9 @@ function TodoWriteMessage({ message }: { message: AgentMessage }) {
 function PlanReviewMessage({ message }: { message: AgentMessage }) {
   const [expanded, setExpanded] = useState(true)
   const tool = message.tool
-  const planContent = tool?.output || ''
+  const rawOutput = tool?.output || ''
+  // Filter out confirmation prompts like "Exit plan mode?" — not real plan content
+  const planContent = /^exit plan mode\??$/i.test(rawOutput.trim()) ? '' : rawOutput
   const isPending = tool?.status === 'pending'
   const isComplete = !isPending
 

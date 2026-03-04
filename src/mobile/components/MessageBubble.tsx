@@ -106,7 +106,9 @@ function TodoList({ message }: { message: AgentMessage }) {
 }
 
 function PlanReviewMessage({ message }: { message: AgentMessage }) {
-  const planContent = message.tool?.output || ''
+  const rawOutput = message.tool?.output || ''
+  // Filter out confirmation prompts like "Exit plan mode?" — not real plan content
+  const planContent = /^exit plan mode\??$/i.test(rawOutput.trim()) ? '' : rawOutput
   const isPending = message.tool?.status === 'pending'
 
   return (

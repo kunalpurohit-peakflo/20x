@@ -389,8 +389,12 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
                 matchingTool.status = 'success'
                 // Plan content should not be truncated (cap at 50K for safety)
                 const isPlan = matchingTool.name === 'ExitPlanMode'
-                matchingTool.output = contentPart.content
-                  ? (isPlan ? String(contentPart.content).slice(0, 50000) : String(contentPart.content).slice(0, 2000))
+                const rawContent = contentPart.content ? String(contentPart.content) : undefined
+                // Filter out confirmation prompts like "Exit plan mode?"
+                const sanitized = isPlan && rawContent && /^exit plan mode\??$/i.test(rawContent.trim())
+                  ? undefined : rawContent
+                matchingTool.output = sanitized
+                  ? (isPlan ? sanitized.slice(0, 50000) : sanitized.slice(0, 2000))
                   : undefined
               }
               // Don't push a separate part — result is merged into tool_use
@@ -1200,8 +1204,12 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
       const toolName = msgWithProps.tool_name || 'unknown'
       const status = msgWithProps.status || 'unknown'
       const isPlanReview = toolName === 'ExitPlanMode'
-      const output = msgWithProps.output
-        ? (isPlanReview ? String(msgWithProps.output).slice(0, 50000) : String(msgWithProps.output).slice(0, 2000))
+      const rawOutput = msgWithProps.output ? String(msgWithProps.output) : undefined
+      // Filter out confirmation prompts like "Exit plan mode?" for plan review
+      const sanitizedOutput = isPlanReview && rawOutput && /^exit plan mode\??$/i.test(rawOutput.trim())
+        ? undefined : rawOutput
+      const output = sanitizedOutput
+        ? (isPlanReview ? sanitizedOutput.slice(0, 50000) : sanitizedOutput.slice(0, 2000))
         : undefined
       const partType = isPlanReview ? ('planreview' as MessagePartType) : MessagePartType.TOOL
 
