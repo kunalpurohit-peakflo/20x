@@ -228,13 +228,13 @@ function PlanReviewMessage({ message }: { message: AgentMessage }) {
   const details = /^(exit|enter) plan mode\??$/i.test(rawOutput.trim()) ? '' : rawOutput
 
   return (
-    <div className="rounded-md bg-[#161b22] border border-blue-500/30 overflow-hidden">
-      <div className="flex items-center gap-2 px-4 py-2.5 border-b border-border/30">
-        <FileText className="h-3.5 w-3.5 text-blue-400 shrink-0" />
-        <span className="text-xs text-blue-400 font-medium">{label}</span>
+    <div className="rounded-md bg-[#161b22] border border-border/50 overflow-hidden">
+      <div className="flex items-center gap-2 px-3 py-2 text-xs font-mono">
+        <FileText className="h-3 w-3 text-muted-foreground shrink-0" />
+        <span className="text-foreground">{label}</span>
       </div>
       {details && (
-        <div className="px-4 py-3 max-h-[60vh] overflow-y-auto">
+        <div className="px-3 py-2 border-t border-border/30 max-h-[60vh] overflow-y-auto">
           <Markdown size="xs">{details}</Markdown>
         </div>
       )}
