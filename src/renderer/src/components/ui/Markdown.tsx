@@ -80,7 +80,7 @@ export function Markdown({ children, size = 'sm', className }: MarkdownProps) {
   const classes = sizeClasses[size]
 
   return (
-    <div className={cn('markdown-content', classes.base, className)}>
+    <div className={cn('markdown-content min-w-0', classes.base, className)}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
@@ -132,11 +132,12 @@ export function Markdown({ children, size = 'sm', className }: MarkdownProps) {
             const isCodeBlock = codeClassName?.startsWith('language-')
 
             if (isCodeBlock || inline === false) {
+              // Inside <pre> — no background/padding/overflow here, the <pre> handles that
               return (
                 <code
                   className={cn(
-                    'block bg-muted rounded font-mono text-foreground overflow-x-auto',
-                    classes.codeBlock
+                    'block font-mono text-foreground whitespace-pre',
+                    codeClassName
                   )}
                   {...props}
                 >
@@ -157,9 +158,9 @@ export function Markdown({ children, size = 'sm', className }: MarkdownProps) {
             )
           },
 
-          // Pre (wraps code blocks)
+          // Pre (wraps code blocks) — sole scroll container for fenced code
           pre: ({ children, ...props }) => (
-            <pre className={cn('bg-muted rounded overflow-x-auto max-w-full', classes.codeBlock)} {...props}>
+            <pre className={cn('bg-muted rounded overflow-x-auto w-full', classes.codeBlock)} {...props}>
               {children}
             </pre>
           ),

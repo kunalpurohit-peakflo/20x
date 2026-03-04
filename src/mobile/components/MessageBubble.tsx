@@ -207,7 +207,7 @@ export function MessageBubble({ message, onAnswer }: MessageBubbleProps) {
         isReasoning && 'bg-purple-500/10 text-purple-200 border border-purple-500/20',
         !isUser && !isSystem && !isError && !isReasoning && 'bg-[#161b22] text-gray-300 border border-border/50'
       )}>
-        <div className="break-words">
+        <div className="break-words min-w-0">
           <Markdown size="sm">{message.content}</Markdown>
         </div>
         {message.stepMeta && (
