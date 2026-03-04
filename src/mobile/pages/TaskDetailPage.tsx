@@ -77,26 +77,54 @@ export function TaskDetailPage({ taskId, onNavigate }: { taskId: string; onNavig
 
   const handleCompleteTask = useCallback(async () => {
     if (!task) return
-    // If there's a session (active or resumable), show feedback dialog
-    const hasActiveSession = session?.sessionId && session.messages.length > 0
-    const hasResumableSession = !session?.sessionId && task.session_id
-    if (hasActiveSession || hasResumableSession) {
+    // Always show feedback when an agent is assigned (there may be a session to learn from)
+    if (task.agent_id) {
       setShowFeedback(true)
     } else {
-      // No session — complete directly
+      // No agent — complete directly
       await updateTask(task.id, { status: TaskStatus.Completed })
     }
-  }, [task, session, updateTask])
+  }, [task, updateTask])
 
   const handleFeedbackSubmit = useCallback(async (rating: number, comment: string) => {
-    if (!task) return
+    if (!task || !task.agent_id) return
     setShowFeedback(false)
+
+    // 1. Set task to AgentLearning status with feedback (matches desktop flow)
     await updateTask(task.id, {
-      status: TaskStatus.Completed,
+      status: TaskStatus.AgentLearning,
       feedback_rating: rating,
       feedback_comment: comment || null
     })
-  }, [task, updateTask])
+
+    // 2. Build the same feedback prompt as desktop
+    const commentPart = comment ? ` Comment: "${comment}".` : ''
+    const today = new Date().toISOString().split('T')[0]
+    const prompt = `User rated this session ${rating}/5.${commentPart}\n\nReview the session and update skills in .agents/skills/:\n\n**For skills you used:**\nUpdate the YAML frontmatter:\n- confidence: ${rating >= 4 ? '+0.05 (was helpful)' : rating <= 2 ? '-0.10 (was wrong/outdated)' : 'no change'}\n- uses: increment by 1\n- lastUsed: ${today}\n- tags: add relevant keywords if missing\n\n**If you discovered a new reusable pattern:**\nCreate a new skill file.\n\nUpdate existing skills that were helpful or create new ones for patterns worth reusing.`
+
+    // 3. Resume the session (or start fresh if none) and send feedback prompt
+    try {
+      let activeSessionId = session?.sessionId
+      if (!activeSessionId && task.session_id) {
+        // Resume existing session from task record
+        const { sessionId } = await api.sessions.resume(task.session_id, task.agent_id, task.id)
+        activeSessionId = sessionId
+        initSession(task.id, sessionId, task.agent_id)
+      }
+      if (activeSessionId) {
+        await api.sessions.send(activeSessionId, prompt, task.id, task.agent_id)
+        // Backend agent-manager will sync skills and auto-transition to Completed
+        // when the session becomes idle (via transitionToIdle AgentLearning check)
+      } else {
+        // No session at all — just mark as completed with feedback
+        await updateTask(task.id, { status: TaskStatus.Completed })
+      }
+    } catch (e) {
+      console.error('Failed to send feedback to agent:', e)
+      // Fallback: complete the task even if learning session fails
+      await updateTask(task.id, { status: TaskStatus.Completed })
+    }
+  }, [task, session, updateTask, initSession])
 
   const handleFeedbackSkip = useCallback(async () => {
     if (!task) return
