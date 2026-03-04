@@ -26,6 +26,7 @@ function makeContext(overrides: Partial<PluginContext> = {}): PluginContext {
       headers: {},
       environment: {},
       tools: [],
+      oauth_metadata: {},
       created_at: '',
       updated_at: ''
     } as McpServerRecord,

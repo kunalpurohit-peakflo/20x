@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react'
-import { Plus, Loader2, Wifi, WifiOff, RefreshCw, Edit3, Trash2 } from 'lucide-react'
+import { useState, useEffect, useCallback } from 'react'
+import { Plus, Loader2, Wifi, WifiOff, RefreshCw, Edit3, Trash2, KeyRound } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import { SettingsSection } from '../SettingsSection'
 import { McpServerFormDialog } from '../forms/McpServerFormDialog'
@@ -19,7 +19,12 @@ interface McpDialogState {
 }
 
 export function ToolsMcpSettings() {
-  const { servers, fetchServers, createServer, updateServer, deleteServer, testConnection: testMcpConnection } = useMcpStore()
+  const {
+    servers, fetchServers, createServer, updateServer, deleteServer,
+    testConnection: testMcpConnection,
+    oauthStatuses, startOAuthFlow, submitManualClientId, revokeOAuthToken,
+    fetchAllOAuthStatuses, authRequired, probeForAuth, probeAllForAuth
+  } = useMcpStore()
   const [connections, setConnections] = useState<Map<string, McpConnectionInfo>>(new Map())
   const [mcpDialog, setMcpDialog] = useState<McpDialogState>({ open: false })
 
@@ -30,6 +35,8 @@ export function ToolsMcpSettings() {
   useEffect(() => {
     if (servers.length > 0) {
       servers.forEach((s) => testServerConnection(s))
+      fetchAllOAuthStatuses()
+      probeAllForAuth()
     }
   }, [servers.length])
 
@@ -57,8 +64,15 @@ export function ToolsMcpSettings() {
   }
 
   const handleCreateServer = async (data: CreateMcpServerDTO) => {
-    await createServer(data)
+    const server = await createServer(data)
     setMcpDialog({ open: false })
+    if (server && data.type === 'remote' && data.url) {
+      // Probe and auto-start OAuth if needed
+      const needed = await probeForAuth(server.id, data.url)
+      if (needed) {
+        startOAuthFlow(server.id)
+      }
+    }
   }
 
   const handleUpdateServer = async (data: CreateMcpServerDTO) => {
@@ -72,6 +86,52 @@ export function ToolsMcpSettings() {
     if (confirm('Delete this MCP server? It will be removed from all agents.')) {
       await deleteServer(id)
     }
+  }
+
+  // OAuth callbacks passed to the dialog
+  const handleProbeForAuth = useCallback(async (url: string): Promise<boolean> => {
+    try {
+      const { requiresAuth } = await useMcpStore.getState().servers.length
+        ? await (await import('@/lib/ipc-client')).mcpServerApi.probeForAuth(url)
+        : { requiresAuth: false }
+      return requiresAuth
+    } catch {
+      return false
+    }
+  }, [])
+
+  const handleStartOAuthFlow = useCallback(async (serverId: string) => {
+    return await startOAuthFlow(serverId)
+  }, [startOAuthFlow])
+
+  const handleSubmitManualClientId = useCallback(async (serverId: string, clientId: string) => {
+    return await submitManualClientId(serverId, clientId)
+  }, [submitManualClientId])
+
+  const handleRevokeOAuthToken = useCallback(async (serverId: string) => {
+    await revokeOAuthToken(serverId)
+  }, [revokeOAuthToken])
+
+  const oauthCallbacks = {
+    probeForAuth: handleProbeForAuth,
+    startOAuthFlow: handleStartOAuthFlow,
+    submitManualClientId: handleSubmitManualClientId,
+    revokeOAuthToken: handleRevokeOAuthToken
+  }
+
+  // Is server OAuth-related? (has registration or probe says auth required)
+  const isOAuthServer = (server: McpServer): boolean => {
+    if (server.type !== 'remote') return false
+    const hasRegistration = server.oauth_metadata && 'resource_url' in server.oauth_metadata
+    return !!(hasRegistration || authRequired[server.id])
+  }
+
+  // Should the connection error row be hidden?
+  // For OAuth servers, the connection test doesn't inject the token so it always gets 401.
+  // Hide the error for all OAuth servers — the OAuth status row replaces it.
+  const shouldHideConnectionRow = (server: McpServer, connection: McpConnectionInfo): boolean => {
+    if (connection.status !== 'failed') return false
+    return isOAuthServer(server)
   }
 
   return (
@@ -102,14 +162,19 @@ export function ToolsMcpSettings() {
           <div className="space-y-2">
             {servers.map((server) => {
               const connection = connections.get(server.id) || { status: 'idle' }
+              const hideConnectionRow = shouldHideConnectionRow(server, connection)
+              const oauthStatus = oauthStatuses[server.id]
+              const hasOAuth = isOAuthServer(server)
 
               return (
                 <div key={server.id} className="rounded-lg border border-border bg-card overflow-hidden">
                   <div className="flex items-center gap-3 px-4 py-3">
                     <span className={`h-2 w-2 rounded-full shrink-0 ${
                       connection.status === 'connected' ? 'bg-primary'
-                      : connection.status === 'failed' ? 'bg-destructive'
+                      : connection.status === 'failed' && !hideConnectionRow ? 'bg-destructive'
                       : connection.status === 'testing' ? 'bg-muted animate-pulse'
+                      : hasOAuth && oauthStatus?.connected ? 'bg-emerald-500'
+                      : hasOAuth ? 'bg-amber-500'
                       : 'bg-muted/50'
                     }`} />
                     <div className="flex-1 min-w-0">
@@ -122,6 +187,12 @@ export function ToolsMcpSettings() {
                         }`}>
                           {server.type === 'remote' ? 'remote' : 'local'}
                         </span>
+                        {hasOAuth && oauthStatus?.connected === false && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 flex items-center gap-1">
+                            <KeyRound className="h-2.5 w-2.5" />
+                            Auth needed
+                          </span>
+                        )}
                       </div>
                       <div className="text-xs text-muted-foreground truncate mt-0.5">
                         {server.type === 'remote'
@@ -162,7 +233,8 @@ export function ToolsMcpSettings() {
                       </Button>
                     </div>
                   </div>
-                  {connection.status !== 'idle' && (
+                  {/* Connection status row */}
+                  {connection.status !== 'idle' && !hideConnectionRow && (
                     <div className={`flex items-center gap-2 px-4 py-2 text-xs border-t ${
                       connection.status === 'connected' ? 'bg-accent/50 text-foreground border-l-2 border-primary'
                       : connection.status === 'failed' ? 'bg-destructive/10 text-destructive-foreground border-l-2 border-destructive'
@@ -191,6 +263,13 @@ export function ToolsMcpSettings() {
                       ) : null}
                     </div>
                   )}
+                  {/* OAuth Connected status row — shown when 401 error is hidden */}
+                  {hideConnectionRow && hasOAuth && oauthStatus?.connected && (
+                    <div className="flex items-center gap-2 px-4 py-2 text-xs border-t bg-accent/50 text-foreground border-l-2 border-primary">
+                      <Wifi className="h-3 w-3" />
+                      Connected
+                    </div>
+                  )}
                 </div>
               )
             })}
@@ -203,6 +282,8 @@ export function ToolsMcpSettings() {
         open={mcpDialog.open}
         onClose={() => setMcpDialog({ open: false })}
         onSubmit={mcpDialog.server ? handleUpdateServer : handleCreateServer}
+        oauthConnected={mcpDialog.server ? oauthStatuses[mcpDialog.server.id]?.connected : undefined}
+        oauth={oauthCallbacks}
       />
     </>
   )

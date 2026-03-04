@@ -85,6 +85,21 @@ export interface McpServerTool {
   description: string
 }
 
+export interface McpOAuthRegistration {
+  resource_url: string
+  authorization_server_url: string
+  authorization_endpoint: string
+  token_endpoint: string
+  registration_endpoint?: string
+  revocation_endpoint?: string
+  scopes?: string
+  code_challenge_methods_supported?: string[]
+  client_id: string
+  client_secret?: string
+  registration_method: 'dcr' | 'manual'
+  discovered_at: string
+}
+
 export interface McpServer {
   id: string
   name: string
@@ -95,6 +110,7 @@ export interface McpServer {
   headers: Record<string, string>
   environment: Record<string, string>
   tools: McpServerTool[]
+  oauth_metadata: McpOAuthRegistration | Record<string, never>
   created_at: string
   updated_at: string
 }

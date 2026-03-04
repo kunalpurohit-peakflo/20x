@@ -61,11 +61,13 @@ export interface OAuthProvider {
    * @param refreshToken - The refresh token
    * @param clientId - OAuth client ID
    * @param clientSecret - OAuth client secret
+   * @param tokenEndpoint - Token endpoint URL (for dynamic providers like MCP servers)
    * @returns Token response with new access_token
    */
   refreshToken(
     refreshToken: string,
     clientId: string,
-    clientSecret: string
+    clientSecret: string,
+    tokenEndpoint?: string
   ): Promise<TokenResponse>
 }

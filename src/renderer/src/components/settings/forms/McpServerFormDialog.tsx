@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react'
-import { Server, Globe } from 'lucide-react'
+import { useState, useEffect, useRef, useCallback } from 'react'
+import { Server, Globe, Loader2, KeyRound, LogOut } from 'lucide-react'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogBody } from '@/components/ui/Dialog'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
@@ -8,14 +8,23 @@ import { KeyValueEditor } from '../KeyValueEditor'
 import { shellQuoteArg, parseShellArgs } from '../utils'
 import type { McpServer, CreateMcpServerDTO } from '@/types'
 
+interface OAuthCallbacks {
+  probeForAuth: (url: string) => Promise<boolean>
+  startOAuthFlow: (serverId: string) => Promise<{ needsManualClientId?: boolean }>
+  submitManualClientId: (serverId: string, clientId: string) => Promise<{ needsManualClientId?: boolean }>
+  revokeOAuthToken: (serverId: string) => Promise<void>
+}
+
 interface McpServerFormDialogProps {
   server?: McpServer
   open: boolean
   onClose: () => void
   onSubmit: (data: CreateMcpServerDTO) => void
+  oauthConnected?: boolean
+  oauth: OAuthCallbacks
 }
 
-export function McpServerFormDialog({ server, open, onClose, onSubmit }: McpServerFormDialogProps) {
+export function McpServerFormDialog({ server, open, onClose, onSubmit, oauthConnected, oauth }: McpServerFormDialogProps) {
   const [name, setName] = useState(server?.name ?? '')
   const [type, setType] = useState<'local' | 'remote'>(server?.type ?? 'local')
   const [command, setCommand] = useState(server?.command ?? '')
@@ -23,6 +32,14 @@ export function McpServerFormDialog({ server, open, onClose, onSubmit }: McpServ
   const [environment, setEnvironment] = useState<Record<string, string>>(server?.environment ?? {})
   const [url, setUrl] = useState(server?.url ?? '')
   const [headers, setHeaders] = useState<Record<string, string>>(server?.headers ?? {})
+
+  // OAuth state
+  const [probing, setProbing] = useState(false)
+  const [authNeeded, setAuthNeeded] = useState(false)
+  const [connecting, setConnecting] = useState(false)
+  const [manualClientIdNeeded, setManualClientIdNeeded] = useState(false)
+  const [manualClientId, setManualClientId] = useState('')
+  const probeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     if (open) {
@@ -33,10 +50,82 @@ export function McpServerFormDialog({ server, open, onClose, onSubmit }: McpServ
       setEnvironment(server?.environment ?? {})
       setUrl(server?.url ?? '')
       setHeaders(server?.headers ?? {})
+      setProbing(false)
+      setAuthNeeded(false)
+      setConnecting(false)
+      setManualClientIdNeeded(false)
+      setManualClientId('')
+      // For edit mode: check if this server already has OAuth registration
+      if (server?.type === 'remote' && server.oauth_metadata && 'resource_url' in server.oauth_metadata) {
+        setAuthNeeded(true)
+      }
+    }
+    return () => {
+      if (probeTimer.current) clearTimeout(probeTimer.current)
     }
   }, [open, server?.id])
 
+  // Debounced probe when URL changes (only for remote type, only valid URLs)
+  const handleUrlChange = useCallback((newUrl: string) => {
+    setUrl(newUrl)
+    if (probeTimer.current) clearTimeout(probeTimer.current)
+
+    // Don't probe if editing an already-connected server (no need to re-probe)
+    if (server && oauthConnected) return
+
+    const trimmed = newUrl.trim()
+    if (!trimmed || !trimmed.startsWith('http')) {
+      setAuthNeeded(false)
+      return
+    }
+
+    setProbing(true)
+    probeTimer.current = setTimeout(async () => {
+      try {
+        const needed = await oauth.probeForAuth(trimmed)
+        setAuthNeeded(needed)
+      } catch {
+        setAuthNeeded(false)
+      } finally {
+        setProbing(false)
+      }
+    }, 800)
+  }, [server, oauthConnected, oauth])
+
   const isValid = name.trim() && (type === 'local' ? command.trim() : url.trim())
+
+  const handleConnectOAuth = async () => {
+    if (!server) return
+    setConnecting(true)
+    try {
+      const result = await oauth.startOAuthFlow(server.id)
+      if (result.needsManualClientId) {
+        setManualClientIdNeeded(true)
+        setManualClientId('')
+      }
+    } finally {
+      setConnecting(false)
+    }
+  }
+
+  const handleSubmitManualClientId = async () => {
+    if (!server || !manualClientId.trim()) return
+    setConnecting(true)
+    try {
+      const result = await oauth.submitManualClientId(server.id, manualClientId.trim())
+      if (!result.needsManualClientId) {
+        setManualClientIdNeeded(false)
+        setManualClientId('')
+      }
+    } finally {
+      setConnecting(false)
+    }
+  }
+
+  const handleDisconnectOAuth = async () => {
+    if (!server) return
+    await oauth.revokeOAuthToken(server.id)
+  }
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -55,6 +144,9 @@ export function McpServerFormDialog({ server, open, onClose, onSubmit }: McpServ
     onSubmit(data)
     onClose()
   }
+
+  // Show OAuth section for remote servers when auth is needed or already connected
+  const showOAuthSection = type === 'remote' && (authNeeded || oauthConnected)
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
@@ -135,7 +227,7 @@ export function McpServerFormDialog({ server, open, onClose, onSubmit }: McpServ
                   <Input
                     id="mcp-url"
                     value={url}
-                    onChange={(e) => setUrl(e.target.value)}
+                    onChange={(e) => handleUrlChange(e.target.value)}
                     placeholder="https://mcp.example.com/sse"
                     required
                   />
@@ -148,6 +240,100 @@ export function McpServerFormDialog({ server, open, onClose, onSubmit }: McpServ
                   valuePlaceholder="value"
                 />
               </>
+            )}
+
+            {/* OAuth section — shown for remote servers that need auth */}
+            {showOAuthSection && (
+              <div className={`rounded-md border px-3 py-2.5 space-y-2 ${
+                oauthConnected
+                  ? 'border-emerald-500/30 bg-emerald-500/5'
+                  : 'border-amber-500/30 bg-amber-500/5'
+              }`}>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 text-xs">
+                    {probing ? (
+                      <>
+                        <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+                        <span className="text-muted-foreground">Checking authentication...</span>
+                      </>
+                    ) : oauthConnected ? (
+                      <>
+                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 shrink-0" />
+                        <KeyRound className="h-3 w-3 text-emerald-400" />
+                        <span className="text-emerald-400">OAuth Connected</span>
+                      </>
+                    ) : (
+                      <>
+                        <span className="h-1.5 w-1.5 rounded-full bg-amber-500 shrink-0" />
+                        <KeyRound className="h-3 w-3 text-amber-400" />
+                        <span className="text-amber-400">OAuth Required</span>
+                      </>
+                    )}
+                  </div>
+                  {server && oauthConnected && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-2 text-xs text-muted-foreground hover:text-destructive"
+                      onClick={handleDisconnectOAuth}
+                    >
+                      <LogOut className="h-3 w-3 mr-1" />
+                      Disconnect
+                    </Button>
+                  )}
+                  {server && !oauthConnected && !manualClientIdNeeded && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-2 text-xs text-muted-foreground hover:text-foreground"
+                      onClick={handleConnectOAuth}
+                      disabled={connecting}
+                    >
+                      {connecting ? (
+                        <Loader2 className="h-3 w-3 animate-spin mr-1" />
+                      ) : (
+                        <KeyRound className="h-3 w-3 mr-1" />
+                      )}
+                      Connect
+                    </Button>
+                  )}
+                </div>
+                {manualClientIdNeeded && (
+                  <div className="flex items-center gap-2">
+                    <Input
+                      value={manualClientId}
+                      onChange={(e) => setManualClientId(e.target.value)}
+                      placeholder="Enter Client ID (from server provider)"
+                      className="h-7 text-xs flex-1"
+                    />
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="h-7 px-3 text-xs"
+                      disabled={!manualClientId.trim() || connecting}
+                      onClick={handleSubmitManualClientId}
+                    >
+                      {connecting ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Submit'}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 px-2 text-xs"
+                      onClick={() => { setManualClientIdNeeded(false); setManualClientId('') }}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                )}
+                {!server && !oauthConnected && !probing && (
+                  <p className="text-[11px] text-muted-foreground">
+                    OAuth will start automatically after adding the server.
+                  </p>
+                )}
+              </div>
             )}
 
             <div className="flex justify-end gap-2 pt-1">
