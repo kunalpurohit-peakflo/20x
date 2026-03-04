@@ -28,12 +28,17 @@ type HookCallbackMatcher = import('@anthropic-ai/claude-agent-sdk').HookCallback
 
 let ClaudeAgentSDK: ClaudeSDK | null = null
 
+/** Maximum number of messages to keep in the buffer per session */
+const MAX_MESSAGE_BUFFER_SIZE = 500
+
 interface ClaudeSession {
   sessionId: string // Claude's internal session ID
   queryIterator: Query | null
   abortController: AbortController | null
   status: 'idle' | 'busy' | 'error'
   messageBuffer: SDKMessage[]
+  /** Index of the first unprocessed message in messageBuffer (cursor-based tracking) */
+  messageCursor: number
   streamTask: Promise<void> | null
   lastError: string | null
   config: SessionConfig // Store config for later use
@@ -192,6 +197,7 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
       abortController: null,
       status: 'idle',
       messageBuffer: [],
+      messageCursor: 0,
       streamTask: null,
       lastError: null,
       config, // Store config for use in sendPrompt
@@ -438,6 +444,7 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
       abortController: null,
       status: 'idle',
       messageBuffer: [],
+      messageCursor: 0,
       streamTask: null,
       lastError: null,
       config, // Store config for later use
@@ -563,6 +570,7 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
     session.lastError = null // Clear any previous error (e.g., rate limit) for recovery
     if (!isFirstPrompt) {
       session.messageBuffer = [] // Clear buffer for new messages (but keep history for first prompt)
+      session.messageCursor = 0
     }
 
     // After first prompt in a resumed session, clear the flag so subsequent prompts use continue
@@ -591,7 +599,7 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
 
   async pollMessages(
     sessionId: string,
-    seenMessageIds: Set<string>,
+    _seenMessageIds: Set<string>,
     seenPartIds: Set<string>,
     partContentLengths: Map<string, string>,
     _config: SessionConfig
@@ -603,17 +611,19 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
 
     const newParts: MessagePart[] = []
 
-    // Process buffered messages
-    for (const sdkMsg of session.messageBuffer) {
+    // Process only NEW buffered messages using cursor (avoids re-scanning entire buffer)
+    const bufferLen = session.messageBuffer.length
+    for (let i = session.messageCursor; i < bufferLen; i++) {
+      const sdkMsg = session.messageBuffer[i]
       const msgId = this.getMessageId(sdkMsg)
-      if (!msgId || seenMessageIds.has(msgId)) continue
-
-      seenMessageIds.add(msgId)
+      if (!msgId) continue
 
       // Convert SDKMessage to MessagePart
       const parts = this.convertSDKMessageToParts(sdkMsg, seenPartIds, partContentLengths)
       newParts.push(...parts)
     }
+    // Advance cursor past processed messages
+    session.messageCursor = bufferLen
 
     // If we have the real Claude session ID and it's different from the map key,
     // include it in the first part so agent-manager can update the database
@@ -891,6 +901,14 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
 
         // Buffer message (only if we didn't throw above)
         session.messageBuffer.push(message)
+
+        // Cap buffer size to prevent unbounded memory growth.
+        // Drop already-processed messages from the front when limit is exceeded.
+        if (session.messageBuffer.length > MAX_MESSAGE_BUFFER_SIZE) {
+          const drop = session.messageBuffer.length - MAX_MESSAGE_BUFFER_SIZE
+          session.messageBuffer.splice(0, drop)
+          session.messageCursor = Math.max(0, session.messageCursor - drop)
+        }
 
         // Update status based on message type
         if (msg.type === 'status') {
