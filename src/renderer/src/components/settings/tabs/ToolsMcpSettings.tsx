@@ -24,7 +24,7 @@ export function ToolsMcpSettings() {
     servers, fetchServers, createServer, updateServer, deleteServer,
     testConnection: testMcpConnection,
     oauthStatuses, startOAuthFlow, submitManualClientId, revokeOAuthToken,
-    fetchAllOAuthStatuses, authRequired, probeAllForAuth
+    fetchAllOAuthStatuses, authRequired, probeForAuth, probeAllForAuth
   } = useMcpStore()
   const [connections, setConnections] = useState<Map<string, McpConnectionInfo>>(new Map())
   const [mcpDialog, setMcpDialog] = useState<McpDialogState>({ open: false })
@@ -68,8 +68,12 @@ export function ToolsMcpSettings() {
   }
 
   const handleCreateServer = async (data: CreateMcpServerDTO) => {
-    await createServer(data)
+    const server = await createServer(data)
     setMcpDialog({ open: false })
+    // Immediately probe the new server for auth requirements
+    if (server && data.type === 'remote' && data.url) {
+      probeForAuth(server.id, data.url)
+    }
   }
 
   const handleUpdateServer = async (data: CreateMcpServerDTO) => {
@@ -123,6 +127,15 @@ export function ToolsMcpSettings() {
     return !!(hasRegistration || authRequired[server.id])
   }
 
+  // Determine if the connection error should be suppressed (when it's caused by OAuth)
+  const isAuthRelatedError = (server: McpServer, connection: McpConnectionInfo): boolean => {
+    if (connection.status !== 'failed') return false
+    if (!needsOAuth(server)) return false
+    const oauthStatus = oauthStatuses[server.id]
+    // If OAuth is required but not connected, the connection error is expected
+    return !oauthStatus?.connected
+  }
+
   return (
     <>
       <SettingsSection
@@ -151,13 +164,14 @@ export function ToolsMcpSettings() {
           <div className="space-y-2">
             {servers.map((server) => {
               const connection = connections.get(server.id) || { status: 'idle' }
+              const suppressError = isAuthRelatedError(server, connection)
 
               return (
                 <div key={server.id} className="rounded-lg border border-border bg-card overflow-hidden">
                   <div className="flex items-center gap-3 px-4 py-3">
                     <span className={`h-2 w-2 rounded-full shrink-0 ${
                       connection.status === 'connected' ? 'bg-primary'
-                      : connection.status === 'failed' ? 'bg-destructive'
+                      : connection.status === 'failed' && !suppressError ? 'bg-destructive'
                       : connection.status === 'testing' ? 'bg-muted animate-pulse'
                       : 'bg-muted/50'
                     }`} />
@@ -211,7 +225,7 @@ export function ToolsMcpSettings() {
                       </Button>
                     </div>
                   </div>
-                  {connection.status !== 'idle' && (
+                  {connection.status !== 'idle' && !suppressError && (
                     <div className={`flex items-center gap-2 px-4 py-2 text-xs border-t ${
                       connection.status === 'connected' ? 'bg-accent/50 text-foreground border-l-2 border-primary'
                       : connection.status === 'failed' ? 'bg-destructive/10 text-destructive-foreground border-l-2 border-destructive'

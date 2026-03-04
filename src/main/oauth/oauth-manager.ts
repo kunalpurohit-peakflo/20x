@@ -325,76 +325,68 @@ export class OAuthManager {
     if (!mcpServer) throw new Error(`MCP server not found: ${mcpServerId}`)
     if (!mcpServer.url) throw new Error('MCP server has no URL configured')
 
-    let registration = mcpServer.oauth_metadata as McpOAuthRegistration | Record<string, never>
-    const hasValidRegistration = registration
-      && 'client_id' in registration
-      && 'resource_url' in registration
-      && registration.client_id
-
-    if (!hasValidRegistration) {
-      // Run spec-compliant discovery flow
-      console.log(`[OAuthManager] MCP OAuth: starting discovery for ${mcpServer.url}`)
-
-      // Start a temporary local server to get the redirect URI for DCR
-      const tempServer = new LocalOAuthServer()
-      let redirectUri: string
-      try {
-        redirectUri = await tempServer.start()
-      } finally {
-        tempServer.stop()
-      }
-
-      const discovery = await McpDiscovery.discover(mcpServer.url, redirectUri)
-
-      if (discovery.needsManualClientId) {
-        // Store partial discovery (without client_id) so user only needs to provide client_id
-        this.db.updateMcpServer(mcpServerId, {
-          oauth_metadata: {
-            resource_url: discovery.resourceUrl,
-            authorization_server_url: discovery.authorizationServerUrl,
-            authorization_endpoint: discovery.authorizationEndpoint,
-            token_endpoint: discovery.tokenEndpoint,
-            registration_endpoint: discovery.registrationEndpoint,
-            revocation_endpoint: discovery.revocationEndpoint,
-            scopes: discovery.scopes,
-            code_challenge_methods_supported: discovery.codeChallengeMethodsSupported,
-            client_id: '', // Placeholder — will be filled by completeManualRegistration
-            registration_method: 'manual',
-            discovered_at: new Date().toISOString()
-          } as McpOAuthRegistration
-        })
-        return { needsManualClientId: true }
-      }
-
-      // Full registration obtained (via DCR)
-      registration = {
-        resource_url: discovery.resourceUrl,
-        authorization_server_url: discovery.authorizationServerUrl,
-        authorization_endpoint: discovery.authorizationEndpoint,
-        token_endpoint: discovery.tokenEndpoint,
-        registration_endpoint: discovery.registrationEndpoint,
-        revocation_endpoint: discovery.revocationEndpoint,
-        scopes: discovery.scopes,
-        code_challenge_methods_supported: discovery.codeChallengeMethodsSupported,
-        client_id: discovery.clientId!,
-        client_secret: discovery.clientSecret,
-        registration_method: discovery.registrationMethod || 'dcr',
-        discovered_at: new Date().toISOString()
-      } as McpOAuthRegistration
-
-      // Persist registration to DB
-      this.db.updateMcpServer(mcpServerId, { oauth_metadata: registration as McpOAuthRegistration })
-    }
-
-    // Now run the actual OAuth 2.1 + PKCE flow
-    const reg = registration as McpOAuthRegistration
-    const provider = this.getProvider('mcp-server')
-    const config: Record<string, unknown> = { ...reg }
+    // Start the local OAuth server ONCE — same port used for both DCR and the callback
     const server = new LocalOAuthServer()
-
     try {
       const redirectUri = await server.start()
       console.log(`[OAuthManager] MCP OAuth: local server started at ${redirectUri}`)
+
+      let registration = mcpServer.oauth_metadata as McpOAuthRegistration | Record<string, never>
+      const hasValidRegistration = registration
+        && 'client_id' in registration
+        && 'resource_url' in registration
+        && registration.client_id
+
+      if (!hasValidRegistration) {
+        // Run spec-compliant discovery flow
+        console.log(`[OAuthManager] MCP OAuth: starting discovery for ${mcpServer.url}`)
+
+        const discovery = await McpDiscovery.discover(mcpServer.url, redirectUri)
+
+        if (discovery.needsManualClientId) {
+          // Store partial discovery (without client_id) so user only needs to provide client_id
+          this.db.updateMcpServer(mcpServerId, {
+            oauth_metadata: {
+              resource_url: discovery.resourceUrl,
+              authorization_server_url: discovery.authorizationServerUrl,
+              authorization_endpoint: discovery.authorizationEndpoint,
+              token_endpoint: discovery.tokenEndpoint,
+              registration_endpoint: discovery.registrationEndpoint,
+              revocation_endpoint: discovery.revocationEndpoint,
+              scopes: discovery.scopes,
+              code_challenge_methods_supported: discovery.codeChallengeMethodsSupported,
+              client_id: '', // Placeholder — will be filled by completeManualRegistration
+              registration_method: 'manual',
+              discovered_at: new Date().toISOString()
+            } as McpOAuthRegistration
+          })
+          return { needsManualClientId: true }
+        }
+
+        // Full registration obtained (via DCR)
+        registration = {
+          resource_url: discovery.resourceUrl,
+          authorization_server_url: discovery.authorizationServerUrl,
+          authorization_endpoint: discovery.authorizationEndpoint,
+          token_endpoint: discovery.tokenEndpoint,
+          registration_endpoint: discovery.registrationEndpoint,
+          revocation_endpoint: discovery.revocationEndpoint,
+          scopes: discovery.scopes,
+          code_challenge_methods_supported: discovery.codeChallengeMethodsSupported,
+          client_id: discovery.clientId!,
+          client_secret: discovery.clientSecret,
+          registration_method: discovery.registrationMethod || 'dcr',
+          discovered_at: new Date().toISOString()
+        } as McpOAuthRegistration
+
+        // Persist registration to DB
+        this.db.updateMcpServer(mcpServerId, { oauth_metadata: registration as McpOAuthRegistration })
+      }
+
+      // Now run the actual OAuth 2.1 + PKCE flow (same server, same port)
+      const reg = registration as McpOAuthRegistration
+      const provider = this.getProvider('mcp-server')
+      const config: Record<string, unknown> = { ...reg }
 
       const { verifier, challenge } = this.generatePKCE()
       const state = createId()
