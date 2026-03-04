@@ -1084,28 +1084,44 @@ export class AcpAdapter implements CodingAgentAdapter {
     return (obj.sessionId || obj.session_id || obj.id) as string | null
   }
 
+  /**
+   * Convert internal McpServerConfig map to ACP-spec McpServer array.
+   * ACP spec: https://agentclientprotocol.com/protocol/schema
+   *
+   * - mcpServers is Vec<McpServer> (array, not map)
+   * - stdio variant: { name, command, args: string[], env: EnvVariable[] }
+   * - http variant:  { type: "http", name, url, headers: HttpHeader[] }
+   * - EnvVariable / HttpHeader = { name: string, value: string }
+   */
   private convertMcpServers(servers?: Record<string, McpServerConfig>): unknown[] {
     if (!servers) return []
 
     const result: unknown[] = []
     for (const [name, config] of Object.entries(servers)) {
-      // Codex uses an untagged serde enum with deny_unknown_fields,
-      // so only include fields defined in the matching variant.
-      // Codex expects mcpServers as an array of objects with a "name" field.
-      // Variant is inferred from "command" vs "url".
       if (config.type === 'stdio') {
+        // Convert env from Record<string,string> to ACP EnvVariable[]
+        const envArray = config.env
+          ? Object.entries(config.env).map(([k, v]) => ({ name: k, value: v }))
+          : []
+
         result.push({
           name,
           command: config.command,
           args: config.args || [],
-          ...(config.env ? { env: config.env } : {})
+          env: envArray
         })
       } else {
-        // http or sse → Codex StreamableHttp variant
+        // http or sse — ACP requires a "type" discriminator for non-stdio variants
+        // Convert headers from Record<string,string> to ACP HttpHeader[]
+        const headersArray = config.headers
+          ? Object.entries(config.headers).map(([k, v]) => ({ name: k, value: v }))
+          : []
+
         result.push({
+          type: config.type,
           name,
           url: config.url,
-          ...(config.headers ? { http_headers: config.headers } : {})
+          headers: headersArray
         })
       }
     }
