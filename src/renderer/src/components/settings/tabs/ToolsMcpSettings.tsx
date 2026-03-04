@@ -186,13 +186,7 @@ export function ToolsMcpSettings() {
                         }`}>
                           {server.type === 'remote' ? 'remote' : 'local'}
                         </span>
-                        {hasOAuth && oauthStatus?.connected && (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 flex items-center gap-1">
-                            <KeyRound className="h-2.5 w-2.5" />
-                            OAuth
-                          </span>
-                        )}
-                        {hasOAuth && !oauthStatus?.connected && (
+                        {hasOAuth && oauthStatus?.connected === false && (
                           <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 flex items-center gap-1">
                             <KeyRound className="h-2.5 w-2.5" />
                             Auth needed
