@@ -221,10 +221,23 @@ function TodoWriteMessage({ message }: { message: AgentMessage }) {
 }
 
 function PlanReviewMessage({ message }: { message: AgentMessage }) {
+  const tool = message.tool
+  const label = tool?.title || message.content || 'Plan mode'
+  const rawOutput = tool?.output || ''
+  // Filter out confirmation prompts — not useful content
+  const details = /^(exit|enter) plan mode\??$/i.test(rawOutput.trim()) ? '' : rawOutput
+
   return (
-    <div className="flex items-center gap-2 px-3 py-1.5 text-xs text-blue-400">
-      <FileText className="h-3 w-3 shrink-0" />
-      <span>Exited plan mode</span>
+    <div className="rounded-md bg-[#161b22] border border-blue-500/30 overflow-hidden">
+      <div className="flex items-center gap-2 px-4 py-2.5 border-b border-border/30">
+        <FileText className="h-3.5 w-3.5 text-blue-400 shrink-0" />
+        <span className="text-xs text-blue-400 font-medium">{label}</span>
+      </div>
+      {details && (
+        <div className="px-4 py-3 max-h-[60vh] overflow-y-auto">
+          <Markdown size="xs">{details}</Markdown>
+        </div>
+      )}
     </div>
   )
 }
