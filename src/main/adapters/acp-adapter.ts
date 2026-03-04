@@ -122,7 +122,7 @@ interface AcpSession {
   responseCounter: number  // Counter for unique message IDs per response turn
   lastChunkTime: number | null  // Timestamp of last agent_message_chunk
   currentTurnId: number  // Auto-incremented ID for each detected response turn
-  sawToolCallSinceLastChunk: boolean  // Whether we saw a tool_call since last chunk
+  toolCallMetadata: Map<string, { name: string; input: string }>  // Cached metadata from initial tool_call events
 }
 
 /**
@@ -282,7 +282,7 @@ export class AcpAdapter implements CodingAgentAdapter {
       responseCounter: 0,
       lastChunkTime: null,
       currentTurnId: 0,
-      sawToolCallSinceLastChunk: false
+      toolCallMetadata: new Map()
     }
 
     // Temporarily store with workspace ID, will re-key after getting ACP session ID
@@ -446,7 +446,7 @@ export class AcpAdapter implements CodingAgentAdapter {
       responseCounter: 0,
       lastChunkTime: null,
       currentTurnId: 0,
-      sawToolCallSinceLastChunk: false
+      toolCallMetadata: new Map()
     }
 
     // Store with the Codex UUID (same as sessionId since we now return UUID from createSession)
@@ -1154,14 +1154,27 @@ export class AcpAdapter implements CodingAgentAdapter {
 
       // Handle different update types
       if (update.sessionUpdate === 'tool_call' || update.sessionUpdate === 'tool_call_update') {
-        // Mark that we saw a tool call - this helps detect new turns
-        if (session) {
-          session.sawToolCallSinceLastChunk = true
+        // Cache metadata from initial tool_call events (in_progress) so we can use it
+        // when the completed tool_call_update arrives (which may lack name/input fields)
+        if (update.status !== 'completed' && session && partId) {
+          const rawInput = update.rawInput as { command?: string | string[]; parsed_cmd?: Array<{ cmd?: string }> } | undefined
+          const commandFromInput = Array.isArray(rawInput?.command)
+            ? rawInput.command.join(' ')
+            : rawInput?.command
+          const commandFromParsed = rawInput?.parsed_cmd?.map((c) => c.cmd).join('; ')
+          const cachedInput = commandFromInput || commandFromParsed || update.title || ''
+          const cachedName = update.kind || ''
+          if (cachedName || cachedInput) {
+            session.toolCallMetadata.set(partId, { name: cachedName, input: cachedInput })
+          }
         }
 
         // Only create part if it's completed (has output)
         if (update.status === 'completed' && !seenPartIds.has(partId)) {
           seenPartIds.add(partId)
+
+          // Look up cached metadata from initial tool_call event
+          const cachedMeta = session?.toolCallMetadata.get(partId)
 
           // Extract command and output from rawInput/rawOutput
           const rawInput = update.rawInput as { command?: string | string[]; parsed_cmd?: Array<{ cmd?: string }> } | undefined
@@ -1169,7 +1182,9 @@ export class AcpAdapter implements CodingAgentAdapter {
             command?: string | string[];
             stdout?: string;
             stderr?: string;
-            formatted_output?: string
+            formatted_output?: string;
+            content?: Array<{ text?: string; type?: string }>;
+            isError?: boolean
           } | undefined
 
           // Try to get command from multiple sources (tool_call has rawInput, tool_call_update has it in rawOutput)
@@ -1181,14 +1196,30 @@ export class AcpAdapter implements CodingAgentAdapter {
             : rawOutput?.command
           const commandFromParsed = rawInput?.parsed_cmd?.map((c) => c.cmd).join('; ')
 
-          const command = commandFromInput || commandFromOutput || commandFromParsed || update.title || 'Unknown'
-          const output = rawOutput?.formatted_output || rawOutput?.stdout || rawOutput?.stderr || ''
+          // Extract from content array: [{type:"content", content:{type:"text", text:"..."}}]
+          const contentArray = update.content as Array<{ type?: string; content?: { type?: string; text?: string }; text?: string }> | undefined
+          const inputFromContent = Array.isArray(contentArray)
+            ? contentArray.map((c) => c.content?.text || c.text || '').filter(Boolean).join('\n')
+            : undefined
+
+          const command = commandFromInput || commandFromOutput || commandFromParsed || update.title || cachedMeta?.input || inputFromContent || 'Unknown'
+
+          // Extract output - handle Codex format: {content: [{text: "...", type: "text"}], isError: false}
+          const outputFromContent = Array.isArray(rawOutput?.content)
+            ? rawOutput.content.map((c) => c.text || '').filter(Boolean).join('\n')
+            : undefined
+          const output = rawOutput?.formatted_output || rawOutput?.stdout || rawOutput?.stderr || outputFromContent || ''
+
+          // Clean up cached metadata
+          if (session) {
+            session.toolCallMetadata.delete(partId)
+          }
 
           parts.push({
             id: partId,
             type: MessagePartType.TOOL,
             tool: {
-              name: update.kind || 'tool',
+              name: update.kind || cachedMeta?.name || 'tool',
               status: update.status,
               input: command,
               output: output
@@ -1199,20 +1230,18 @@ export class AcpAdapter implements CodingAgentAdapter {
         // Handle streaming text response from agent
         // Format: { content: { type: 'text', text: '...' } }
 
-        // Auto-detect new response turns based on time gaps or tool calls
+        // Auto-detect new response turns based on time gaps
         const now = Date.now()
         const TIME_GAP_THRESHOLD = 2000 // 2 seconds
 
         if (session) {
           const timeSinceLastChunk = session.lastChunkTime ? now - session.lastChunkTime : Infinity
           const isNewTurn = session.lastChunkTime === null ||
-                           timeSinceLastChunk > TIME_GAP_THRESHOLD ||
-                           session.sawToolCallSinceLastChunk
+                           timeSinceLastChunk > TIME_GAP_THRESHOLD
 
           if (isNewTurn) {
             session.currentTurnId++
-            session.sawToolCallSinceLastChunk = false
-            console.log(`[AcpAdapter] Detected NEW turn #${session.currentTurnId} (gap: ${timeSinceLastChunk}ms, sawTool: ${session.sawToolCallSinceLastChunk})`)
+            console.log(`[AcpAdapter] Detected NEW turn #${session.currentTurnId} (gap: ${timeSinceLastChunk}ms)`)
           }
 
           session.lastChunkTime = now
