@@ -1173,13 +1173,18 @@ export class AcpAdapter implements CodingAgentAdapter {
         // Cache metadata from initial tool_call events (in_progress) so we can use it
         // when the completed tool_call_update arrives (which may lack name/input fields)
         if (update.status !== 'completed' && session && partId) {
-          const rawInput = update.rawInput as { command?: string | string[]; parsed_cmd?: Array<{ cmd?: string }> } | undefined
+          const rawInput = update.rawInput as { command?: string | string[]; parsed_cmd?: Array<{ cmd?: string }>; tool?: string; server?: string } | undefined
           const commandFromInput = Array.isArray(rawInput?.command)
             ? rawInput.command.join(' ')
             : rawInput?.command
           const commandFromParsed = rawInput?.parsed_cmd?.map((c) => c.cmd).join('; ')
           const cachedInput = commandFromInput || commandFromParsed || update.title || ''
-          const cachedName = update.kind || ''
+          // Derive tool name: kind > rawInput.tool (with server prefix) > title (strip "Tool: " prefix)
+          const toolFromRawInput = rawInput?.tool
+            ? (rawInput.server ? `${rawInput.server}/${rawInput.tool}` : rawInput.tool)
+            : undefined
+          const toolFromTitle = update.title?.startsWith('Tool: ') ? update.title.slice(6) : undefined
+          const cachedName = update.kind || toolFromRawInput || toolFromTitle || ''
           if (cachedName || cachedInput) {
             session.toolCallMetadata.set(partId, { name: cachedName, input: cachedInput })
           }
@@ -1231,11 +1236,15 @@ export class AcpAdapter implements CodingAgentAdapter {
             session.toolCallMetadata.delete(partId)
           }
 
+          // Derive tool name from multiple sources
+          const completedToolFromTitle = update.title?.startsWith('Tool: ') ? update.title.slice(6) : undefined
+          const toolName = update.kind || cachedMeta?.name || completedToolFromTitle || update.title || 'tool'
+
           parts.push({
             id: partId,
             type: MessagePartType.TOOL,
             tool: {
-              name: update.kind || cachedMeta?.name || 'tool',
+              name: toolName,
               status: update.status,
               input: command,
               output: output
