@@ -238,6 +238,7 @@ export function ToolsMcpSettings() {
                       </Button>
                     </div>
                   </div>
+                  {/* Connection status row */}
                   {connection.status !== 'idle' && !hideConnectionRow && (
                     <div className={`flex items-center gap-2 px-4 py-2 text-xs border-t ${
                       connection.status === 'connected' ? 'bg-accent/50 text-foreground border-l-2 border-primary'
@@ -265,6 +266,13 @@ export function ToolsMcpSettings() {
                           <span className="truncate" title={connection.errorDetail || connection.error}>{connection.error || 'Connection failed'}</span>
                         </>
                       ) : null}
+                    </div>
+                  )}
+                  {/* OAuth Connected status row — shown when 401 error is hidden */}
+                  {hideConnectionRow && hasOAuth && oauthStatus?.connected && (
+                    <div className="flex items-center gap-2 px-4 py-2 text-xs border-t bg-emerald-500/5 text-emerald-400 border-l-2 border-emerald-500">
+                      <KeyRound className="h-3 w-3" />
+                      OAuth Connected
                     </div>
                   )}
                 </div>
