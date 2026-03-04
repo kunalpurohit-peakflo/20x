@@ -315,7 +315,7 @@ export class AcpAdapter implements CodingAgentAdapter {
     await this.authenticateSession(session, initResult)
 
     // Create ACP session (only accepts cwd and mcpServers per ACP spec)
-    const convertedMcpServers = this.convertMcpServers(config.mcpServers) || {}
+    const convertedMcpServers = this.convertMcpServers(config.mcpServers) || []
     console.log(`[AcpAdapter/${this.agentType}] session/new mcpServers:`, JSON.stringify(convertedMcpServers))
     const result = await this.sendRpcRequest(session, 'session/new', {
       cwd: config.workspaceDir,
@@ -483,7 +483,7 @@ export class AcpAdapter implements CodingAgentAdapter {
       await this.sendRpcRequest(session, 'session/load', {
         sessionId: sessionId,
         cwd: config.workspaceDir,
-        mcpServers: this.convertMcpServers(config.mcpServers) || {}
+        mcpServers: this.convertMcpServers(config.mcpServers) || []
       })
 
       console.log(`[AcpAdapter/${this.agentType}] Session loaded successfully: ${sessionId}`)
@@ -1084,26 +1084,29 @@ export class AcpAdapter implements CodingAgentAdapter {
     return (obj.sessionId || obj.session_id || obj.id) as string | null
   }
 
-  private convertMcpServers(servers?: Record<string, McpServerConfig>): Record<string, unknown> {
-    if (!servers) return {}
+  private convertMcpServers(servers?: Record<string, McpServerConfig>): unknown[] {
+    if (!servers) return []
 
-    const result: Record<string, unknown> = {}
+    const result: unknown[] = []
     for (const [name, config] of Object.entries(servers)) {
       // Codex uses an untagged serde enum with deny_unknown_fields,
       // so only include fields defined in the matching variant.
-      // No "name" or "type" fields — variant is inferred from "command" vs "url".
+      // Codex expects mcpServers as an array of objects with a "name" field.
+      // Variant is inferred from "command" vs "url".
       if (config.type === 'stdio') {
-        result[name] = {
+        result.push({
+          name,
           command: config.command,
           args: config.args || [],
           ...(config.env ? { env: config.env } : {})
-        }
+        })
       } else {
         // http or sse → Codex StreamableHttp variant
-        result[name] = {
+        result.push({
+          name,
           url: config.url,
           ...(config.headers ? { http_headers: config.headers } : {})
-        }
+        })
       }
     }
     return result
