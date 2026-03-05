@@ -1242,64 +1242,60 @@ export class AgentManager extends EventEmitter {
         }
       }
 
-      // Forward to renderer (skip user messages - already added when sent)
+      // Collect all parts into a batch instead of sending individually.
+      // This avoids flooding the renderer with N separate IPC messages
+      // that each trigger a Zustand state update + React re-render.
+      const batchMessages: Array<{ id: string; role: string; content: string; partType?: string; tool?: unknown; update?: boolean }> = []
       for (const part of newParts) {
-        if (part.role === 'user') {
-          console.log(`[AgentManager] Skipping user message from adapter: id=${part.id}, content=${(part.text || part.content || '').slice(0, 200)}`)
-          continue
-        }
+        if (part.role === 'user') continue
 
-        console.log(`[AgentManager] Sending to UI: id=${part.id}, partType=${part.type}, update=${part.update}, contentLength=${(part.content || part.text || '').length}`)
-        this.sendToRenderer('agent:output', {
-          sessionId,
-          taskId: config.taskId,
-          type: 'message',
-          data: {
-            id: part.id,
-            role: part.role || 'assistant',
-            content: part.content || part.text || '',
-            partType: part.type,
-            tool: part.tool,
-            update: part.update
-          }
+        batchMessages.push({
+          id: part.id,
+          role: part.role || 'assistant',
+          content: part.content || part.text || '',
+          partType: part.type,
+          tool: part.tool,
+          update: part.update
         })
       }
 
-      // Check for pending approval (ACP adapters only)
+      // Check for pending approval (ACP adapters only) — include in same batch
       if ('getPendingApproval' in adapter && typeof adapter.getPendingApproval === 'function') {
         const approval = (adapter as unknown as AcpAdapter).getPendingApproval(sessionId)
         if (approval && !entry.seenPartIds.has(`approval-${approval.toolCallId}`)) {
           entry.seenPartIds.add(`approval-${approval.toolCallId}`)
 
-          this.sendToRenderer('agent:output', {
-            sessionId,
-            taskId: config.taskId,
-            type: 'message',
-            data: {
-              id: `question-${approval.toolCallId}`,
-              role: 'assistant',
-              content: approval.question,
-              partType: 'question',
-              tool: {
-                name: 'permission',
-                questions: [{
-                  header: 'Permission Required',
-                  question: approval.question,
-                  options: approval.options.map(opt => ({
-                    label: opt.name
-                  }))
-                }]
-              }
+          batchMessages.push({
+            id: `question-${approval.toolCallId}`,
+            role: 'assistant',
+            content: approval.question,
+            partType: 'question',
+            tool: {
+              name: 'permission',
+              questions: [{
+                header: 'Permission Required',
+                question: approval.question,
+                options: approval.options.map((opt: { name: string }) => ({
+                  label: opt.name
+                }))
+              }]
             }
           })
         }
       }
 
+      // Send all parts in a single IPC call
+      if (batchMessages.length > 0) {
+        this.sendToRenderer('agent:output-batch', {
+          sessionId,
+          taskId: config.taskId,
+          messages: batchMessages
+        })
+      }
+
       // Check status
       const status = await adapter.getStatus(sessionId, config)
       const session = this.sessions.get(sessionId)
-
-      console.log(`[AgentManager] Polling session ${sessionId}: adapter status=${status.type}, session.status=${session?.status}`)
 
       // Check for errors first (higher priority than idle)
       if (status.type === SessionStatusType.ERROR) {

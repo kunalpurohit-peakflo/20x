@@ -220,43 +220,119 @@ export const useAgentStore = create<AgentState>((set, get) => {
     })
   })
 
-  onAgentOutputBatch((event: AgentOutputBatchEvent) => {
+  // ── Batched output handler with rAF debouncing ──
+  // Collects batch events from ALL sessions and flushes them in a single
+  // Zustand set() call on the next animation frame. This prevents N separate
+  // state updates (and N React re-renders) when multiple agents send parts
+  // in the same polling tick.
+  let pendingBatches: AgentOutputBatchEvent[] = []
+  let batchRafId: number | null = null
+
+  function flushPendingBatches(): void {
+    batchRafId = null
+    const batches = pendingBatches
+    pendingBatches = []
+    if (batches.length === 0) return
+
     const state = get()
-    const session = findBySessionId(state.sessions, event.sessionId)
-      || state.sessions.get(event.taskId)
-    if (!session) return
+    const nextSessions = new Map(state.sessions)
+    let changed = false
 
-    const taskId = session.taskId
-    const seen = getSeen(taskId)
+    for (const event of batches) {
+      const session = findBySessionId(state.sessions, event.sessionId)
+        || state.sessions.get(event.taskId)
+      if (!session) continue
 
-    const messages: AgentMessage[] = []
-    for (const msg of event.messages) {
-      const role: AgentMessage['role'] = msg.role === 'user' ? 'user' : msg.role === 'assistant' ? 'assistant' : 'system'
-      const msgId = msg.id || `${role}-${(msg.content || '').slice(0, 50)}-${Date.now()}`
-      if (seen.has(msgId)) continue
-      seen.add(msgId)
-      messages.push({
-        id: msgId,
-        role,
-        content: msg.content || '',
-        timestamp: new Date(),
-        partType: msg.partType,
-        tool: msg.tool as AgentMessage['tool']
-      })
+      const taskId = session.taskId
+      const seen = getSeen(taskId)
+
+      // Resolve sessionId if needed
+      const resolvedSession = (!session.sessionId && event.sessionId)
+        ? { ...session, sessionId: event.sessionId }
+        : (nextSessions.get(taskId) || session)
+
+      let messages = [...resolvedSession.messages]
+      let messagesChanged = false
+
+      for (const msg of event.messages) {
+        const role: AgentMessage['role'] = msg.role === 'user' ? 'user' : msg.role === 'assistant' ? 'assistant' : 'system'
+        const msgId = msg.id || `${role}-${(msg.content || '').slice(0, 50)}-${Date.now()}`
+        const content = msg.content || ''
+
+        // Absorb step-start: record timestamp, don't add as message
+        if (msg.partType === 'step-start') {
+          seen.add(msgId)
+          stepStartTimes.set(taskId, Date.now())
+          continue
+        }
+
+        // Absorb step-finish: annotate last assistant message with duration + tokens
+        if (msg.partType === 'step-finish') {
+          seen.add(msgId)
+          const now = Date.now()
+          const startTime = stepStartTimes.get(taskId)
+          const durationMs = startTime ? now - startTime : undefined
+          const tokens = (msg as Record<string, unknown>).stepTokens as { input: number; output: number; cache: number } | undefined
+          stepStartTimes.delete(taskId)
+
+          let targetIdx = -1
+          for (let i = messages.length - 1; i >= 0; i--) {
+            if (messages[i].role === 'assistant') { targetIdx = i; break }
+          }
+          if (targetIdx !== -1) {
+            messages[targetIdx] = { ...messages[targetIdx], stepMeta: { durationMs, tokens } }
+            messagesChanged = true
+          }
+          continue
+        }
+
+        // Streaming update — replace content of existing message
+        if (msg.update && seen.has(msgId)) {
+          messages = messages.map((m): AgentMessage => {
+            if (m.id !== msgId) return m
+            const keepPartType = m.partType === 'todowrite' || m.partType === 'question' || m.partType === 'planreview'
+            const newPartType = keepPartType ? m.partType : (msg.partType || m.partType)
+            const newTool = msg.tool ? { ...m.tool, ...(msg.tool as AgentMessage['tool']) } as AgentMessage['tool'] : m.tool
+            return { ...m, content, partType: newPartType, tool: newTool }
+          })
+          messagesChanged = true
+          continue
+        }
+
+        // Skip already-seen messages
+        if (seen.has(msgId)) continue
+        seen.add(msgId)
+
+        // Allow empty content for tool/question messages
+        if (!content && !msg.tool) continue
+
+        messages.push({
+          id: msgId,
+          role,
+          content,
+          timestamp: new Date(),
+          partType: msg.partType,
+          tool: msg.tool as AgentMessage['tool']
+        })
+        messagesChanged = true
+      }
+
+      if (messagesChanged) {
+        nextSessions.set(taskId, { ...resolvedSession, messages })
+        changed = true
+      }
     }
 
-    if (messages.length === 0) return
+    if (changed) {
+      set({ sessions: nextSessions })
+    }
+  }
 
-    const resolvedSession = (!session.sessionId && event.sessionId)
-      ? { ...session, sessionId: event.sessionId }
-      : session
-
-    set({
-      sessions: new Map(state.sessions).set(taskId, {
-        ...resolvedSession,
-        messages: [...resolvedSession.messages, ...messages]
-      })
-    })
+  onAgentOutputBatch((event: AgentOutputBatchEvent) => {
+    pendingBatches.push(event)
+    if (batchRafId === null) {
+      batchRafId = requestAnimationFrame(flushPendingBatches)
+    }
   })
 
   onAgentApproval((event: AgentApprovalRequest) => {

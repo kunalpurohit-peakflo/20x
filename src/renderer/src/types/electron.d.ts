@@ -46,7 +46,7 @@ export interface AgentOutputEvent {
 export interface AgentOutputBatchEvent {
   sessionId: string
   taskId: string
-  messages: Array<{ id: string; role: string; content: string; partType?: string; tool?: unknown }>
+  messages: Array<{ id: string; role: string; content: string; partType?: string; tool?: unknown; update?: boolean }>
 }
 
 export interface AgentStatusEvent {
