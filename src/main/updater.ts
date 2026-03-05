@@ -118,9 +118,16 @@ export function initUpdater(mainWindow: BrowserWindow): void {
 }
 
 /**
+ * Set the downloaded file path (used when the IPC handler catches Squirrel errors).
+ */
+export function setDownloadedFilePath(path: string): void {
+  downloadedFilePath = path
+}
+
+/**
  * Scan the electron-updater cache directory for a pending update ZIP.
  */
-function findCachedUpdate(): string | null {
+export function findCachedUpdate(): string | null {
   try {
     const cacheDir = join(app.getPath('appData'), '..', 'Caches', `${app.getName()}-updater`, 'pending')
     console.log('[Updater] Scanning cache dir:', cacheDir)

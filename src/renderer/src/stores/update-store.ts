@@ -17,6 +17,8 @@ interface UpdateState {
   currentVersion: string | null
   /** Error message from the last operation */
   error: string | null
+  /** Whether we just checked and found no updates (auto-cleared after a few seconds) */
+  isUpToDate: boolean
 
   /** Trigger a manual update check */
   checkForUpdates: () => Promise<void>
@@ -40,9 +42,10 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
   isReadyToInstall: false,
   currentVersion: null,
   error: null,
+  isUpToDate: false,
 
   checkForUpdates: async () => {
-    set({ isChecking: true, error: null })
+    set({ isChecking: true, error: null, isUpToDate: false })
     try {
       await updateApi.check()
       // The result comes asynchronously via the 'update:available' or 'update:not-available' event.
@@ -57,7 +60,13 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
     try {
       await updateApi.download()
     } catch (err) {
-      set({ isDownloading: false, error: err instanceof Error ? err.message : 'Download failed' })
+      // Don't overwrite if the download was actually successful (e.g. macOS
+      // Squirrel code-sig error — the IPC handler catches it and sends
+      // update:downloaded via event before re-throwing).
+      const state = get()
+      if (!state.isReadyToInstall) {
+        set({ isDownloading: false, error: err instanceof Error ? err.message : 'Download failed' })
+      }
     }
   },
 
@@ -88,7 +97,12 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
         })
       }),
       onUpdateNotAvailable(() => {
-        set({ isChecking: false })
+        set({ isChecking: false, isUpToDate: true })
+        // Auto-clear the "up to date" message after 5 seconds
+        setTimeout(() => {
+          const state = get()
+          if (state.isUpToDate) set({ isUpToDate: false })
+        }, 5000)
       }),
       onUpdateDownloadProgress((progress) => {
         set({ downloadProgress: progress })

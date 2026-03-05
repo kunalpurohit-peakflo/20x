@@ -1,7 +1,8 @@
 import { Dialog, DialogContent, DialogHeader, DialogBody, DialogTitle, DialogDescription } from '@/components/ui/Dialog'
 import { Button } from '@/components/ui/Button'
+import { Markdown } from '@/components/ui/Markdown'
 import { useUpdateStore } from '@/stores/update-store'
-import { Download, RotateCw, Loader2 } from 'lucide-react'
+import { Download, RotateCw, Loader2, ExternalLink } from 'lucide-react'
 
 interface UpdateDialogProps {
   open: boolean
@@ -63,12 +64,26 @@ export function UpdateDialog({ open, onClose }: UpdateDialogProps) {
                 <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">
                   What&apos;s New
                 </h4>
-                <div
-                  className="prose prose-sm prose-invert max-w-none text-sm [&_ul]:list-disc [&_ul]:pl-4 [&_li]:my-0.5 [&_a]:text-primary [&_a]:underline [&_h2]:text-sm [&_h2]:font-semibold [&_h2]:mt-2 [&_h2]:mb-1 [&_p]:my-1"
-                  dangerouslySetInnerHTML={{ __html: updateAvailable.releaseNotes }}
-                />
+                <Markdown size="xs">
+                  {updateAvailable.releaseNotes}
+                </Markdown>
               </div>
             )}
+
+            {/* Link to full release page */}
+            <a
+              href={`https://github.com/peakflo/20x/releases/tag/v${updateAvailable.version}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 text-xs text-primary hover:underline"
+              onClick={(e) => {
+                e.preventDefault()
+                window.electronAPI.shell.openExternal(`https://github.com/peakflo/20x/releases/tag/v${updateAvailable.version}`)
+              }}
+            >
+              <ExternalLink className="h-3 w-3" />
+              View full release on GitHub
+            </a>
 
             {/* Download progress */}
             {isDownloading && downloadProgress && (

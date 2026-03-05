@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Plus, Search, ChevronDown, X, Settings, FileText, RefreshCw, Loader2, Play, Pause } from 'lucide-react'
+import { Plus, Search, ChevronDown, X, Settings, FileText, RefreshCw, Loader2, Play, Pause, ArrowUpCircle } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import { TaskList } from '@/components/tasks/TaskList'
 import { SkillList } from '@/components/skills/SkillList'
@@ -46,7 +46,7 @@ export function Sidebar({ tasks, selectedTaskId, overdueCount, onSelectTask, onC
   const { fetchTasks } = useTaskStore()
   const { skills, selectedSkillId, fetchSkills, selectSkill, createSkill } = useSkillStore()
   const { isEnabled: isAutoStartEnabled, toggle: toggleAutoStart } = useAgentSchedulerStore()
-  const { updateAvailable } = useUpdateStore()
+  const { updateAvailable, isChecking, checkForUpdates, currentVersion } = useUpdateStore()
   const { openUpdateDialog } = useUIStore()
   const [isSyncingAll, setIsSyncingAll] = useState(false)
 
@@ -260,11 +260,38 @@ export function Sidebar({ tasks, selectedTaskId, overdueCount, onSelectTask, onC
           </div>
 
           <div className="px-4 py-2.5 border-t text-xs text-muted-foreground tabular-nums">
-            {tasks.filter((t) => t.status !== TaskStatus.Completed && !isSnoozed(t.snoozed_until)).length} active
-            {tasks.filter((t) => t.status !== TaskStatus.Completed && isSnoozed(t.snoozed_until)).length > 0 && (
-              <> · {tasks.filter((t) => t.status !== TaskStatus.Completed && isSnoozed(t.snoozed_until)).length} hidden</>
-            )}
-            {' '}· {tasks.length} total
+            <div className="flex items-center justify-between">
+              <span>
+                {tasks.filter((t) => t.status !== TaskStatus.Completed && !isSnoozed(t.snoozed_until)).length} active
+                {tasks.filter((t) => t.status !== TaskStatus.Completed && isSnoozed(t.snoozed_until)).length > 0 && (
+                  <> · {tasks.filter((t) => t.status !== TaskStatus.Completed && isSnoozed(t.snoozed_until)).length} hidden</>
+                )}
+                {' '}· {tasks.length} total
+              </span>
+              {updateAvailable ? (
+                <button
+                  onClick={openUpdateDialog}
+                  className="flex items-center gap-1 text-amber-400 hover:text-amber-300 cursor-pointer transition-colors"
+                  title={`Update to v${updateAvailable.version}`}
+                >
+                  <ArrowUpCircle className="h-3 w-3" />
+                  <span>Update</span>
+                </button>
+              ) : (
+                <button
+                  onClick={checkForUpdates}
+                  disabled={isChecking}
+                  className="text-muted-foreground hover:text-foreground cursor-pointer transition-colors disabled:opacity-50"
+                  title="Check for updates"
+                >
+                  {isChecking ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <span>v{currentVersion ?? '...'}</span>
+                  )}
+                </button>
+              )}
+            </div>
           </div>
         </>
       ) : (
@@ -284,7 +311,32 @@ export function Sidebar({ tasks, selectedTaskId, overdueCount, onSelectTask, onC
           </div>
 
           <div className="px-4 py-2.5 border-t text-xs text-muted-foreground tabular-nums">
-            {skills.length} skill{skills.length !== 1 ? 's' : ''}
+            <div className="flex items-center justify-between">
+              <span>{skills.length} skill{skills.length !== 1 ? 's' : ''}</span>
+              {updateAvailable ? (
+                <button
+                  onClick={openUpdateDialog}
+                  className="flex items-center gap-1 text-amber-400 hover:text-amber-300 cursor-pointer transition-colors"
+                  title={`Update to v${updateAvailable.version}`}
+                >
+                  <ArrowUpCircle className="h-3 w-3" />
+                  <span>Update</span>
+                </button>
+              ) : (
+                <button
+                  onClick={checkForUpdates}
+                  disabled={isChecking}
+                  className="text-muted-foreground hover:text-foreground cursor-pointer transition-colors disabled:opacity-50"
+                  title="Check for updates"
+                >
+                  {isChecking ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <span>v{currentVersion ?? '...'}</span>
+                  )}
+                </button>
+              )}
+            </div>
           </div>
         </>
       )}

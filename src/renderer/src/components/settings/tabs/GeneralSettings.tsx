@@ -178,7 +178,7 @@ export function GeneralSettings() {
 }
 
 function UpdateSection() {
-  const { updateAvailable, isChecking, currentVersion, checkForUpdates } = useUpdateStore()
+  const { updateAvailable, isChecking, isUpToDate, currentVersion, checkForUpdates } = useUpdateStore()
   const { openUpdateDialog } = useUIStore()
 
   return (
@@ -195,6 +195,11 @@ function UpdateSection() {
               {updateAvailable && (
                 <span className="ml-2 text-amber-400 font-medium">
                   v{updateAvailable.version} available
+                </span>
+              )}
+              {isUpToDate && !updateAvailable && (
+                <span className="ml-2 text-green-400 font-medium">
+                  Up to date
                 </span>
               )}
             </p>
