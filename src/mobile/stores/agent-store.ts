@@ -224,9 +224,9 @@ export const useAgentStore = create<AgentState>((set, get) => {
     })
   })
 
-  // Handle batch message events (sent during session resume with full history)
+  // Handle batch message events (sent during session resume and live polling)
   onEvent('agent:output-batch', (payload) => {
-    const event = payload as { sessionId: string; taskId: string; messages: Array<{ id: string; role: string; content: string; partType?: string; tool?: unknown }> }
+    const event = payload as { sessionId: string; taskId: string; messages: Array<{ id: string; role: string; content: string; partType?: string; tool?: unknown; update?: boolean }> }
 
     set((state) => {
       const session = findBySessionId(state.sessions, event.sessionId)
@@ -236,32 +236,78 @@ export const useAgentStore = create<AgentState>((set, get) => {
       const taskId = session.taskId
       const seen = getSeen(taskId)
 
-      const messages: AgentMessage[] = []
-      for (const msg of event.messages) {
-        const role: AgentMessage['role'] = msg.role === 'user' ? 'user' : msg.role === 'assistant' ? 'assistant' : 'system'
-        const msgId = msg.id || `${role}-${(msg.content || '').slice(0, 50)}-${Date.now()}`
-        if (seen.has(msgId)) continue
-        seen.add(msgId)
-        messages.push({
-          id: msgId,
-          role,
-          content: msg.content || '',
-          timestamp: new Date(),
-          partType: msg.partType,
-          tool: msg.tool as AgentMessage['tool']
-        })
-      }
-
-      if (messages.length === 0) return state
-
       const resolvedSession = (!session.sessionId && event.sessionId)
         ? { ...session, sessionId: event.sessionId }
         : session
 
+      let messages = [...resolvedSession.messages]
+      let changed = false
+
+      for (const msg of event.messages) {
+        const role: AgentMessage['role'] = msg.role === 'user' ? 'user' : msg.role === 'assistant' ? 'assistant' : 'system'
+        const msgId = msg.id || `${role}-${(msg.content || '').slice(0, 50)}-${Date.now()}`
+        const content = msg.content || ''
+
+        // Absorb step-start: record timestamp
+        if (msg.partType === 'step-start') {
+          seen.add(msgId)
+          stepStartTimes.set(taskId, Date.now())
+          continue
+        }
+
+        // Absorb step-finish: annotate last assistant message
+        if (msg.partType === 'step-finish') {
+          seen.add(msgId)
+          const now = Date.now()
+          const startTime = stepStartTimes.get(taskId)
+          const durationMs = startTime ? now - startTime : undefined
+          const tokens = (msg as Record<string, unknown>).stepTokens as { input: number; output: number; cache: number } | undefined
+          stepStartTimes.delete(taskId)
+          let targetIdx = -1
+          for (let i = messages.length - 1; i >= 0; i--) {
+            if (messages[i].role === 'assistant') { targetIdx = i; break }
+          }
+          if (targetIdx !== -1) {
+            messages[targetIdx] = { ...messages[targetIdx], stepMeta: { durationMs, tokens } }
+            changed = true
+          }
+          continue
+        }
+
+        // Streaming update — replace content of existing message
+        if (msg.update && seen.has(msgId)) {
+          messages = messages.map((m): AgentMessage => {
+            if (m.id !== msgId) return m
+            const keepPartType = m.partType === 'todowrite' || m.partType === 'question' || m.partType === 'planreview'
+            const newPartType = keepPartType ? m.partType : (msg.partType || m.partType)
+            const newTool = msg.tool ? { ...m.tool, ...(msg.tool as AgentMessage['tool']) } as AgentMessage['tool'] : m.tool
+            return { ...m, content, partType: newPartType, tool: newTool }
+          })
+          changed = true
+          continue
+        }
+
+        if (seen.has(msgId)) continue
+        seen.add(msgId)
+        if (!content && !msg.tool) continue
+
+        messages.push({
+          id: msgId,
+          role,
+          content,
+          timestamp: new Date(),
+          partType: msg.partType,
+          tool: msg.tool as AgentMessage['tool']
+        })
+        changed = true
+      }
+
+      if (!changed) return state
+
       return {
         sessions: new Map(state.sessions).set(taskId, {
           ...resolvedSession,
-          messages: [...resolvedSession.messages, ...messages]
+          messages
         })
       }
     })

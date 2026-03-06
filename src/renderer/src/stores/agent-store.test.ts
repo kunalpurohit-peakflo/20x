@@ -2,8 +2,17 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { Mock } from 'vitest'
 import { useAgentStore } from './agent-store'
 import type { Agent, CreateAgentDTO, UpdateAgentDTO } from '@/types'
+import type { AgentOutputBatchEvent } from '@/types/electron'
 
 const mockElectronAPI = window.electronAPI
+
+// Capture the onAgentOutputBatch callback before any test clears mocks.
+// The store registers it once at module init time.
+let batchCallback: ((event: AgentOutputBatchEvent) => void) | null = null
+{
+  const calls = (mockElectronAPI.onAgentOutputBatch as unknown as Mock).mock.calls
+  if (calls.length > 0) batchCallback = calls[0][0]
+}
 
 beforeEach(() => {
   useAgentStore.setState({
@@ -179,6 +188,198 @@ describe('useAgentStore', () => {
 
       // Verify internal dedup state was cleared by checking messages were cleared
       expect(useAgentStore.getState().sessions.get('task-1')!.messages).toHaveLength(0)
+    })
+  })
+
+  describe('Batched output handler (onAgentOutputBatch)', () => {
+    /** Flush pending rAF-debounced batches synchronously */
+    function flushRaf(): Promise<void> {
+      return new Promise((resolve) => requestAnimationFrame(() => resolve()))
+    }
+
+    it('adds new messages from a batch event', async () => {
+      useAgentStore.getState().initSession('task-1', 'sess-1', 'agent-1')
+
+      batchCallback!({
+        sessionId: 'sess-1',
+        taskId: 'task-1',
+        messages: [
+          { id: 'p1', role: 'assistant', content: 'Hello' },
+          { id: 'p2', role: 'assistant', content: 'World', partType: 'tool', tool: { name: 'Bash', status: 'pending' } }
+        ]
+      })
+
+      await flushRaf()
+
+      const msgs = useAgentStore.getState().sessions.get('task-1')!.messages
+      expect(msgs).toHaveLength(2)
+      expect(msgs[0].content).toBe('Hello')
+      expect(msgs[1].content).toBe('World')
+      expect(msgs[1].tool?.name).toBe('Bash')
+    })
+
+    it('deduplicates already-seen messages', async () => {
+      useAgentStore.getState().initSession('task-1', 'sess-1', 'agent-1')
+
+      // First batch
+      batchCallback!({
+        sessionId: 'sess-1',
+        taskId: 'task-1',
+        messages: [{ id: 'p1', role: 'assistant', content: 'Hello' }]
+      })
+      await flushRaf()
+
+      // Second batch with same message id
+      batchCallback!({
+        sessionId: 'sess-1',
+        taskId: 'task-1',
+        messages: [{ id: 'p1', role: 'assistant', content: 'Hello again' }]
+      })
+      await flushRaf()
+
+      const msgs = useAgentStore.getState().sessions.get('task-1')!.messages
+      expect(msgs).toHaveLength(1)
+      expect(msgs[0].content).toBe('Hello')
+    })
+
+    it('handles update messages (tool completion)', async () => {
+      useAgentStore.getState().initSession('task-1', 'sess-1', 'agent-1')
+
+      // Initial tool call
+      batchCallback!({
+        sessionId: 'sess-1',
+        taskId: 'task-1',
+        messages: [
+          { id: 'tool-123', role: 'assistant', content: 'Bash', partType: 'tool', tool: { name: 'Bash', status: 'pending', title: 'ls' } }
+        ]
+      })
+      await flushRaf()
+
+      // Tool result update
+      batchCallback!({
+        sessionId: 'sess-1',
+        taskId: 'task-1',
+        messages: [
+          { id: 'tool-123', role: 'assistant', content: 'Tool completed', partType: 'tool', tool: { name: 'Bash', status: 'success', output: 'file.txt' }, update: true }
+        ]
+      })
+      await flushRaf()
+
+      const msgs = useAgentStore.getState().sessions.get('task-1')!.messages
+      expect(msgs).toHaveLength(1)
+      expect(msgs[0].content).toBe('Tool completed')
+      expect(msgs[0].tool?.status).toBe('success')
+      expect(msgs[0].tool?.output).toBe('file.txt')
+    })
+
+    it('preserves todowrite/question partType on updates', async () => {
+      useAgentStore.getState().initSession('task-1', 'sess-1', 'agent-1')
+
+      // Initial question
+      batchCallback!({
+        sessionId: 'sess-1',
+        taskId: 'task-1',
+        messages: [
+          { id: 'q-1', role: 'assistant', content: 'Question', partType: 'question', tool: { name: 'AskUser', status: 'pending', questions: [] } }
+        ]
+      })
+      await flushRaf()
+
+      // Update with generic partType
+      batchCallback!({
+        sessionId: 'sess-1',
+        taskId: 'task-1',
+        messages: [
+          { id: 'q-1', role: 'assistant', content: 'Updated', partType: 'tool', tool: { name: 'AskUser', status: 'success' }, update: true }
+        ]
+      })
+      await flushRaf()
+
+      const msgs = useAgentStore.getState().sessions.get('task-1')!.messages
+      expect(msgs[0].partType).toBe('question') // preserved, not overwritten to 'tool'
+    })
+
+    it('absorbs step-start and step-finish into stepMeta', async () => {
+      useAgentStore.getState().initSession('task-1', 'sess-1', 'agent-1')
+
+      // Send step-start, a message, and step-finish in one batch
+      batchCallback!({
+        sessionId: 'sess-1',
+        taskId: 'task-1',
+        messages: [
+          { id: 'step-s-1', role: 'assistant', content: '', partType: 'step-start' },
+          { id: 'msg-1', role: 'assistant', content: 'Thinking...' },
+          { id: 'step-f-1', role: 'assistant', content: '', partType: 'step-finish' }
+        ]
+      })
+      await flushRaf()
+
+      const msgs = useAgentStore.getState().sessions.get('task-1')!.messages
+      // step-start and step-finish should not appear as messages
+      expect(msgs).toHaveLength(1)
+      expect(msgs[0].content).toBe('Thinking...')
+      // stepMeta should be annotated (durationMs will be ~0 since same tick)
+      expect(msgs[0].stepMeta).toBeDefined()
+      expect(msgs[0].stepMeta!.durationMs).toBeDefined()
+    })
+
+    it('coalesces multiple batches from different sessions into single state update', async () => {
+      useAgentStore.getState().initSession('task-1', 'sess-1', 'agent-1')
+      useAgentStore.getState().initSession('task-2', 'sess-2', 'agent-1')
+
+      // Track how many times set() is called by counting state changes
+      const stateChanges: number[] = []
+      const unsub = useAgentStore.subscribe(() => stateChanges.push(1))
+
+      // Fire two batch events synchronously (before rAF fires)
+      batchCallback!({
+        sessionId: 'sess-1',
+        taskId: 'task-1',
+        messages: [{ id: 'a1', role: 'assistant', content: 'From agent 1' }]
+      })
+      batchCallback!({
+        sessionId: 'sess-2',
+        taskId: 'task-2',
+        messages: [{ id: 'b1', role: 'assistant', content: 'From agent 2' }]
+      })
+
+      // Both should be processed in a single rAF flush
+      await flushRaf()
+
+      unsub()
+
+      // Only 1 state update should have occurred (both batches coalesced)
+      expect(stateChanges).toHaveLength(1)
+
+      // Both sessions should have their messages
+      expect(useAgentStore.getState().sessions.get('task-1')!.messages).toHaveLength(1)
+      expect(useAgentStore.getState().sessions.get('task-2')!.messages).toHaveLength(1)
+    })
+
+    it('ignores batch for unknown session', async () => {
+      batchCallback!({
+        sessionId: 'unknown-sess',
+        taskId: 'unknown-task',
+        messages: [{ id: 'x1', role: 'assistant', content: 'Ghost' }]
+      })
+      await flushRaf()
+
+      expect(useAgentStore.getState().sessions.size).toBe(0)
+    })
+
+    it('resolves session by taskId when sessionId does not match', async () => {
+      useAgentStore.getState().initSession('task-1', '', 'agent-1')
+
+      batchCallback!({
+        sessionId: 'real-sess-1',
+        taskId: 'task-1',
+        messages: [{ id: 'p1', role: 'assistant', content: 'Hello' }]
+      })
+      await flushRaf()
+
+      const session = useAgentStore.getState().sessions.get('task-1')!
+      expect(session.sessionId).toBe('real-sess-1')
+      expect(session.messages).toHaveLength(1)
     })
   })
 })

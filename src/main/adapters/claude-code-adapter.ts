@@ -824,31 +824,13 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
   /**
    * Safely logs a message by truncating large base64 content
    */
+  /**
+   * Lightweight message logger — only logs type/subtype to avoid blocking
+   * the event loop with expensive JSON serialization on every streaming chunk.
+   */
   private safeLogMessage(msg: SDKMessage): void {
-    const MAX_LOG_LENGTH = 1000 // Max chars for any single field
-
-    try {
-      // Create a deep copy and truncate large fields
-      const truncated = JSON.parse(JSON.stringify(msg, (_key, value) => {
-        if (typeof value === 'string' && value.length > MAX_LOG_LENGTH) {
-          // Check if it looks like base64 data (high ratio of base64 chars)
-          const base64Chars = (value.match(/[A-Za-z0-9+/=]/g) || []).length
-          const isLikelyBase64 = base64Chars / value.length > 0.9
-
-          if (isLikelyBase64) {
-            return `<base64 data: ${value.length} chars, truncated...>`
-          }
-          return value.substring(0, MAX_LOG_LENGTH) + `... (${value.length} chars total)`
-        }
-        return value
-      }))
-
-      console.log('[ClaudeCodeAdapter] Received message:', JSON.stringify(truncated, null, 2))
-    } catch {
-      // Fallback to basic logging if parsing fails
-      const msgRecord = msg as unknown as Record<string, unknown>
-      console.log('[ClaudeCodeAdapter] Received message (logging failed):', msgRecord.type, msgRecord.subtype)
-    }
+    const m = msg as unknown as Record<string, unknown>
+    console.log(`[ClaudeCodeAdapter] msg: type=${m.type} subtype=${m.subtype || '-'}`)
   }
 
   /**
