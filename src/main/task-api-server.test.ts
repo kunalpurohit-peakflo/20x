@@ -178,7 +178,7 @@ describe('parseTask - skill_ids null vs empty array semantics', () => {
     const rawSkillIds: string | null = null
 
     // OLD (buggy) behavior — demonstrates the problem:
-    const buggyResult = JSON.parse((rawSkillIds as string) || '[]')
+    const buggyResult = JSON.parse((rawSkillIds as unknown as string) || '[]')
     expect(buggyResult).toEqual([]) // Incorrectly becomes "no skills"
 
     // NEW (fixed) behavior — preserves null:
