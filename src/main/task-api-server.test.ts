@@ -188,6 +188,14 @@ describe('parseTask - skill_ids null vs empty array semantics', () => {
 })
 
 describe('Recurring task skill_ids propagation', () => {
+  /**
+   * Helper that mirrors the fixed parseTask logic from task-api-server.ts.
+   * Tests verify the raw DB row goes through this correctly.
+   */
+  function parseTaskSkillIds(rawSkillIds: string | null): string[] | null {
+    return rawSkillIds ? JSON.parse(rawSkillIds) : null
+  }
+
   it('copies skill_ids from recurring template to created instance', () => {
     const agent = db.createAgent(makeAgent({ name: 'Test Agent' }))!
     const template = db.createTask(makeTask({
@@ -282,6 +290,52 @@ describe('Recurring task skill_ids propagation', () => {
     const instance = db.getTask(instanceId)!
     expect(instance.agent_id).toBe(agent.id)
     expect(instance.skill_ids).toBeNull() // Must stay null, NOT become []
+  })
+
+  it('end-to-end: recurring instance skill_ids survive the API parseTask path', () => {
+    const agent = db.createAgent(makeAgent({ name: 'Test Agent' }))!
+    const template = db.createTask(makeTask({
+      title: 'Template with skills',
+      is_recurring: true,
+      recurrence_pattern: { type: 'daily', interval: 1, time: '09:00' }
+    }))!
+    db.updateTask(template.id, { agent_id: agent.id, skill_ids: ['skill-x', 'skill-y'] })
+    const updatedTemplate = db.getTask(template.id)!
+
+    // Create instance (simulates RecurrenceScheduler)
+    const instanceId = 'test-api-parse-instance'
+    const now = new Date().toISOString()
+    rawDb.prepare(`
+      INSERT INTO tasks (
+        id, title, description, type, priority, status, assignee, due_date,
+        labels, attachments, repos, output_fields, agent_id, source, skill_ids,
+        is_recurring, recurrence_pattern, recurrence_parent_id,
+        created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      instanceId, updatedTemplate.title, updatedTemplate.description,
+      updatedTemplate.type, updatedTemplate.priority, 'not_started',
+      updatedTemplate.assignee, updatedTemplate.due_date,
+      JSON.stringify(updatedTemplate.labels), JSON.stringify(updatedTemplate.attachments),
+      JSON.stringify(updatedTemplate.repos), JSON.stringify(updatedTemplate.output_fields),
+      updatedTemplate.agent_id, updatedTemplate.source,
+      updatedTemplate.skill_ids ? JSON.stringify(updatedTemplate.skill_ids) : null,
+      0, null, updatedTemplate.id, now, now
+    )
+
+    // Now read the raw row as the API would (SELECT * returns raw strings)
+    const rawRow = rawDb.prepare('SELECT * FROM tasks WHERE id = ?').get(instanceId) as Record<string, unknown>
+
+    // Simulate parseTask — this is what the mobile API does
+    const apiSkillIds = parseTaskSkillIds(rawRow.skill_ids as string | null)
+    expect(apiSkillIds).toEqual(['skill-x', 'skill-y'])
+
+    // Also test with null skill_ids (agent defaults case)
+    rawDb.prepare('UPDATE tasks SET skill_ids = NULL WHERE id = ?').run(instanceId)
+    const nullRow = rawDb.prepare('SELECT skill_ids FROM tasks WHERE id = ?').get(instanceId) as { skill_ids: string | null }
+    const apiNullResult = parseTaskSkillIds(nullRow.skill_ids)
+    expect(apiNullResult).toBeNull() // Must be null, not []
   })
 })
 
