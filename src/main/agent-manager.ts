@@ -216,7 +216,7 @@ export class AgentManager extends EventEmitter {
     const result: Record<string, McpServerConfig> = {}
     // Ensure the task API server is ready before building MCP configs
     // (startTaskApiServer is fire-and-forget during DB init, may not be done yet)
-    const taskApiPort = await waitForTaskApiServer()
+    await waitForTaskApiServer()
 
     for (const entry of mcpEntries) {
       const serverId = typeof entry === 'string' ? entry : (entry as AgentMcpServerEntry).serverId
@@ -1247,7 +1247,7 @@ export class AgentManager extends EventEmitter {
         if (part.role === 'user') continue
 
         batchMessages.push({
-          id: part.id,
+          id: part.id || `part-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           role: part.role || 'assistant',
           content: part.content || part.text || '',
           partType: part.type,
