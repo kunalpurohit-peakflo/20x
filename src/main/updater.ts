@@ -38,6 +38,9 @@ export function initUpdater(mainWindow: BrowserWindow): void {
   if (updaterInitialized) return
   updaterInitialized = true
 
+  // Allow update checks in dev mode (uses dev-app-update.yml)
+  autoUpdater.forceDevUpdateConfig = true
+
   // Don't auto-download — let the user decide
   autoUpdater.autoDownload = false
   autoUpdater.autoInstallOnAppQuit = false
