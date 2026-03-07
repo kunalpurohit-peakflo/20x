@@ -268,7 +268,7 @@ interface ElectronAPI {
     getInfo: () => Promise<{ url: string; port: number }>
   }
   enterprise: {
-    login: (email: string, password: string) => Promise<{
+    login: () => Promise<{
       userId: string
       email: string
       companies: { id: string; name: string; isPrimary: boolean }[]

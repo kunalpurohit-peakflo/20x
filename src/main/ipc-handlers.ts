@@ -671,9 +671,9 @@ export function registerIpcHandlers(
   })
 
   // Enterprise auth handlers
-  ipcMain.handle('enterprise:login', async (_, email: string, password: string) => {
+  ipcMain.handle('enterprise:login', async () => {
     if (!enterpriseAuth) throw new Error('Enterprise auth not available')
-    return await enterpriseAuth.login(email, password)
+    return await enterpriseAuth.login()
   })
 
   ipcMain.handle('enterprise:selectTenant', async (_, tenantId: string) => {

@@ -1,6 +1,7 @@
-import { app, safeStorage } from 'electron'
+import { app, safeStorage, shell } from 'electron'
 import { createClient, SupabaseClient, Session } from '@supabase/supabase-js'
 import type { DatabaseManager } from './database'
+import { LocalOAuthServer } from './oauth/local-oauth-server'
 
 // ── Enterprise environment configs ────────────────────────────────
 // Supabase anon keys are public (designed for client-side use).
@@ -102,6 +103,7 @@ export class EnterpriseAuth {
   private db: DatabaseManager
   private supabase: SupabaseClient
   private apiUrl: string
+  private config: EnterpriseEnvConfig
 
   // Cached JWT to avoid DB reads on every request
   private cachedJwt: string | null = null
@@ -110,54 +112,84 @@ export class EnterpriseAuth {
   constructor(db: DatabaseManager) {
     this.db = db
 
-    const config = getEnterpriseConfig()
-    this.apiUrl = config.apiUrl
+    this.config = getEnterpriseConfig()
+    this.apiUrl = this.config.apiUrl
 
-    console.log(`[Enterprise] Using ${app.isPackaged ? 'production' : process.env.ENTERPRISE_ENV || 'local'} config → ${config.apiUrl}`)
+    console.log(`[Enterprise] Using ${app.isPackaged ? 'production' : process.env.ENTERPRISE_ENV || 'local'} config → ${this.config.apiUrl}`)
 
-    this.supabase = createClient(config.supabaseUrl, config.supabaseAnonKey, {
+    this.supabase = createClient(this.config.supabaseUrl, this.config.supabaseAnonKey, {
       auth: {
         autoRefreshToken: false,
-        persistSession: false
+        persistSession: false,
+        flowType: 'pkce'
       }
     })
   }
 
-  // ── Login ────────────────────────────────────────────────────────
+  // ── Login (OAuth popup flow) ──────────────────────────────────────
 
-  async login(email: string, password: string): Promise<EnterpriseLoginResult> {
-    if (!email || !password) {
-      throw new Error('Email and password are required')
-    }
+  async login(): Promise<EnterpriseLoginResult> {
+    const server = new LocalOAuthServer()
 
-    // Sign in with Supabase
-    const { data, error } = await this.supabase.auth.signInWithPassword({
-      email,
-      password
-    })
+    try {
+      // Start local server to receive OAuth callback
+      const redirectUri = await server.start()
+      console.log(`[Enterprise] OAuth: local server started at ${redirectUri}`)
 
-    if (error) {
-      throw new Error(error.message)
-    }
+      // Generate Supabase OAuth URL
+      // This supports any OIDC provider configured in Supabase (Google, Azure AD, etc.)
+      const { data, error } = await this.supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: redirectUri,
+          skipBrowserRedirect: true,
+          queryParams: {
+            prompt: 'select_account'
+          }
+        }
+      })
 
-    if (!data.session || !data.user) {
-      throw new Error('Authentication failed — no session returned')
-    }
+      if (error || !data.url) {
+        throw new Error(error?.message || 'Failed to generate OAuth URL')
+      }
 
-    // Store Supabase tokens (encrypted)
-    this.storeSupabaseSession(data.session)
+      // Open OAuth URL in system browser
+      console.log('[Enterprise] OAuth: opening auth URL in browser')
+      await shell.openExternal(data.url)
 
-    // Store basic user info
-    this.db.setSetting(KEYS.USER_EMAIL, data.user.email || email)
-    this.db.setSetting(KEYS.USER_ID, data.user.id)
+      // Wait for callback with auth code
+      console.log('[Enterprise] OAuth: waiting for callback...')
+      const callback = await server.waitForCallback()
 
-    // Fetch user's companies from the workflow-api
-    const companies = await this.fetchCompanies(data.session.access_token)
+      // Exchange auth code for session (PKCE flow)
+      console.log('[Enterprise] OAuth: exchanging code for session')
+      const { data: sessionData, error: sessionError } =
+        await this.supabase.auth.exchangeCodeForSession(callback.code)
 
-    return {
-      userId: data.user.id,
-      email: data.user.email || email,
-      companies
+      if (sessionError || !sessionData.session || !sessionData.user) {
+        throw new Error(sessionError?.message || 'Failed to exchange code for session')
+      }
+
+      // Store Supabase tokens (encrypted)
+      this.storeSupabaseSession(sessionData.session)
+
+      // Store basic user info
+      const userEmail = sessionData.user.email || ''
+      this.db.setSetting(KEYS.USER_EMAIL, userEmail)
+      this.db.setSetting(KEYS.USER_ID, sessionData.user.id)
+
+      // Fetch user's companies from the workflow-api
+      const companies = await this.fetchCompanies(sessionData.session.access_token)
+
+      console.log(`[Enterprise] OAuth: login successful for ${userEmail}`)
+
+      return {
+        userId: sessionData.user.id,
+        email: userEmail,
+        companies
+      }
+    } finally {
+      server.stop()
     }
   }
 
@@ -345,7 +377,6 @@ export class EnterpriseAuth {
     const response = await fetch(`${this.apiUrl}/api/20x/auth/verify`, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
         'Authorization': `Bearer ${accessToken}`
       }
     })
