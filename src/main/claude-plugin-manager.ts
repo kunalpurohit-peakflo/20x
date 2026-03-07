@@ -73,11 +73,45 @@ export interface DiscoverablePlugin {
 
 // ── Manager class ──────────────────────────────────────────
 
+/** Default marketplaces seeded on first run */
+const DEFAULT_MARKETPLACES: CreateMarketplaceSourceData[] = [
+  {
+    name: 'anthropic-official',
+    source_type: 'github',
+    source_url: 'anthropics/claude-plugins-official'
+  },
+  {
+    name: 'claude-code-plugins',
+    source_type: 'github',
+    source_url: 'anthropics/claude-code'
+  }
+]
+
 export class ClaudePluginManager {
   /** In-memory cache of marketplace catalogs, keyed by marketplace source ID */
   private catalogCache = new Map<string, MarketplaceCatalog>()
 
-  constructor(private db: DatabaseManager) {}
+  constructor(private db: DatabaseManager) {
+    this.ensureDefaultMarketplaces()
+  }
+
+  /**
+   * Seeds the default Anthropic marketplace sources if none exist yet.
+   * - anthropic-official: curated directory of popular Claude Code extensions (LSPs, tools, integrations)
+   * - claude-code-plugins: bundled plugins from the claude-code repo (code-review, feature-dev, commit-commands, etc.)
+   */
+  private ensureDefaultMarketplaces(): void {
+    const existing = this.db.getMarketplaceSources()
+    if (existing.length > 0) return // user already has marketplace sources configured
+
+    for (const marketplace of DEFAULT_MARKETPLACES) {
+      try {
+        this.db.createMarketplaceSource(marketplace)
+      } catch (err) {
+        console.warn(`[ClaudePluginManager] Failed to seed default marketplace "${marketplace.name}":`, err)
+      }
+    }
+  }
 
   // ── Marketplace Sources ────────────────────────────────────
 

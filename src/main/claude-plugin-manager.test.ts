@@ -11,6 +11,31 @@ beforeEach(() => {
   manager = new ClaudePluginManager(db)
 })
 
+describe('Default Marketplaces', () => {
+  it('seeds two default Anthropic marketplaces on first run', () => {
+    const sources = manager.getMarketplaceSources()
+    expect(sources).toHaveLength(2)
+    expect(sources.map((s) => s.name).sort()).toEqual(['anthropic-official', 'claude-code-plugins'])
+
+    const official = sources.find((s) => s.name === 'anthropic-official')!
+    expect(official.source_type).toBe('github')
+    expect(official.source_url).toBe('anthropics/claude-plugins-official')
+
+    const bundled = sources.find((s) => s.name === 'claude-code-plugins')!
+    expect(bundled.source_type).toBe('github')
+    expect(bundled.source_url).toBe('anthropics/claude-code')
+  })
+
+  it('does not re-seed defaults when sources already exist', () => {
+    // manager already seeded 2 defaults
+    expect(manager.getMarketplaceSources()).toHaveLength(2)
+
+    // Creating a new manager instance should not duplicate
+    const manager2 = new ClaudePluginManager(db)
+    expect(manager2.getMarketplaceSources()).toHaveLength(2)
+  })
+})
+
 describe('Marketplace Sources CRUD', () => {
   it('adds a marketplace source', () => {
     const source = manager.addMarketplaceSource({
@@ -37,17 +62,19 @@ describe('Marketplace Sources CRUD', () => {
     ).toThrow('already exists')
   })
 
-  it('lists marketplace sources', () => {
+  it('lists marketplace sources including defaults', () => {
     manager.addMarketplaceSource({ name: 'mp1', source_url: 'owner/repo1' })
     manager.addMarketplaceSource({ name: 'mp2', source_url: 'owner/repo2' })
     const sources = manager.getMarketplaceSources()
-    expect(sources).toHaveLength(2)
+    // 2 defaults + 2 new
+    expect(sources).toHaveLength(4)
   })
 
   it('removes a marketplace source', () => {
     const source = manager.addMarketplaceSource({ name: 'mp1', source_url: 'owner/repo' })
+    const countBefore = manager.getMarketplaceSources().length
     expect(manager.removeMarketplaceSource(source.id)).toBe(true)
-    expect(manager.getMarketplaceSources()).toHaveLength(0)
+    expect(manager.getMarketplaceSources()).toHaveLength(countBefore - 1)
   })
 })
 
