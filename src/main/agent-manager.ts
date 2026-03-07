@@ -1043,8 +1043,8 @@ export class AgentManager extends EventEmitter {
       } else {
         const currentTask = task || this.db.getTask(taskId)
         promptText = currentTask
-          ? `Working on task: "${currentTask.title}"\n\n${currentTask.description || ''}`
-          : `Working on task ${taskId}`
+          ? `Work on task: "${currentTask.title}"\n\n${currentTask.description || ''}`
+          : `Work on task: ${taskId}`
 
         // Append output field instructions
         if (currentTask?.output_fields && currentTask.output_fields.length > 0) {
@@ -1075,10 +1075,10 @@ export class AgentManager extends EventEmitter {
         }
       }
 
-      // Prepend memory file read instruction to user message
+      // Append memory file read instruction to user message
       // (user messages are more reliably followed than system prompt instructions)
       const memoryFileName = this.getMemoryFileName(agentId)
-      promptText = `IMPORTANT: First, read the \`${memoryFileName}\` file in the working directory — it has workspace config, skills, and project context.\n\n` + promptText
+      promptText += `\n\nIMPORTANT: First, read the \`${memoryFileName}\` file in the working directory — it has workspace config, skills, and project context.`
 
       // Show user's prompt in UI first
       this.sendToRenderer('agent:output', {
