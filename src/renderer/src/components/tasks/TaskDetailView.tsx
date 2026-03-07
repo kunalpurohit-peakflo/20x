@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect } from 'react'
 import { Pencil, Trash2, Calendar, User, Tag, Clock, Bot, Play, History, GitBranch, Plus, X, BookOpen, AlarmClockOff, BellRing, Folder, Repeat, Star, Sparkles } from 'lucide-react'
 import { Markdown } from '@/components/ui/Markdown'
 import { Button } from '@/components/ui/Button'
@@ -9,7 +9,7 @@ import { TaskAttachments } from './TaskAttachments'
 import { Badge } from '@/components/ui/Badge'
 import { formatDate, formatRelativeDate, isOverdue, isDueSoon, isSnoozed } from '@/lib/utils'
 import { OutputFieldsDisplay } from './OutputFieldsDisplay'
-import { SkillSelector } from '@/components/skills/SkillSelector'
+import { useSkillStore } from '@/stores/skill-store'
 import { AssigneeSelect } from './AssigneeSelect'
 import { TaskStatus, CodingAgentType } from '@/types'
 import type { WorkfloTask, FileAttachment, OutputField, Agent, RecurrencePattern, RecurrencePatternObject } from '@/types'
@@ -97,6 +97,7 @@ interface TaskDetailViewProps {
   onUpdateRepos: (repos: string[]) => void
   onAddRepos: () => void
   onUpdateSkillIds?: (skillIds: string[] | null) => void
+  onAddSkills?: () => void
   onStartAgent?: () => void
   canStartAgent?: boolean
   onResumeAgent?: () => void
@@ -110,9 +111,16 @@ interface TaskDetailViewProps {
   canTriage?: boolean
 }
 
-export function TaskDetailView({ task, agents, onEdit, onDelete, onUpdateAttachments, onUpdateOutputFields, onCompleteTask, onAssignAgent, onUpdateRepos, onAddRepos, onUpdateSkillIds, onStartAgent, canStartAgent, onResumeAgent, canResumeAgent, onRestartAgent, canRestartAgent, onSnooze, onUnsnooze, onReassign, onTriage, canTriage }: TaskDetailViewProps) {
-  const [skillsExpanded, setSkillsExpanded] = useState(false)
+export function TaskDetailView({ task, agents, onEdit, onDelete, onUpdateAttachments, onUpdateOutputFields, onCompleteTask, onAssignAgent, onUpdateRepos, onAddRepos, onUpdateSkillIds, onAddSkills, onStartAgent, canStartAgent, onResumeAgent, canResumeAgent, onRestartAgent, canRestartAgent, onSnooze, onUnsnooze, onReassign, onTriage, canTriage }: TaskDetailViewProps) {
+  const { skills, fetchSkills } = useSkillStore()
   const isActive = task.status !== TaskStatus.Completed
+
+  // Ensure skills are loaded for badge display
+  useEffect(() => {
+    if (task.agent_id && task.skill_ids !== null) {
+      fetchSkills()
+    }
+  }, [task.agent_id, task.skill_ids])
   const overdue = isActive && isOverdue(task.due_date)
   const dueSoon = isActive && !overdue && isDueSoon(task.due_date)
 
@@ -262,34 +270,41 @@ export function TaskDetailView({ task, agents, onEdit, onDelete, onUpdateAttachm
             {task.agent_id && onUpdateSkillIds && (
               <>
                 <span className="text-muted-foreground flex items-center gap-2"><BookOpen className="h-3.5 w-3.5" /> Skills</span>
-                <div>
-                  {task.skill_ids === null && !skillsExpanded ? (
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm text-muted-foreground">Using agent defaults</span>
-                      <Button variant="ghost" size="sm" onClick={() => setSkillsExpanded(true)} className="h-6 text-xs">
-                        Customize
-                      </Button>
-                    </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {task.skill_ids === null ? (
+                    <span className="text-sm text-muted-foreground">Using agent defaults</span>
                   ) : (
-                    <div className="space-y-2">
-                      <SkillSelector
-                        selectedIds={task.skill_ids === null ? undefined : task.skill_ids}
-                        onChange={(ids) => {
-                          // undefined → null (agent defaults), string[] → string[]
-                          onUpdateSkillIds(ids === undefined ? null : ids)
-                        }}
-                      />
-                      {task.skill_ids !== null && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => { onUpdateSkillIds(null); setSkillsExpanded(false) }}
-                          className="h-6 text-xs text-muted-foreground"
-                        >
-                          Reset to agent defaults
-                        </Button>
-                      )}
-                    </div>
+                    <>
+                      {task.skill_ids.map((skillId) => {
+                        const skill = skills.find((s) => s.id === skillId)
+                        if (!skill) return null
+                        return (
+                          <Badge key={skillId} className="gap-1 pr-1">
+                            {skill.name}
+                            <button
+                              onClick={() => onUpdateSkillIds(task.skill_ids!.filter((id) => id !== skillId))}
+                              className="rounded-full hover:bg-foreground/10 p-0.5"
+                            >
+                              <X className="h-2.5 w-2.5" />
+                            </button>
+                          </Badge>
+                        )
+                      })}
+                    </>
+                  )}
+                  <Button variant="ghost" size="sm" onClick={onAddSkills} className="h-6 gap-1 px-2 text-xs text-muted-foreground">
+                    <Plus className="h-3 w-3" />
+                    {task.skill_ids === null ? 'Customize' : 'Add'}
+                  </Button>
+                  {task.skill_ids !== null && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => onUpdateSkillIds(null)}
+                      className="h-6 text-xs text-muted-foreground"
+                    >
+                      Reset to defaults
+                    </Button>
                   )}
                 </div>
               </>
