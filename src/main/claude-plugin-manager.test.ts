@@ -460,7 +460,7 @@ You are a TypeScript Agent SDK application verifier.
     expect(agentNames).toContain('file-plugin:verifier-ts')
   })
 
-  it('agents are visible in the global agents list', async () => {
+  it('agents are visible in the global agents list with skills auto-assigned', async () => {
     setupPluginFiles()
     await manager.installPlugin('file-plugin', marketplaceId)
 
@@ -473,6 +473,14 @@ You are a TypeScript Agent SDK application verifier.
     expect(pyAgent.config.system_prompt).toContain('Python Agent SDK application verifier')
     // Frontmatter should be stripped from system_prompt
     expect(pyAgent.config.system_prompt).not.toContain('---')
+
+    // Verify plugin skills are auto-assigned to agent
+    const allSkills = db.getSkills()
+    const pluginSkillIds = allSkills
+      .filter((s) => s.tags.includes('plugin') && s.tags.includes('file-plugin'))
+      .map((s) => s.id)
+    expect(pluginSkillIds.length).toBeGreaterThan(0)
+    expect(pyAgent.config.skill_ids).toEqual(pluginSkillIds)
   })
 
   it('removes all resources on uninstall', async () => {

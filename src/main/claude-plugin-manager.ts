@@ -850,6 +850,12 @@ export class ClaudePluginManager {
     }
 
     // ── 4. Agents from agents/ directory ────────────────────────
+    // Collect all plugin skill IDs so agents auto-inherit them
+    const allSkills = this.db.getSkills()
+    const pluginSkillIds = allSkills
+      .filter((s) => s.tags.includes('plugin') && s.tags.includes(plugin.name))
+      .map((s) => s.id)
+
     const agentsDir = join(pluginDir, 'agents')
     if (existsSync(agentsDir)) {
       const entries = readdirSync(agentsDir)
@@ -861,7 +867,7 @@ export class ClaudePluginManager {
           const content = readFileSync(entryPath, 'utf-8')
           const agentName = basename(entry, '.md')
           const { title, description, model } = this.parseAgentFrontmatter(content, agentName)
-          this.createPluginAgent(plugin.name, agentName, title, description, content, model)
+          this.createPluginAgent(plugin.name, agentName, title, description, content, model, pluginSkillIds)
         }
       }
     }
@@ -935,7 +941,8 @@ export class ClaudePluginManager {
     title: string,
     description: string,
     content: string,
-    model?: string
+    model?: string,
+    skillIds?: string[]
   ): void {
     try {
       // Strip frontmatter from content to use as system prompt
@@ -945,7 +952,8 @@ export class ClaudePluginManager {
         name: `${pluginName}:${agentKey}`,
         config: {
           system_prompt: systemPrompt,
-          model: model || undefined
+          model: model || undefined,
+          skill_ids: skillIds?.length ? skillIds : undefined
         }
       })
     } catch (err) {
