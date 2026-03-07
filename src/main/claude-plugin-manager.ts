@@ -671,7 +671,7 @@ export class ClaudePluginManager {
       : marketplacePath
     const fullSourcePath = join(baseDir, sourcePath)
 
-    if (existsSync(fullSourcePath)) {
+    if (existsSync(fullSourcePath) && resolve(fullSourcePath) !== resolve(localDir)) {
       cpSync(fullSourcePath, localDir, { recursive: true })
     }
   }
