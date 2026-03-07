@@ -1,6 +1,8 @@
 import { execFile } from 'child_process'
-import { app, BrowserWindow, shell, Tray, Menu, nativeImage } from 'electron'
+import { readdirSync } from 'fs'
+import { app, BrowserWindow, net, protocol, shell, Tray, Menu, nativeImage } from 'electron'
 import { join } from 'path'
+import { pathToFileURL } from 'url'
 import { is } from '@electron-toolkit/utils'
 import { DatabaseManager } from './database'
 import { AgentManager } from './agent-manager'
@@ -231,7 +233,47 @@ function fixMacOSPath(): Promise<void> {
   })
 }
 
+// Register app-attachment:// as a privileged scheme before app is ready.
+// This allows the renderer to load local attachment images via <img src="app-attachment://...">.
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'app-attachment',
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      bypassCSP: true
+    }
+  }
+])
+
 app.whenReady().then(async () => {
+  // Register protocol handler: app-attachment://taskId/attachmentId
+  // Serves local attachment files from the attachments directory.
+  protocol.handle('app-attachment', (request) => {
+    try {
+      const url = new URL(request.url)
+      // URL format: app-attachment://taskId/attachmentId
+      const taskId = url.hostname
+      const attachmentId = url.pathname.replace(/^\//, '')
+
+      if (!taskId || !attachmentId || !db) {
+        return new Response('Not found', { status: 404 })
+      }
+
+      const dir = join(app.getPath('userData'), 'attachments', taskId)
+      const files = readdirSync(dir) // throws if dir missing — caught below
+      const match = files.find((f) => f.startsWith(`${attachmentId}-`))
+      if (!match) {
+        return new Response('Not found', { status: 404 })
+      }
+
+      return net.fetch(pathToFileURL(join(dir, match)).href)
+    } catch {
+      return new Response('Internal error', { status: 500 })
+    }
+  })
+
   // Start PATH fix and DB init in parallel — both are independent
   const pathFixPromise = fixMacOSPath()
 

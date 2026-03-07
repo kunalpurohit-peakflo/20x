@@ -9,6 +9,7 @@
 import { writeFileSync } from 'fs'
 import { join, extname } from 'path'
 import type { TaskRecord } from '../database'
+import { replaceRemoteImageUrlsInTask } from './replace-image-urls'
 import type {
   TaskSourcePlugin,
   PluginConfigSchema,
@@ -330,6 +331,9 @@ export class HubSpotPlugin implements TaskSourcePlugin {
           if (hubspotAttachments.length > 0) {
             await this.downloadAttachments(taskId, hubspotAttachments, client, ctx)
           }
+
+          // Replace remote image URLs in description with local attachment URLs
+          replaceRemoteImageUrlsInTask(taskId, ctx, '[hubspot-plugin]')
         } catch (err) {
           const errorMsg = err instanceof Error ? err.message : 'Unknown error'
           const ticketTitle = ticket.properties.subject || 'Unknown ticket'

@@ -19,6 +19,7 @@ import type {
   ActionResult
 } from './types'
 import { LinearClient, type LinearIssue } from './linear-client'
+import { replaceRemoteImageUrlsInTask } from './replace-image-urls'
 
 export class LinearPlugin implements TaskSourcePlugin {
   id = 'linear'
@@ -258,6 +259,10 @@ export class LinearPlugin implements TaskSourcePlugin {
             console.log(`[linear-plugin] Found ${issue.attachments.nodes.length} link attachments`)
             await this.downloadAttachments(taskId, issue.attachments.nodes, client, ctx)
           }
+
+          // Replace remote image URLs in description with local attachment URLs
+          // so images still display after remote links expire
+          replaceRemoteImageUrlsInTask(taskId, ctx, '[linear-plugin]')
         } catch (err) {
           const errorMsg = err instanceof Error ? err.message : 'Unknown error'
           result.errors.push(`Failed to import issue "${issue.title}": ${errorMsg}`)

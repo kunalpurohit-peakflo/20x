@@ -13,6 +13,7 @@ import type {
 import type { TaskRecord } from '../database'
 import type { SourceUser, ReassignResult } from '../../shared/types'
 import { TaskStatus } from '../../shared/constants'
+import { replaceRemoteImageUrlsInTask } from './replace-image-urls'
 import {
   NotionClient,
   type NotionDatabase,
@@ -460,6 +461,10 @@ export class NotionPlugin implements TaskSourcePlugin {
             console.log(`[notion] Found ${fileUrls.length} files for page "${mapped.title}"`)
             await this.downloadNotionFiles(taskId, fileUrls, client, ctx)
           }
+
+          // Replace remote image URLs in description with local attachment URLs
+          // so images still display after remote links expire
+          replaceRemoteImageUrlsInTask(taskId, ctx, '[notion]')
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'Unknown error'
           result.errors.push(`Page ${page.id}: ${msg}`)
