@@ -5,8 +5,9 @@
  * - Add / remove / update marketplace sources
  * - Fetch marketplace catalog (marketplace.json)
  * - Install / uninstall / enable / disable plugins
- * - Parse plugin manifests (plugin.json)
- * - Apply plugin resources: skills, MCP servers, agents
+ * - Download plugin files from GitHub/URL/local sources
+ * - Parse plugin manifests (plugin.json) and actual plugin files
+ * - Apply plugin resources: skills (from skills/ & commands/), MCP servers (from .mcp.json)
  */
 
 import type {
@@ -80,6 +81,15 @@ export interface PluginResources {
   commands: string[]
 }
 
+// ── GitHub API types for content listing ────────────────────
+
+interface GitHubContentEntry {
+  name: string
+  path: string
+  type: 'file' | 'dir' | 'symlink'
+  download_url: string | null
+}
+
 // ── Manager class ──────────────────────────────────────────
 
 /** Default marketplaces seeded on first run */
@@ -100,7 +110,27 @@ export class ClaudePluginManager {
   /** In-memory cache of marketplace catalogs, keyed by marketplace source ID */
   private catalogCache = new Map<string, MarketplaceCatalog>()
 
-  constructor(private db: DatabaseManager) {
+  /** Base directory for downloaded plugin files */
+  private pluginsDir: string
+
+  constructor(
+    private db: DatabaseManager,
+    pluginsDir?: string
+  ) {
+    // Default to <userData>/plugins if not specified
+    const { join } = require('path')
+    if (pluginsDir) {
+      this.pluginsDir = pluginsDir
+    } else {
+      try {
+        const { app } = require('electron')
+        this.pluginsDir = join(app.getPath('userData'), 'plugins')
+      } catch {
+        // Fallback for tests
+        this.pluginsDir = join(require('os').tmpdir(), '20x-plugins')
+      }
+    }
+
     this.ensureDefaultMarketplaces()
   }
 
@@ -301,17 +331,19 @@ export class ClaudePluginManager {
     const source: ClaudePluginSource =
       typeof entry.source === 'string' ? { path: entry.source } : entry.source
 
-    // Build manifest from marketplace entry
-    const manifest: ClaudePluginManifest = {
-      name: entry.name,
-      version: entry.version,
-      description: entry.description,
-      author: entry.author,
-      homepage: entry.homepage,
-      repository: entry.repository,
-      license: entry.license,
-      keywords: entry.keywords
-    }
+    // Resolve the marketplace source for download context
+    const marketplaceSource = this.db.getMarketplaceSource(marketplaceId)
+
+    // Download actual plugin files
+    const pluginDir = await this.downloadPluginFiles(
+      pluginName,
+      source,
+      marketplaceSource ?? undefined,
+      catalog.metadata?.pluginRoot
+    )
+
+    // Read the real manifest from plugin.json if it exists, or build from catalog entry
+    const manifest = await this.readPluginManifest(pluginDir, entry)
 
     const data: CreateInstalledPluginData = {
       name: entry.name,
@@ -324,8 +356,8 @@ export class ClaudePluginManager {
 
     const installed = this.db.createInstalledPlugin(data)
 
-    // Auto-apply plugin resources (skills, MCP servers, etc.)
-    await this.applyPluginResources(installed)
+    // Apply plugin resources from downloaded files (skills, commands → 20x skills; .mcp.json → 20x MCP servers)
+    await this.applyPluginResources(installed, pluginDir)
 
     return installed
   }
@@ -336,6 +368,9 @@ export class ClaudePluginManager {
 
     // Remove applied resources
     await this.removePluginResources(plugin)
+
+    // Clean up downloaded plugin files
+    await this.cleanupPluginFiles(plugin.name)
 
     return this.db.deleteInstalledPlugin(pluginId)
   }
@@ -381,7 +416,7 @@ export class ClaudePluginManager {
       ? (Array.isArray(manifest.agents) ? manifest.agents : [manifest.agents])
       : []
 
-    // Manifest-declared commands
+    // Commands — already materialised as skills, but list them for informational display
     const commands: string[] = manifest.commands
       ? (Array.isArray(manifest.commands) ? manifest.commands : [manifest.commands])
       : []
@@ -389,35 +424,434 @@ export class ClaudePluginManager {
     return { skills, mcpServers, agents, commands }
   }
 
+  // ── Download plugin files ─────────────────────────────────
+
+  /**
+   * Downloads plugin files from the source (GitHub, URL, or local) into
+   * the local plugins directory at <pluginsDir>/<pluginName>/
+   */
+  private async downloadPluginFiles(
+    pluginName: string,
+    source: ClaudePluginSource,
+    marketplaceSource?: MarketplaceSourceRecord,
+    pluginRoot?: string
+  ): Promise<string> {
+    const { join } = await import('path')
+    const { mkdirSync, existsSync } = await import('fs')
+
+    const pluginDir = join(this.pluginsDir, pluginName)
+    if (!existsSync(this.pluginsDir)) {
+      mkdirSync(this.pluginsDir, { recursive: true })
+    }
+    if (!existsSync(pluginDir)) {
+      mkdirSync(pluginDir, { recursive: true })
+    }
+
+    // Determine how to download based on source type
+    if (source.source === 'github' && source.repo) {
+      // Source explicitly points to a GitHub repo
+      await this.downloadFromGitHub(source.repo, source.ref || 'main', source.path || '', pluginDir)
+    } else if (source.path && marketplaceSource?.source_type === 'github') {
+      // Source is a relative path within the marketplace's GitHub repo
+      const repoSlug = marketplaceSource.source_url
+      const [repoPath, ref] = repoSlug.split('#')
+      const branch = ref || 'main'
+
+      // Resolve the full path within the repo
+      let remotePath = source.path.replace(/^\.\//, '')
+      if (pluginRoot) {
+        remotePath = `${pluginRoot.replace(/^\.\//, '')}/${remotePath}`
+      }
+
+      await this.downloadFromGitHub(repoPath, branch, remotePath, pluginDir)
+    } else if (source.url) {
+      // Source is a URL — download as a tarball or single file
+      await this.downloadFromUrl(source.url, pluginDir)
+    } else if (source.path && marketplaceSource?.source_type === 'local') {
+      // Source is a local path
+      await this.copyFromLocal(
+        marketplaceSource.source_url,
+        source.path,
+        pluginRoot,
+        pluginDir
+      )
+    }
+
+    return pluginDir
+  }
+
+  /**
+   * Downloads a directory from a GitHub repository using the Contents API.
+   * Falls back to raw.githubusercontent.com for individual files.
+   */
+  private async downloadFromGitHub(
+    repoPath: string,
+    branch: string,
+    remotePath: string,
+    localDir: string
+  ): Promise<void> {
+    const { writeFileSync, mkdirSync } = await import('fs')
+    const { join } = await import('path')
+
+    // Use GitHub API to list directory contents
+    const apiUrl = `https://api.github.com/repos/${repoPath}/contents/${remotePath}?ref=${branch}`
+
+    try {
+      const response = await fetch(apiUrl, {
+        headers: { Accept: 'application/vnd.github.v3+json' }
+      })
+
+      if (!response.ok) {
+        // Maybe it's a single file, not a directory
+        if (response.status === 404) {
+          console.warn(`[ClaudePluginManager] Path not found on GitHub: ${remotePath}`)
+          return
+        }
+        throw new Error(`GitHub API error: ${response.status}`)
+      }
+
+      const data = await response.json()
+
+      if (Array.isArray(data)) {
+        // It's a directory listing
+        for (const entry of data as GitHubContentEntry[]) {
+          if (entry.type === 'file' && entry.download_url) {
+            const fileResponse = await fetch(entry.download_url)
+            if (fileResponse.ok) {
+              const content = await fileResponse.text()
+              const localPath = join(localDir, entry.name)
+              writeFileSync(localPath, content, 'utf-8')
+            }
+          } else if (entry.type === 'dir') {
+            // Recursively download subdirectories
+            const subDir = join(localDir, entry.name)
+            mkdirSync(subDir, { recursive: true })
+            await this.downloadFromGitHub(
+              repoPath,
+              branch,
+              `${remotePath}/${entry.name}`,
+              subDir
+            )
+          }
+        }
+      } else if (data.type === 'file' && data.download_url) {
+        // Single file
+        const fileResponse = await fetch(data.download_url)
+        if (fileResponse.ok) {
+          const content = await fileResponse.text()
+          const fileName = remotePath.split('/').pop() || 'file'
+          writeFileSync(join(localDir, fileName), content, 'utf-8')
+        }
+      }
+    } catch (err) {
+      console.error(`[ClaudePluginManager] Failed to download from GitHub (${repoPath}/${remotePath}):`, err)
+      // Try raw.githubusercontent.com as fallback for known file patterns
+      await this.downloadKnownFilesRaw(repoPath, branch, remotePath, localDir)
+    }
+  }
+
+  /**
+   * Fallback: try to download known Claude Code plugin files directly via
+   * raw.githubusercontent.com when the GitHub API is unavailable (rate-limited, etc.)
+   */
+  private async downloadKnownFilesRaw(
+    repoPath: string,
+    branch: string,
+    remotePath: string,
+    localDir: string
+  ): Promise<void> {
+    const { writeFileSync, mkdirSync } = await import('fs')
+    const { join } = await import('path')
+
+    const baseUrl = `https://raw.githubusercontent.com/${repoPath}/${branch}/${remotePath}`
+
+    // Try known Claude Code plugin files
+    const knownFiles = [
+      'plugin.json',
+      '.mcp.json',
+      'CLAUDE.md'
+    ]
+
+    for (const file of knownFiles) {
+      try {
+        const url = `${baseUrl}/${file}`
+        const response = await fetch(url)
+        if (response.ok) {
+          const content = await response.text()
+          writeFileSync(join(localDir, file), content, 'utf-8')
+        }
+      } catch {
+        // Skip files that don't exist
+      }
+    }
+
+    // Try to download skills/ and commands/ directories
+    // We can't list directories via raw.githubusercontent.com, so we try
+    // well-known filenames from the manifest if available
+    const knownDirs = ['skills', 'commands']
+    for (const dir of knownDirs) {
+      try {
+        // Try a README or index file in the directory to check if it exists
+        const testUrl = `${baseUrl}/${dir}/`
+        const response = await fetch(testUrl)
+        if (response.ok) {
+          mkdirSync(join(localDir, dir), { recursive: true })
+        }
+      } catch {
+        // Skip
+      }
+    }
+  }
+
+  private async downloadFromUrl(url: string, localDir: string): Promise<void> {
+    const { writeFileSync, mkdirSync } = await import('fs')
+    const { join } = await import('path')
+
+    try {
+      const response = await fetch(url)
+      if (!response.ok) throw new Error(`Failed to fetch: ${response.status}`)
+
+      const contentType = response.headers.get('content-type') || ''
+
+      if (contentType.includes('application/json') || url.endsWith('.json')) {
+        // Single JSON file (e.g., plugin.json)
+        const content = await response.text()
+        const fileName = url.split('/').pop() || 'plugin.json'
+        writeFileSync(join(localDir, fileName), content, 'utf-8')
+      } else {
+        // Could be a tarball or zip — for now, save as-is
+        const buffer = Buffer.from(await response.arrayBuffer())
+        const fileName = url.split('/').pop() || 'plugin-archive'
+        writeFileSync(join(localDir, fileName), buffer)
+      }
+    } catch (err) {
+      console.warn(`[ClaudePluginManager] Failed to download from URL ${url}:`, err)
+    }
+
+    // Also check for plugin.json at the URL base
+    if (!url.endsWith('plugin.json')) {
+      const baseUrl = url.replace(/\/[^/]*$/, '')
+      try {
+        const manifestUrl = `${baseUrl}/plugin.json`
+        const response = await fetch(manifestUrl)
+        if (response.ok) {
+          const content = await response.text()
+          writeFileSync(join(localDir, 'plugin.json'), content, 'utf-8')
+        }
+      } catch {
+        // Optional
+      }
+    }
+
+    void mkdirSync // avoid unused warning
+  }
+
+  private async copyFromLocal(
+    marketplacePath: string,
+    pluginPath: string,
+    pluginRoot: string | undefined,
+    localDir: string
+  ): Promise<void> {
+    const { cpSync, existsSync } = await import('fs')
+    const { join, resolve } = await import('path')
+
+    let sourcePath = pluginPath.replace(/^\.\//, '')
+    if (pluginRoot) {
+      sourcePath = `${pluginRoot.replace(/^\.\//, '')}/${sourcePath}`
+    }
+
+    // Resolve relative to marketplace directory
+    const baseDir = marketplacePath.endsWith('.json')
+      ? resolve(marketplacePath, '..')
+      : marketplacePath
+    const fullSourcePath = join(baseDir, sourcePath)
+
+    if (existsSync(fullSourcePath)) {
+      cpSync(fullSourcePath, localDir, { recursive: true })
+    }
+  }
+
+  // ── Read plugin manifest ──────────────────────────────────
+
+  /**
+   * Reads plugin.json from the downloaded plugin directory if it exists,
+   * falling back to building a manifest from the marketplace catalog entry.
+   */
+  private async readPluginManifest(
+    pluginDir: string,
+    entry: MarketplacePluginEntry
+  ): Promise<ClaudePluginManifest> {
+    const { readFileSync, existsSync } = await import('fs')
+    const { join } = await import('path')
+
+    const manifestPath = join(pluginDir, 'plugin.json')
+    if (existsSync(manifestPath)) {
+      try {
+        const raw = readFileSync(manifestPath, 'utf-8')
+        const parsed = JSON.parse(raw) as ClaudePluginManifest
+        // Merge with catalog entry data (catalog may have extra fields)
+        return {
+          ...parsed,
+          name: parsed.name || entry.name,
+          version: parsed.version || entry.version,
+          description: parsed.description || entry.description,
+          author: parsed.author || entry.author,
+          homepage: parsed.homepage || entry.homepage,
+          repository: parsed.repository || entry.repository,
+          license: parsed.license || entry.license,
+          keywords: parsed.keywords || entry.keywords
+        }
+      } catch (err) {
+        console.warn(`[ClaudePluginManager] Failed to parse plugin.json:`, err)
+      }
+    }
+
+    // Fallback: build manifest from marketplace entry
+    return {
+      name: entry.name,
+      version: entry.version,
+      description: entry.description,
+      author: entry.author,
+      homepage: entry.homepage,
+      repository: entry.repository,
+      license: entry.license,
+      keywords: entry.keywords
+    }
+  }
+
   // ── Apply / remove plugin resources ────────────────────────
 
   /**
-   * Apply plugin resources (skills, MCP servers, agents) to the local DB.
-   * For now, this creates skills from the plugin manifest/catalog entry.
-   * Future: also register MCP servers, agents, hooks.
+   * Apply plugin resources from downloaded files to the local DB.
+   * - skills/ directories → 20x Skills (reads SKILL.md or *.md files)
+   * - commands/ directory → 20x Skills (commands are skills too)
+   * - .mcp.json → 20x MCP Servers
+   * All resources are tagged/prefixed with the plugin name for lifecycle management.
    */
-  private async applyPluginResources(plugin: InstalledPluginRecord): Promise<void> {
-    const manifest = plugin.manifest
+  private async applyPluginResources(
+    plugin: InstalledPluginRecord,
+    pluginDir: string
+  ): Promise<void> {
+    const { readFileSync, existsSync, readdirSync, statSync } = await import('fs')
+    const { join, basename } = await import('path')
 
-    // Auto-create skills from manifest keywords/description
-    if (manifest.skills && Array.isArray(manifest.skills)) {
-      for (const skillPath of manifest.skills) {
-        try {
-          // Create a skill entry referencing the plugin
-          this.db.createSkill({
-            name: `${plugin.name}:${typeof skillPath === 'string' ? skillPath.replace(/\//g, '-').replace(/^-/, '') : 'skill'}`,
-            description: `Skill from plugin "${plugin.name}"`,
-            content: `Plugin skill: ${skillPath}`,
-            tags: ['plugin', plugin.name]
-          })
-        } catch (err) {
-          console.warn(`[ClaudePluginManager] Failed to create skill from plugin:`, err)
+    // ── 1. Skills from skills/ directory ──────────────────────
+    const skillsDir = join(pluginDir, 'skills')
+    if (existsSync(skillsDir)) {
+      const entries = readdirSync(skillsDir)
+      for (const entry of entries) {
+        const entryPath = join(skillsDir, entry)
+        const stat = statSync(entryPath)
+
+        if (stat.isDirectory()) {
+          // Claude Code format: skills/<skill-name>/SKILL.md
+          const skillMdPath = join(entryPath, 'SKILL.md')
+          if (existsSync(skillMdPath)) {
+            const content = readFileSync(skillMdPath, 'utf-8')
+            const { title, description } = this.parseMarkdownFrontmatter(content, entry)
+            this.createPluginSkill(plugin.name, entry, title, description, content)
+          } else {
+            // Try any .md file in the directory
+            const mdFiles = readdirSync(entryPath).filter((f) => f.endsWith('.md'))
+            for (const mdFile of mdFiles) {
+              const content = readFileSync(join(entryPath, mdFile), 'utf-8')
+              const skillName = basename(mdFile, '.md')
+              const { title, description } = this.parseMarkdownFrontmatter(content, skillName)
+              this.createPluginSkill(plugin.name, `${entry}/${skillName}`, title, description, content)
+            }
+          }
+        } else if (stat.isFile() && entry.endsWith('.md')) {
+          // Direct .md file in skills/
+          const content = readFileSync(entryPath, 'utf-8')
+          const skillName = basename(entry, '.md')
+          const { title, description } = this.parseMarkdownFrontmatter(content, skillName)
+          this.createPluginSkill(plugin.name, skillName, title, description, content)
         }
       }
     }
 
-    // Auto-register MCP servers from manifest
-    if (manifest.mcpServers && typeof manifest.mcpServers === 'object' && !Array.isArray(manifest.mcpServers)) {
+    // ── 2. Commands from commands/ directory → also 20x Skills ─
+    const commandsDir = join(pluginDir, 'commands')
+    if (existsSync(commandsDir)) {
+      const entries = readdirSync(commandsDir)
+      for (const entry of entries) {
+        const entryPath = join(commandsDir, entry)
+        const stat = statSync(entryPath)
+
+        if (stat.isFile() && entry.endsWith('.md')) {
+          const content = readFileSync(entryPath, 'utf-8')
+          const cmdName = basename(entry, '.md')
+          const { title, description } = this.parseMarkdownFrontmatter(content, cmdName)
+          this.createPluginSkill(
+            plugin.name,
+            `cmd:${cmdName}`,
+            title || `Command: ${cmdName}`,
+            description || `Command "${cmdName}" from plugin "${plugin.name}"`,
+            content
+          )
+        } else if (stat.isDirectory()) {
+          // commands/<cmd-name>/ directory with .md files inside
+          const mdFiles = readdirSync(entryPath).filter((f) => f.endsWith('.md'))
+          for (const mdFile of mdFiles) {
+            const content = readFileSync(join(entryPath, mdFile), 'utf-8')
+            const cmdName = basename(mdFile, '.md')
+            const { title, description } = this.parseMarkdownFrontmatter(content, cmdName)
+            this.createPluginSkill(
+              plugin.name,
+              `cmd:${entry}/${cmdName}`,
+              title || `Command: ${cmdName}`,
+              description || `Command "${cmdName}" from plugin "${plugin.name}"`,
+              content
+            )
+          }
+        }
+      }
+    }
+
+    // ── 3. MCP servers from .mcp.json ─────────────────────────
+    const mcpJsonPath = join(pluginDir, '.mcp.json')
+    if (existsSync(mcpJsonPath)) {
+      try {
+        const raw = readFileSync(mcpJsonPath, 'utf-8')
+        const mcpConfig = JSON.parse(raw)
+
+        // .mcp.json format: { "mcpServers": { "serverName": { "command": "...", "args": [...], "env": {...} } } }
+        const servers = mcpConfig.mcpServers || mcpConfig
+
+        if (typeof servers === 'object' && !Array.isArray(servers)) {
+          for (const [serverName, serverConfig] of Object.entries(servers)) {
+            const config = serverConfig as {
+              command?: string
+              args?: string[]
+              env?: Record<string, string>
+              environment?: Record<string, string>
+              url?: string
+              type?: 'local' | 'remote'
+            }
+
+            try {
+              this.db.createMcpServer({
+                name: `${plugin.name}:${serverName}`,
+                type: config.type || (config.url ? 'remote' : 'local'),
+                command: config.command || '',
+                args: config.args || [],
+                url: config.url,
+                environment: config.env || config.environment || {}
+              })
+            } catch (err) {
+              console.warn(`[ClaudePluginManager] Failed to create MCP server "${serverName}" from plugin:`, err)
+            }
+          }
+        }
+      } catch (err) {
+        console.warn(`[ClaudePluginManager] Failed to parse .mcp.json for plugin "${plugin.name}":`, err)
+      }
+    }
+
+    // ── 4. Fallback: MCP servers from manifest ────────────────
+    // If no .mcp.json was found, check the manifest for mcpServers
+    const manifest = plugin.manifest
+    if (!existsSync(mcpJsonPath) && manifest.mcpServers && typeof manifest.mcpServers === 'object' && !Array.isArray(manifest.mcpServers)) {
       const servers = manifest.mcpServers as Record<string, { command?: string; args?: string[]; env?: Record<string, string> }>
       for (const [serverName, serverConfig] of Object.entries(servers)) {
         try {
@@ -428,10 +862,92 @@ export class ClaudePluginManager {
             environment: serverConfig.env || {}
           })
         } catch (err) {
-          console.warn(`[ClaudePluginManager] Failed to create MCP server from plugin:`, err)
+          console.warn(`[ClaudePluginManager] Failed to create MCP server from manifest:`, err)
         }
       }
     }
+
+    // ── 5. Fallback: Skills from manifest (if no files found) ─
+    const hasSkillFiles = existsSync(skillsDir) || existsSync(commandsDir)
+    if (!hasSkillFiles && manifest.skills && Array.isArray(manifest.skills)) {
+      for (const skillPath of manifest.skills) {
+        try {
+          this.db.createSkill({
+            name: `${plugin.name}:${typeof skillPath === 'string' ? skillPath.replace(/\//g, '-').replace(/^-/, '') : 'skill'}`,
+            description: `Skill from plugin "${plugin.name}"`,
+            content: `Plugin skill: ${skillPath}`,
+            tags: ['plugin', plugin.name]
+          })
+        } catch (err) {
+          console.warn(`[ClaudePluginManager] Failed to create skill from manifest:`, err)
+        }
+      }
+    }
+  }
+
+  /**
+   * Creates a 20x skill record for a plugin skill or command.
+   */
+  private createPluginSkill(
+    pluginName: string,
+    skillKey: string,
+    title: string,
+    description: string,
+    content: string
+  ): void {
+    try {
+      this.db.createSkill({
+        name: `${pluginName}:${skillKey}`,
+        description: description || `Skill from plugin "${pluginName}"`,
+        content,
+        tags: ['plugin', pluginName]
+      })
+    } catch (err) {
+      console.warn(`[ClaudePluginManager] Failed to create skill "${skillKey}" from plugin "${pluginName}":`, err)
+    }
+  }
+
+  /**
+   * Parses YAML-like frontmatter from a markdown file.
+   * Extracts title and description from frontmatter block (--- ... ---) or
+   * falls back to the first heading and paragraph.
+   */
+  private parseMarkdownFrontmatter(
+    content: string,
+    fallbackName: string
+  ): { title: string; description: string } {
+    let title = fallbackName
+    let description = ''
+
+    // Try YAML frontmatter
+    const fmMatch = content.match(/^---\s*\n([\s\S]*?)\n---/)
+    if (fmMatch) {
+      const fm = fmMatch[1]
+      const titleMatch = fm.match(/^title:\s*(.+)$/m)
+      const descMatch = fm.match(/^description:\s*(.+)$/m)
+      if (titleMatch) title = titleMatch[1].replace(/^["']|["']$/g, '').trim()
+      if (descMatch) description = descMatch[1].replace(/^["']|["']$/g, '').trim()
+    }
+
+    // Fallback: first # heading
+    if (title === fallbackName) {
+      const headingMatch = content.match(/^#\s+(.+)$/m)
+      if (headingMatch) title = headingMatch[1].trim()
+    }
+
+    // Fallback: first non-empty, non-heading line as description
+    if (!description) {
+      const lines = content.split('\n')
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (trimmed && !trimmed.startsWith('#') && !trimmed.startsWith('---')) {
+          description = trimmed.slice(0, 200)
+          break
+        }
+      }
+    }
+
+    return { title, description }
   }
 
   private async removePluginResources(plugin: InstalledPluginRecord): Promise<void> {
@@ -447,6 +963,23 @@ export class ClaudePluginManager {
     const pluginServers = mcpServers.filter((s) => s.name.startsWith(`${plugin.name}:`))
     for (const server of pluginServers) {
       this.db.deleteMcpServer(server.id)
+    }
+  }
+
+  /**
+   * Removes the downloaded plugin files directory.
+   */
+  private async cleanupPluginFiles(pluginName: string): Promise<void> {
+    const { join } = await import('path')
+    const { existsSync, rmSync } = await import('fs')
+
+    const pluginDir = join(this.pluginsDir, pluginName)
+    if (existsSync(pluginDir)) {
+      try {
+        rmSync(pluginDir, { recursive: true, force: true })
+      } catch (err) {
+        console.warn(`[ClaudePluginManager] Failed to clean up plugin files for "${pluginName}":`, err)
+      }
     }
   }
 }

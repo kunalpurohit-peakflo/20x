@@ -1,14 +1,31 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { createTestDb } from '../../test/helpers/db-test-helper'
 import type { DatabaseManager } from './database'
 import { ClaudePluginManager } from './claude-plugin-manager'
+import { mkdtempSync } from 'fs'
+import { join } from 'path'
+import { tmpdir } from 'os'
 
 let db: DatabaseManager
 let manager: ClaudePluginManager
+let tempPluginsDir: string
 
 beforeEach(() => {
   ;({ db } = createTestDb())
-  manager = new ClaudePluginManager(db)
+  tempPluginsDir = mkdtempSync(join(tmpdir(), '20x-plugins-test-'))
+  manager = new ClaudePluginManager(db, tempPluginsDir)
+
+  // Mock global fetch to prevent actual network requests during tests
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+    ok: false,
+    status: 404,
+    json: async () => ({}),
+    text: async () => ''
+  }))
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
 })
 
 describe('Default Marketplaces', () => {
@@ -31,7 +48,7 @@ describe('Default Marketplaces', () => {
     expect(manager.getMarketplaceSources()).toHaveLength(2)
 
     // Creating a new manager instance should not duplicate
-    const manager2 = new ClaudePluginManager(db)
+    const manager2 = new ClaudePluginManager(db, tempPluginsDir)
     expect(manager2.getMarketplaceSources()).toHaveLength(2)
   })
 })
@@ -269,5 +286,177 @@ describe('ClaudePluginManager: Install / Uninstall', () => {
   it('throws when catalog not loaded', async () => {
     const source2 = manager.addMarketplaceSource({ name: 'empty-mp', source_url: 'x/y' })
     await expect(manager.installPlugin('any', source2.id)).rejects.toThrow('not loaded')
+  })
+})
+
+describe('Plugin Resource Materialization from Files', () => {
+  let marketplaceId: string
+
+  beforeEach(() => {
+    const source = manager.addMarketplaceSource({
+      name: 'local-mp',
+      source_type: 'local',
+      source_url: tempPluginsDir
+    })
+    marketplaceId = source.id
+
+    ;(manager as unknown as { catalogCache: Map<string, unknown> }).catalogCache.set(marketplaceId, {
+      name: 'local-mp',
+      owner: { name: 'Test' },
+      plugins: [
+        {
+          name: 'file-plugin',
+          source: './file-plugin',
+          description: 'Plugin with files',
+          version: '1.0.0'
+        }
+      ]
+    })
+  })
+
+  function setupPluginFiles(): void {
+    const { mkdirSync, writeFileSync } = require('fs')
+    const pluginDir = join(tempPluginsDir, 'file-plugin')
+    mkdirSync(pluginDir, { recursive: true })
+
+    // Create skills/my-skill/SKILL.md
+    const skillDir = join(pluginDir, 'skills', 'my-skill')
+    mkdirSync(skillDir, { recursive: true })
+    writeFileSync(join(skillDir, 'SKILL.md'), `---
+title: My Skill
+description: A test skill from plugin
+---
+
+# My Skill
+
+This skill does something useful.
+`)
+
+    // Create skills/another.md (direct .md file)
+    writeFileSync(join(pluginDir, 'skills', 'another.md'), `# Another Skill
+
+Direct skill file in skills directory.
+`)
+
+    // Create commands/build.md
+    const cmdDir = join(pluginDir, 'commands')
+    mkdirSync(cmdDir, { recursive: true })
+    writeFileSync(join(cmdDir, 'build.md'), `---
+title: Build Command
+description: Runs the build process
+---
+
+# Build
+
+Run \`npm run build\` in the project root.
+`)
+
+    // Create .mcp.json
+    writeFileSync(join(pluginDir, '.mcp.json'), JSON.stringify({
+      mcpServers: {
+        'my-server': {
+          command: 'node',
+          args: ['server.js'],
+          env: { PORT: '3000' }
+        },
+        'another-server': {
+          command: 'python',
+          args: ['-m', 'mcp_server'],
+          env: { DEBUG: 'true' }
+        }
+      }
+    }))
+  }
+
+  it('creates 20x skills from skills/ directory SKILL.md files', async () => {
+    setupPluginFiles()
+    await manager.installPlugin('file-plugin', marketplaceId)
+
+    const resources = manager.getPluginResources(
+      manager.getInstalledPlugins().find((p) => p.name === 'file-plugin')!.id
+    )
+
+    const skillNames = resources.skills.map((s) => s.name)
+    expect(skillNames).toContain('file-plugin:my-skill')
+    const mySkill = resources.skills.find((s) => s.name === 'file-plugin:my-skill')!
+    expect(mySkill.description).toBe('A test skill from plugin')
+  })
+
+  it('creates 20x skills from direct .md files in skills/', async () => {
+    setupPluginFiles()
+    await manager.installPlugin('file-plugin', marketplaceId)
+
+    const resources = manager.getPluginResources(
+      manager.getInstalledPlugins().find((p) => p.name === 'file-plugin')!.id
+    )
+
+    const skillNames = resources.skills.map((s) => s.name)
+    expect(skillNames).toContain('file-plugin:another')
+  })
+
+  it('creates 20x skills from commands/ directory (commands are skills)', async () => {
+    setupPluginFiles()
+    await manager.installPlugin('file-plugin', marketplaceId)
+
+    const resources = manager.getPluginResources(
+      manager.getInstalledPlugins().find((p) => p.name === 'file-plugin')!.id
+    )
+
+    const skillNames = resources.skills.map((s) => s.name)
+    expect(skillNames).toContain('file-plugin:cmd:build')
+    const buildCmd = resources.skills.find((s) => s.name === 'file-plugin:cmd:build')!
+    expect(buildCmd.description).toBe('Runs the build process')
+  })
+
+  it('creates 20x MCP servers from .mcp.json', async () => {
+    setupPluginFiles()
+    await manager.installPlugin('file-plugin', marketplaceId)
+
+    const resources = manager.getPluginResources(
+      manager.getInstalledPlugins().find((p) => p.name === 'file-plugin')!.id
+    )
+
+    expect(resources.mcpServers).toHaveLength(2)
+    const serverNames = resources.mcpServers.map((s) => s.name)
+    expect(serverNames).toContain('file-plugin:my-server')
+    expect(serverNames).toContain('file-plugin:another-server')
+
+    const myServer = resources.mcpServers.find((s) => s.name === 'file-plugin:my-server')!
+    expect(myServer.command).toBe('node')
+    expect(myServer.args).toEqual(['server.js'])
+  })
+
+  it('removes all resources on uninstall', async () => {
+    setupPluginFiles()
+    const installed = await manager.installPlugin('file-plugin', marketplaceId)
+
+    // Verify resources exist
+    let resources = manager.getPluginResources(installed.id)
+    expect(resources.skills.length).toBeGreaterThan(0)
+    expect(resources.mcpServers.length).toBeGreaterThan(0)
+
+    // Uninstall
+    await manager.uninstallPlugin(installed.id)
+
+    // Verify skills and MCP servers are cleaned up from DB
+    const allSkills = db.getSkills()
+    const pluginSkills = allSkills.filter((s) => s.tags.includes('plugin') && s.tags.includes('file-plugin'))
+    expect(pluginSkills).toHaveLength(0)
+
+    const allMcp = db.getMcpServers()
+    const pluginMcp = allMcp.filter((s) => s.name.startsWith('file-plugin:'))
+    expect(pluginMcp).toHaveLength(0)
+  })
+
+  it('cleans up downloaded plugin files on uninstall', async () => {
+    setupPluginFiles()
+    const installed = await manager.installPlugin('file-plugin', marketplaceId)
+
+    const { existsSync } = require('fs')
+    const pluginDir = join(tempPluginsDir, 'file-plugin')
+    expect(existsSync(pluginDir)).toBe(true)
+
+    await manager.uninstallPlugin(installed.id)
+    expect(existsSync(pluginDir)).toBe(false)
   })
 })
