@@ -924,7 +924,7 @@ export class ClaudePluginManager {
   private createPluginSkill(
     pluginName: string,
     skillKey: string,
-    title: string,
+    _title: string,
     description: string,
     content: string
   ): void {
@@ -947,8 +947,8 @@ export class ClaudePluginManager {
   private createPluginAgent(
     pluginName: string,
     agentKey: string,
-    title: string,
-    description: string,
+    _title: string,
+    _description: string,
     content: string,
     model?: string,
     skillIds?: string[],
