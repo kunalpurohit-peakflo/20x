@@ -132,6 +132,21 @@ export function TaskWorkspace({
     }
   }, [task?.status, session.sessionId, stop, task, githubOrg, removeSession])
 
+  // Clean up stale triage session when returning to a task that was triaged while unmounted.
+  // If the task is no longer Triaging, has no persisted session_id, but the in-memory session
+  // still has a sessionId (leftover from the triage agent), remove it so the Start button shows.
+  useEffect(() => {
+    if (
+      task &&
+      task.status !== TaskStatus.Triaging &&
+      !task.session_id &&
+      session.sessionId &&
+      session.status === 'idle'
+    ) {
+      removeSession(task.id)
+    }
+  }, [task?.id]) // intentionally run only on mount/task switch
+
   const handleStartSession = useCallback(async () => {
     if (!task?.agent_id || startingRef.current || session.sessionId) return
     startingRef.current = true
