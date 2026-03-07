@@ -21,7 +21,6 @@ export function TaskDetailPage({ taskId, onNavigate }: { taskId: string; onNavig
   const initSession = useAgentStore((s) => s.initSession)
   const endSession = useAgentStore((s) => s.endSession)
 
-  const [skillsExpanded, setSkillsExpanded] = useState(false)
   const [showFeedback, setShowFeedback] = useState(false)
   const { handleStart: _startSession, handleResume: _resumeSession, handleStop: _stopSession, busyRef } = useSessionControls(taskId)
 
@@ -306,51 +305,49 @@ export function TaskDetailPage({ taskId, onNavigate }: { taskId: string; onNavig
                   <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
                   Skills
                 </span>
-                <div>
-                  {task.skill_ids === null && !skillsExpanded ? (
-                    <div className="flex items-center gap-2">
+                <div className="space-y-1.5">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {task.skill_ids === null ? (
                       <span className="text-xs text-muted-foreground">Using agent defaults</span>
-                      <button onClick={() => setSkillsExpanded(true)} className="text-xs text-primary active:opacity-60">
-                        Customize
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="space-y-2">
-                      <div className="flex flex-wrap gap-1.5">
-                        {agentSkills.map((skill) => {
-                          const selected = task.skill_ids === null || (task.skill_ids || []).includes(skill.id)
+                    ) : (
+                      <>
+                        {task.skill_ids.map((skillId) => {
+                          const skill = agentSkills.find((s) => s.id === skillId)
+                          if (!skill) return null
                           return (
-                            <button
-                              key={skill.id}
-                              onClick={() => {
-                                const current = task.skill_ids || agentSkills.map((s) => s.id)
-                                const next = selected
-                                  ? current.filter((id) => id !== skill.id)
-                                  : [...current, skill.id]
-                                handleUpdateSkillIds(next)
-                              }}
-                              className={cn(
-                                'inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors',
-                                selected
-                                  ? 'bg-primary/20 border-primary/40 text-primary'
-                                  : 'border-border/50 text-muted-foreground'
-                              )}
-                            >
+                            <span key={skillId} className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-0.5 text-[11px] font-medium pr-1">
                               {skill.name}
-                            </button>
+                              <button
+                                onClick={() => handleUpdateSkillIds(task.skill_ids!.filter((id) => id !== skillId))}
+                                className="rounded-full hover:bg-foreground/10 p-0.5"
+                              >
+                                <svg className="h-2.5 w-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                  <path d="M18 6 6 18"/><path d="m6 6 12 12"/>
+                                </svg>
+                              </button>
+                            </span>
                           )
                         })}
-                      </div>
-                      {task.skill_ids !== null && (
-                        <button
-                          onClick={() => { handleUpdateSkillIds(null); setSkillsExpanded(false) }}
-                          className="text-xs text-muted-foreground active:opacity-60"
-                        >
-                          Reset to defaults
-                        </button>
-                      )}
-                    </div>
-                  )}
+                      </>
+                    )}
+                    <button
+                      onClick={() => onNavigate({ page: 'skills', taskId })}
+                      className="inline-flex items-center gap-1 h-6 px-2 text-xs text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors"
+                    >
+                      <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M5 12h14"/><path d="M12 5v14"/>
+                      </svg>
+                      {task.skill_ids === null ? 'Customize' : 'Add'}
+                    </button>
+                    {task.skill_ids !== null && (
+                      <button
+                        onClick={() => handleUpdateSkillIds(null)}
+                        className="text-xs text-muted-foreground active:opacity-60"
+                      >
+                        Reset to defaults
+                      </button>
+                    )}
+                  </div>
                 </div>
               </>
             )}

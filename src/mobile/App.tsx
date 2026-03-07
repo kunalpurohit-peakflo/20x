@@ -7,12 +7,14 @@ import { TaskDetailPage } from './pages/TaskDetailPage'
 import { ConversationPage } from './pages/ConversationPage'
 import { RepoSelectorPage } from './pages/RepoSelectorPage'
 import { TaskFormPage } from './pages/TaskFormPage'
+import { SkillSelectorPage } from './pages/SkillSelectorPage'
 
 export type Route =
   | { page: 'list' }
   | { page: 'detail'; taskId: string }
   | { page: 'conversation'; taskId: string }
   | { page: 'repos'; taskId: string }
+  | { page: 'skills'; taskId: string }
   | { page: 'create' }
   | { page: 'edit'; taskId: string }
 
@@ -94,6 +96,9 @@ export function App() {
       )}
       {route.page === 'repos' && (
         <RepoSelectorPage taskId={route.taskId} onNavigate={navigate} />
+      )}
+      {route.page === 'skills' && (
+        <SkillSelectorPage taskId={route.taskId} onNavigate={navigate} />
       )}
       {route.page === 'create' && (
         <TaskFormPage onNavigate={navigate} />

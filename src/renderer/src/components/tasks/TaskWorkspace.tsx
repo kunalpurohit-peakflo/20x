@@ -9,6 +9,7 @@ import { AgentApprovalBanner } from '@/components/agents/AgentApprovalBanner'
 import { GhCliSetupDialog } from '@/components/github/GhCliSetupDialog'
 import { OrgPickerDialog } from '@/components/github/OrgPickerDialog'
 import { RepoSelectorDialog } from '@/components/github/RepoSelectorDialog'
+import { SkillSelectorDialog } from '@/components/skills/SkillSelectorDialog'
 import { WorktreeProgressOverlay } from '@/components/github/WorktreeProgressOverlay'
 import { useAgentSession } from '@/hooks/use-agent-session'
 import { useAgentStore } from '@/stores/agent-store'
@@ -50,6 +51,7 @@ export function TaskWorkspace({
   const [showGhSetup, setShowGhSetup] = useState(false)
   const [showOrgPicker, setShowOrgPicker] = useState(false)
   const [showRepoSelector, setShowRepoSelector] = useState(false)
+  const [showSkillSelector, setShowSkillSelector] = useState(false)
   const [isSettingUpWorktree, setIsSettingUpWorktree] = useState(false)
   const [showFeedback, setShowFeedback] = useState(false)
   const [showSnooze, setShowSnooze] = useState(false)
@@ -532,6 +534,7 @@ Update existing skills that were helpful or create new ones for patterns worth r
             onUpdateSkillIds={async (skillIds) => {
               if (onUpdateTask) await onUpdateTask(task.id, { skill_ids: skillIds })
             }}
+            onAddSkills={() => setShowSkillSelector(true)}
             onStartAgent={handleStartSession}
             canStartAgent={!!canStart}
             onResumeAgent={handleResumeSession}
@@ -583,6 +586,15 @@ Update existing skills that were helpful or create new ones for patterns worth r
           onConfirm={handleReposConfirmed}
         />
       )}
+
+      <SkillSelectorDialog
+        open={showSkillSelector}
+        onOpenChange={setShowSkillSelector}
+        initialSkillIds={task.skill_ids ?? []}
+        onConfirm={async (skillIds) => {
+          if (onUpdateTask) await onUpdateTask(task.id, { skill_ids: skillIds })
+        }}
+      />
 
       <FeedbackDialog
         open={showFeedback}
