@@ -77,7 +77,7 @@ export interface DiscoverablePlugin {
 export interface PluginResources {
   skills: { id: string; name: string; description: string }[]
   mcpServers: { id: string; name: string; command: string; args: string[] }[]
-  agents: string[]
+  agents: { id: string; name: string; description: string }[]
   commands: string[]
 }
 
@@ -411,10 +411,11 @@ export class ClaudePluginManager {
       .filter((s) => s.name.startsWith(`${plugin.name}:`))
       .map((s) => ({ id: s.id, name: s.name, command: s.command, args: s.args }))
 
-    // Manifest-declared agents
-    const agents: string[] = manifest.agents
-      ? (Array.isArray(manifest.agents) ? manifest.agents : [manifest.agents])
-      : []
+    // Materialised agents (prefixed with pluginName:)
+    const allAgents = this.db.getAgents()
+    const agents = allAgents
+      .filter((a) => a.name.startsWith(`${plugin.name}:`))
+      .map((a) => ({ id: a.id, name: a.name, description: a.config?.system_prompt?.slice(0, 100) || '' }))
 
     // Commands — already materialised as skills, but list them for informational display
     const commands: string[] = manifest.commands
@@ -848,7 +849,24 @@ export class ClaudePluginManager {
       }
     }
 
-    // ── 4. Fallback: MCP servers from manifest ────────────────
+    // ── 4. Agents from agents/ directory ────────────────────────
+    const agentsDir = join(pluginDir, 'agents')
+    if (existsSync(agentsDir)) {
+      const entries = readdirSync(agentsDir)
+      for (const entry of entries) {
+        const entryPath = join(agentsDir, entry)
+        const stat = statSync(entryPath)
+
+        if (stat.isFile() && entry.endsWith('.md')) {
+          const content = readFileSync(entryPath, 'utf-8')
+          const agentName = basename(entry, '.md')
+          const { title, description, model } = this.parseAgentFrontmatter(content, agentName)
+          this.createPluginAgent(plugin.name, agentName, title, description, content, model)
+        }
+      }
+    }
+
+    // ── 6. Fallback: MCP servers from manifest ────────────────
     // If no .mcp.json was found, check the manifest for mcpServers
     const manifest = plugin.manifest
     if (!existsSync(mcpJsonPath) && manifest.mcpServers && typeof manifest.mcpServers === 'object' && !Array.isArray(manifest.mcpServers)) {
@@ -867,7 +885,7 @@ export class ClaudePluginManager {
       }
     }
 
-    // ── 5. Fallback: Skills from manifest (if no files found) ─
+    // ── 7. Fallback: Skills from manifest (if no files found) ─
     const hasSkillFiles = existsSync(skillsDir) || existsSync(commandsDir)
     if (!hasSkillFiles && manifest.skills && Array.isArray(manifest.skills)) {
       for (const skillPath of manifest.skills) {
@@ -905,6 +923,66 @@ export class ClaudePluginManager {
     } catch (err) {
       console.warn(`[ClaudePluginManager] Failed to create skill "${skillKey}" from plugin "${pluginName}":`, err)
     }
+  }
+
+  /**
+   * Creates a 20x agent record for a plugin agent.
+   * Agent frontmatter format: name, description, model
+   */
+  private createPluginAgent(
+    pluginName: string,
+    agentKey: string,
+    title: string,
+    description: string,
+    content: string,
+    model?: string
+  ): void {
+    try {
+      // Strip frontmatter from content to use as system prompt
+      const systemPrompt = content.replace(/^---\s*\n[\s\S]*?\n---\s*\n?/, '').trim()
+
+      this.db.createAgent({
+        name: `${pluginName}:${agentKey}`,
+        config: {
+          system_prompt: systemPrompt,
+          model: model || undefined
+        }
+      })
+    } catch (err) {
+      console.warn(`[ClaudePluginManager] Failed to create agent "${agentKey}" from plugin "${pluginName}":`, err)
+    }
+  }
+
+  /**
+   * Parses frontmatter from an agent markdown file.
+   * Agent frontmatter fields: name, description, model
+   */
+  private parseAgentFrontmatter(
+    content: string,
+    fallbackName: string
+  ): { title: string; description: string; model?: string } {
+    let title = fallbackName
+    let description = ''
+    let model: string | undefined
+
+    const fmMatch = content.match(/^---\s*\n([\s\S]*?)\n---/)
+    if (fmMatch) {
+      const fm = fmMatch[1]
+      const nameMatch = fm.match(/^name:\s*(.+)$/m)
+      const descMatch = fm.match(/^description:\s*(.+)$/m)
+      const modelMatch = fm.match(/^model:\s*(.+)$/m)
+      if (nameMatch) title = nameMatch[1].replace(/^["']|["']$/g, '').trim()
+      if (descMatch) description = descMatch[1].replace(/^["']|["']$/g, '').trim()
+      if (modelMatch) model = modelMatch[1].replace(/^["']|["']$/g, '').trim()
+    }
+
+    // Fallback: first # heading
+    if (title === fallbackName) {
+      const headingMatch = content.match(/^#\s+(.+)$/m)
+      if (headingMatch) title = headingMatch[1].trim()
+    }
+
+    return { title, description, model }
   }
 
   /**
@@ -963,6 +1041,13 @@ export class ClaudePluginManager {
     const pluginServers = mcpServers.filter((s) => s.name.startsWith(`${plugin.name}:`))
     for (const server of pluginServers) {
       this.db.deleteMcpServer(server.id)
+    }
+
+    // Remove agents created by this plugin
+    const agents = this.db.getAgents()
+    const pluginAgents = agents.filter((a) => a.name.startsWith(`${plugin.name}:`))
+    for (const agent of pluginAgents) {
+      this.db.deleteAgent(agent.id)
     }
   }
 

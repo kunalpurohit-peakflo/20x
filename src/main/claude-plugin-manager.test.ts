@@ -351,6 +351,26 @@ description: Runs the build process
 Run \`npm run build\` in the project root.
 `)
 
+    // Create agents/verifier-py.md and agents/verifier-ts.md
+    const agentsDir = join(pluginDir, 'agents')
+    mkdirSync(agentsDir, { recursive: true })
+    writeFileSync(join(agentsDir, 'verifier-py.md'), `---
+name: agent-sdk-verifier-py
+description: Verify Python Agent SDK applications
+model: sonnet
+---
+
+You are a Python Agent SDK application verifier. Your role is to inspect Python Agent SDK apps.
+`)
+    writeFileSync(join(agentsDir, 'verifier-ts.md'), `---
+name: agent-sdk-verifier-ts
+description: Verify TypeScript Agent SDK applications
+model: sonnet
+---
+
+You are a TypeScript Agent SDK application verifier.
+`)
+
     // Create .mcp.json
     writeFileSync(join(pluginDir, '.mcp.json'), JSON.stringify({
       mcpServers: {
@@ -426,14 +446,44 @@ Run \`npm run build\` in the project root.
     expect(myServer.args).toEqual(['server.js'])
   })
 
+  it('creates 20x agents from agents/ directory', async () => {
+    setupPluginFiles()
+    await manager.installPlugin('file-plugin', marketplaceId)
+
+    const resources = manager.getPluginResources(
+      manager.getInstalledPlugins().find((p) => p.name === 'file-plugin')!.id
+    )
+
+    expect(resources.agents).toHaveLength(2)
+    const agentNames = resources.agents.map((a) => a.name)
+    expect(agentNames).toContain('file-plugin:verifier-py')
+    expect(agentNames).toContain('file-plugin:verifier-ts')
+  })
+
+  it('agents are visible in the global agents list', async () => {
+    setupPluginFiles()
+    await manager.installPlugin('file-plugin', marketplaceId)
+
+    const allAgents = db.getAgents()
+    const pluginAgents = allAgents.filter((a) => a.name.startsWith('file-plugin:'))
+    expect(pluginAgents).toHaveLength(2)
+
+    // Verify system_prompt is set (frontmatter stripped)
+    const pyAgent = pluginAgents.find((a) => a.name === 'file-plugin:verifier-py')!
+    expect(pyAgent.config.system_prompt).toContain('Python Agent SDK application verifier')
+    // Frontmatter should be stripped from system_prompt
+    expect(pyAgent.config.system_prompt).not.toContain('---')
+  })
+
   it('removes all resources on uninstall', async () => {
     setupPluginFiles()
     const installed = await manager.installPlugin('file-plugin', marketplaceId)
 
     // Verify resources exist
-    let resources = manager.getPluginResources(installed.id)
+    const resources = manager.getPluginResources(installed.id)
     expect(resources.skills.length).toBeGreaterThan(0)
     expect(resources.mcpServers.length).toBeGreaterThan(0)
+    expect(resources.agents.length).toBeGreaterThan(0)
 
     // Uninstall
     await manager.uninstallPlugin(installed.id)
@@ -446,6 +496,11 @@ Run \`npm run build\` in the project root.
     const allMcp = db.getMcpServers()
     const pluginMcp = allMcp.filter((s) => s.name.startsWith('file-plugin:'))
     expect(pluginMcp).toHaveLength(0)
+
+    // Verify agents are cleaned up from DB
+    const allAgents = db.getAgents()
+    const pluginAgents = allAgents.filter((a) => a.name.startsWith('file-plugin:'))
+    expect(pluginAgents).toHaveLength(0)
   })
 
   it('cleans up downloaded plugin files on uninstall', async () => {

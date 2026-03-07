@@ -583,7 +583,7 @@ export interface DiscoverablePlugin {
 export interface PluginResources {
   skills: { id: string; name: string; description: string }[]
   mcpServers: { id: string; name: string; command: string; args: string[] }[]
-  agents: string[]
+  agents: { id: string; name: string; description: string }[]
   commands: string[]
 }
 

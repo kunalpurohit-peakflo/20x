@@ -446,8 +446,9 @@ function InstalledPluginCard({
               </div>
               <div className="space-y-1 ml-4.5">
                 {resources.agents.map((agent) => (
-                  <div key={agent} className="text-[11px]">
-                    <span className="text-foreground font-mono bg-muted px-1.5 py-0.5 rounded">{agent}</span>
+                  <div key={agent.id} className="flex items-start gap-2 text-[11px]">
+                    <span className="text-foreground font-mono bg-muted px-1.5 py-0.5 rounded">{agent.name}</span>
+                    {agent.description && <span className="text-muted-foreground truncate">{agent.description}</span>}
                   </div>
                 ))}
               </div>
