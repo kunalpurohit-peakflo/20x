@@ -343,6 +343,16 @@ export class AgentManager extends EventEmitter {
   }
 
   /**
+   * Returns the memory file name for an agent based on its type.
+   * Claude Code agents use CLAUDE.md; all other agents use AGENTS.md.
+   */
+  private getMemoryFileName(agentId: string): string {
+    const agent = this.db.getAgent(agentId)
+    const backendType = (agent?.config?.coding_agent as string) || CodingAgentType.OPENCODE
+    return backendType === CodingAgentType.CLAUDE_CODE ? 'CLAUDE.md' : 'AGENTS.md'
+  }
+
+  /**
    * Builds a system prompt snippet describing available secrets.
    * Tells the agent which env vars exist and how to use them in bash commands.
    */
@@ -414,8 +424,14 @@ export class AgentManager extends EventEmitter {
         : this.db.getSkillsByIds(skillIds)
 
       // Write individual SKILL.md files
+      // Claude Code agent: .claude/skills/<name>/SKILL.md
+      // Other agents: .agents/skills/<name>/SKILL.md
       if (skills.length > 0) {
-        const skillsDir = join(workspaceDir, '.agents', 'skills')
+        const backendType = (agentConfig?.coding_agent as string) || CodingAgentType.OPENCODE
+        const isClaudeCode = backendType === CodingAgentType.CLAUDE_CODE
+        const skillsDir = isClaudeCode
+          ? join(workspaceDir, '.claude', 'skills')
+          : join(workspaceDir, '.agents', 'skills')
         for (const skill of skills) {
           const dir = join(skillsDir, skill.name)
           mkdirSync(dir, { recursive: true })
@@ -435,6 +451,7 @@ export class AgentManager extends EventEmitter {
 
   /**
    * Generates AGENTS.md and CLAUDE.md with skill directory and metadata.
+   * Both files are written to the workspace root directory.
    */
   private writeAgentsDocumentation(
     workspaceDir: string,
@@ -443,23 +460,18 @@ export class AgentManager extends EventEmitter {
     agentId?: string
   ): void {
     try {
-      const agentsDir = join(workspaceDir, '.agents')
-      mkdirSync(agentsDir, { recursive: true })
-
       // Sort skills by confidence (high to low)
       const sortedSkills = [...skills].sort((a, b) => b.confidence - a.confidence)
 
-      // Generate AGENTS.md
+      // Generate AGENTS.md — write to workspace root
       const agentsMd = this.generateAgentsMd(sortedSkills, repos, workspaceDir, agentId)
-      writeFileSync(join(agentsDir, 'AGENTS.md'), agentsMd, 'utf-8')
+      writeFileSync(join(workspaceDir, 'AGENTS.md'), agentsMd, 'utf-8')
 
-      // Generate CLAUDE.md — write to both .agents/ and workspace root
-      // OpenCode reads CLAUDE.md from the workspace root directory
+      // Generate CLAUDE.md — write to workspace root
       const claudeMd = this.generateClaudeMd(sortedSkills, repos, workspaceDir, agentId)
-      writeFileSync(join(agentsDir, 'CLAUDE.md'), claudeMd, 'utf-8')
       writeFileSync(join(workspaceDir, 'CLAUDE.md'), claudeMd, 'utf-8')
 
-      console.log('[AgentManager] Generated AGENTS.md and CLAUDE.md with skill directory')
+      console.log('[AgentManager] Generated AGENTS.md and CLAUDE.md in workspace root')
     } catch (error) {
       console.error('[AgentManager] Error writing agent documentation:', error)
     }
@@ -573,7 +585,7 @@ export class AgentManager extends EventEmitter {
         const lastUsed = skill.last_used ? new Date(skill.last_used).toISOString().split('T')[0] : 'Never'
         const tags = skill.tags && skill.tags.length > 0 ? skill.tags.join(', ') : 'none'
 
-        md += `### [${skill.name}](skills/${skill.name}/SKILL.md)\n\n`
+        md += `### [${skill.name}](.agents/skills/${skill.name}/SKILL.md)\n\n`
         md += `**Confidence:** ${confidencePercent}% | **Uses:** ${skill.uses} | **Last Used:** ${lastUsed}\n\n`
         md += `**Tags:** ${tags}\n\n`
         md += `${skill.description}\n\n`
@@ -679,7 +691,7 @@ export class AgentManager extends EventEmitter {
 
       for (const skill of skills) {
         const confidencePercent = (skill.confidence * 100).toFixed(0)
-        md += `- **[${skill.name}](skills/${skill.name}/SKILL.md)** (${confidencePercent}% confidence)\n`
+        md += `- **[${skill.name}](.claude/skills/${skill.name}/SKILL.md)** (${confidencePercent}% confidence)\n`
         md += `  ${skill.description}\n\n`
       }
 
@@ -690,7 +702,7 @@ export class AgentManager extends EventEmitter {
         const lastUsed = skill.last_used ? new Date(skill.last_used).toISOString().split('T')[0] : 'Never'
 
         md += `#### ${skill.name}\n\n`
-        md += `**Path:** [skills/${skill.name}/SKILL.md](skills/${skill.name}/SKILL.md)\n\n`
+        md += `**Path:** [.claude/skills/${skill.name}/SKILL.md](.claude/skills/${skill.name}/SKILL.md)\n\n`
         md += `**Confidence:** ${confidencePercent}%\n\n`
         md += `**Description:** ${skill.description}\n\n`
         md += `**Usage Stats:** ${skill.uses} uses | Last used: ${lastUsed}\n\n`
@@ -1031,8 +1043,8 @@ export class AgentManager extends EventEmitter {
       } else {
         const currentTask = task || this.db.getTask(taskId)
         promptText = currentTask
-          ? `Working on task: "${currentTask.title}"\n\n${currentTask.description || ''}`
-          : `Working on task ${taskId}`
+          ? `Work on task: "${currentTask.title}"\n\n${currentTask.description || ''}`
+          : `Work on task: ${taskId}`
 
         // Append output field instructions
         if (currentTask?.output_fields && currentTask.output_fields.length > 0) {
@@ -1062,6 +1074,11 @@ export class AgentManager extends EventEmitter {
           promptText += `\n\nAttached files (relative to your working directory):\n${attachmentRefs.join('\n')}`
         }
       }
+
+      // Append memory file read instruction to user message
+      // (user messages are more reliably followed than system prompt instructions)
+      const memoryFileName = this.getMemoryFileName(agentId)
+      promptText += `\n\nIMPORTANT: First, read the \`${memoryFileName}\` file in the working directory — it has workspace config, skills, and project context.`
 
       // Show user's prompt in UI first
       this.sendToRenderer('agent:output', {
@@ -2593,8 +2610,9 @@ Important:
       return { created: [], updated: [], unchanged: [] }
     }
 
-    // Scan both .agents/skills/ (new) and .opencode/skills/ (legacy/agent-created)
+    // Scan .claude/skills/ (Claude Code), .agents/skills/ (other agents), and .opencode/skills/ (legacy)
     const skillsDirs = [
+      join(session.workspaceDir, '.claude', 'skills'),
       join(session.workspaceDir, '.agents', 'skills'),
       join(session.workspaceDir, '.opencode', 'skills')
     ].filter(existsSync)
