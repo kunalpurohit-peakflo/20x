@@ -4,9 +4,10 @@ import { homedir } from 'os'
 import { join, delimiter } from 'path'
 import { existsSync, copyFileSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync } from 'fs'
 import { Agent as UndiciAgent } from 'undici'
+import { Notification } from 'electron'
 import type { BrowserWindow } from 'electron'
 import type { DatabaseManager, AgentMcpServerEntry, OutputFieldRecord, SecretRecord, SkillRecord, TaskRecord } from './database'
-import { TaskStatus } from '../shared/constants'
+import { TaskStatus, SessionStatus } from '../shared/constants'
 import type { WorktreeManager } from './worktree-manager'
 import type { GitHubManager } from './github-manager'
 import { OpencodeAdapter } from './adapters/opencode-adapter'
@@ -83,6 +84,9 @@ export class AgentManager extends EventEmitter {
   private pollingEntries: Map<string, PollingEntry> = new Map()
   private pollingTimer: ReturnType<typeof setTimeout> | null = null
   private static readonly POLL_INTERVAL_MS = 2000
+
+  // Track last sent status per session to detect transitions for OS notifications
+  private lastSentStatus: Map<string, string> = new Map()
 
   constructor(db: DatabaseManager) {
     super()
@@ -2764,6 +2768,47 @@ Important:
     // Also notify external listeners (mobile API WebSocket)
     for (const fn of this.externalListeners) {
       try { fn(channel, data) } catch { /* ignore */ }
+    }
+
+    // Show OS notification when agent transitions from working to idle/waiting_approval
+    // and the app window is not focused
+    if (channel === 'agent:status' && data && typeof data === 'object') {
+      const { sessionId, status, taskId } = data as { sessionId?: string; status?: string; taskId?: string }
+      if (sessionId && status) {
+        const prevStatus = this.lastSentStatus.get(sessionId)
+        this.lastSentStatus.set(sessionId, status)
+
+        const isWindowInactive = !this.mainWindow || this.mainWindow.isDestroyed() || !this.mainWindow.isFocused()
+
+        if (prevStatus === SessionStatus.WORKING && (status === SessionStatus.IDLE || status === SessionStatus.WAITING_APPROVAL) && isWindowInactive) {
+          try {
+            if (Notification.isSupported()) {
+              let title: string
+              let body: string
+              const taskTitle = taskId ? this.db.getTask(taskId)?.title : undefined
+
+              if (status === SessionStatus.WAITING_APPROVAL) {
+                title = 'Agent needs approval'
+                body = taskTitle ? `"${taskTitle}" is waiting for your approval` : 'An agent is waiting for your approval'
+              } else {
+                title = 'Agent finished'
+                body = taskTitle ? `"${taskTitle}" is ready for review` : 'A task is ready for review'
+              }
+
+              const notification = new Notification({ title, body })
+              notification.on('click', () => {
+                if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+                  this.mainWindow.show()
+                  this.mainWindow.focus()
+                }
+              })
+              notification.show()
+            }
+          } catch (err) {
+            console.error('[AgentManager] Failed to show OS notification:', err)
+          }
+        }
+      }
     }
   }
 }
