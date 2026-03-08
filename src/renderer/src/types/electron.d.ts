@@ -279,6 +279,7 @@ interface ElectronAPI {
     getStatus: (taskId: string) => Promise<HeartbeatStatusResult | null>
     updateInterval: (taskId: string, intervalMinutes: number) => Promise<WorkfloTask | undefined>
     readFile: (taskId: string) => Promise<string | null>
+    writeFile: (taskId: string, content: string) => Promise<boolean>
   }
   app: {
     getLoginItemSettings: () => Promise<{ openAtLogin: boolean; openAsHidden: boolean }>

@@ -267,7 +267,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     updateInterval: (taskId: string, intervalMinutes: number): Promise<unknown> =>
       ipcRenderer.invoke('heartbeat:updateInterval', taskId, intervalMinutes),
     readFile: (taskId: string): Promise<string | null> =>
-      ipcRenderer.invoke('heartbeat:readFile', taskId)
+      ipcRenderer.invoke('heartbeat:readFile', taskId),
+    writeFile: (taskId: string, content: string): Promise<boolean> =>
+      ipcRenderer.invoke('heartbeat:writeFile', taskId, content)
   },
   onHeartbeatAlert: (callback: (event: unknown) => void): (() => void) => {
     const handler = (_: unknown, data: unknown): void => callback(data)

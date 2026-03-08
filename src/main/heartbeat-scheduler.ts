@@ -1,5 +1,6 @@
 import { BrowserWindow, Notification } from 'electron'
-import { existsSync, readFileSync } from 'fs'
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
+import { dirname } from 'path'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { join } from 'path'
@@ -137,6 +138,20 @@ export class HeartbeatScheduler {
     } catch {
       return null
     }
+  }
+
+  /**
+   * Write or update the heartbeat.md file for a task.
+   * Creates the file if it doesn't exist. Ensures the workspace directory exists.
+   */
+  writeHeartbeatFile(taskId: string, content: string): void {
+    const filePath = this.getHeartbeatFilePath(taskId)
+    const dir = dirname(filePath)
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true })
+    }
+    writeFileSync(filePath, content, 'utf-8')
+    console.log(`[HeartbeatScheduler] Wrote heartbeat.md for task ${taskId} (${content.length} chars)`)
   }
 
   // ── Core Logic ──────────────────────────────────────────────

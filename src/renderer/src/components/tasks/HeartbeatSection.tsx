@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from 'react'
-import { HeartPulse, Play, Pause, Clock, AlertTriangle, CheckCircle2, XCircle, ChevronDown, ChevronRight } from 'lucide-react'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { HeartPulse, Play, Pause, Clock, AlertTriangle, CheckCircle2, XCircle, ChevronDown, ChevronRight, Pencil, Save, X } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import { Badge } from '@/components/ui/Badge'
 import type { WorkfloTask } from '@/types'
@@ -36,6 +36,10 @@ export function HeartbeatSection({ task, onTaskUpdated }: HeartbeatSectionProps)
   const [expanded, setExpanded] = useState(false)
   const [logsExpanded, setLogsExpanded] = useState(false)
   const [heartbeatContent, setHeartbeatContent] = useState<string | null>(null)
+  const [editing, setEditing] = useState(false)
+  const [editDraft, setEditDraft] = useState('')
+  const [saving, setSaving] = useState(false)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -95,8 +99,9 @@ export function HeartbeatSection({ task, onTaskUpdated }: HeartbeatSectionProps)
     }
   }, [task.id, fetchStatus, fetchLogs])
 
-  // Don't show if no heartbeat file and not enabled
-  if (!status?.hasHeartbeatFile && !status?.enabled) {
+  // Show the section for tasks in ready_for_review so users can always create/edit heartbeat instructions
+  // Also show if heartbeat is already enabled or a file exists
+  if (!status?.hasHeartbeatFile && !status?.enabled && task.status !== 'ready_for_review') {
     return null
   }
 
@@ -141,6 +146,31 @@ export function HeartbeatSection({ task, onTaskUpdated }: HeartbeatSectionProps)
       onTaskUpdated?.()
     } catch {
       // Ignore
+    }
+  }
+
+  const handleStartEdit = () => {
+    setEditDraft(heartbeatContent || '# Heartbeat Checks\n- [ ] ')
+    setEditing(true)
+    // Focus textarea after render
+    setTimeout(() => textareaRef.current?.focus(), 50)
+  }
+
+  const handleCancelEdit = () => {
+    setEditing(false)
+    setEditDraft('')
+  }
+
+  const handleSave = async () => {
+    setSaving(true)
+    try {
+      await window.electronAPI.heartbeat.writeFile(task.id, editDraft)
+      setHeartbeatContent(editDraft.trim() || null)
+      setEditing(false)
+      // Refresh status since file existence may have changed
+      await fetchStatus()
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -242,15 +272,74 @@ export function HeartbeatSection({ task, onTaskUpdated }: HeartbeatSectionProps)
             </div>
           )}
 
-          {/* Heartbeat.md content preview */}
-          {heartbeatContent && (
-            <div className="text-xs">
-              <div className="text-muted-foreground mb-1 font-medium">heartbeat.md</div>
-              <div className="bg-muted/50 rounded p-2 max-h-32 overflow-y-auto whitespace-pre-wrap font-mono text-[10px] leading-relaxed">
+          {/* Heartbeat.md content — editable */}
+          <div className="text-xs">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-muted-foreground font-medium">heartbeat.md</span>
+              {!editing ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={handleStartEdit}
+                  className="h-5 px-1.5 text-[10px]"
+                  title={heartbeatContent ? 'Edit heartbeat instructions' : 'Create heartbeat instructions'}
+                >
+                  <Pencil className="h-3 w-3 mr-1" />
+                  {heartbeatContent ? 'Edit' : 'Create'}
+                </Button>
+              ) : (
+                <div className="flex items-center gap-1">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={handleSave}
+                    disabled={saving}
+                    className="h-5 px-1.5 text-[10px] text-emerald-500 hover:text-emerald-400"
+                    title="Save changes"
+                  >
+                    <Save className="h-3 w-3 mr-1" />
+                    Save
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={handleCancelEdit}
+                    disabled={saving}
+                    className="h-5 px-1.5 text-[10px]"
+                    title="Cancel editing"
+                  >
+                    <X className="h-3 w-3" />
+                  </Button>
+                </div>
+              )}
+            </div>
+            {editing ? (
+              <textarea
+                ref={textareaRef}
+                value={editDraft}
+                onChange={(e) => setEditDraft(e.target.value)}
+                className="w-full bg-muted/50 border border-border rounded p-2 font-mono text-[10px] leading-relaxed resize-y min-h-[80px] max-h-[200px] focus:outline-none focus:ring-1 focus:ring-ring"
+                placeholder="# Heartbeat Checks&#10;- [ ] Check if PR has new review comments&#10;- [ ] Verify CI pipeline passed"
+                spellCheck={false}
+              />
+            ) : heartbeatContent ? (
+              <div
+                className="bg-muted/50 rounded p-2 max-h-32 overflow-y-auto whitespace-pre-wrap font-mono text-[10px] leading-relaxed cursor-pointer hover:bg-muted/70 transition-colors"
+                onClick={handleStartEdit}
+                title="Click to edit"
+              >
                 {heartbeatContent}
               </div>
-            </div>
-          )}
+            ) : (
+              <div
+                className="bg-muted/50 rounded p-2 text-muted-foreground/50 font-mono text-[10px] cursor-pointer hover:bg-muted/70 transition-colors"
+                onClick={handleStartEdit}
+                title="Click to create heartbeat instructions"
+              >
+                No heartbeat.md — click to create one
+              </div>
+            )}
+          </div>
 
           {/* Recent logs */}
           {logs.length > 0 && (
