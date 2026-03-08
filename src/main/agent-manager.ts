@@ -7,7 +7,7 @@ import { Agent as UndiciAgent } from 'undici'
 import { Notification } from 'electron'
 import type { BrowserWindow } from 'electron'
 import type { DatabaseManager, AgentMcpServerEntry, OutputFieldRecord, SecretRecord, SkillRecord, TaskRecord } from './database'
-import { TaskStatus } from '../shared/constants'
+import { TaskStatus, SessionStatus } from '../shared/constants'
 import type { WorktreeManager } from './worktree-manager'
 import type { GitHubManager } from './github-manager'
 import { OpencodeAdapter } from './adapters/opencode-adapter'
@@ -2777,14 +2777,14 @@ Important:
 
         const isWindowInactive = !this.mainWindow || this.mainWindow.isDestroyed() || !this.mainWindow.isFocused()
 
-        if (prevStatus === 'working' && (status === 'idle' || status === 'waiting_approval') && isWindowInactive) {
+        if (prevStatus === SessionStatus.WORKING && (status === SessionStatus.IDLE || status === SessionStatus.WAITING_APPROVAL) && isWindowInactive) {
           try {
             if (Notification.isSupported()) {
               let title: string
               let body: string
               const taskTitle = taskId ? this.db.getTask(taskId)?.title : undefined
 
-              if (status === 'waiting_approval') {
+              if (status === SessionStatus.WAITING_APPROVAL) {
                 title = 'Agent needs approval'
                 body = taskTitle ? `"${taskTitle}" is waiting for your approval` : 'An agent is waiting for your approval'
               } else {

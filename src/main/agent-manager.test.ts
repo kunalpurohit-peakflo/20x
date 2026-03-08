@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { AgentManager } from './agent-manager'
+import { SessionStatus } from '../shared/constants'
 
 // Mock filesystem operations
 vi.mock('fs', async (importOriginal) => {
@@ -321,10 +322,10 @@ describe('AgentManager OS notifications', () => {
     const { mgr } = createManagerWithWindow({ isFocused: false })
 
     ;(mgr as any).sendToRenderer('agent:status', {
-      sessionId: 's1', agentId: 'a1', taskId: 'task-1', status: 'working'
+      sessionId: 's1', agentId: 'a1', taskId: 'task-1', status: SessionStatus.WORKING
     })
     ;(mgr as any).sendToRenderer('agent:status', {
-      sessionId: 's1', agentId: 'a1', taskId: 'task-1', status: 'idle'
+      sessionId: 's1', agentId: 'a1', taskId: 'task-1', status: SessionStatus.IDLE
     })
 
     expect(notificationInstances).toHaveLength(1)
@@ -337,10 +338,10 @@ describe('AgentManager OS notifications', () => {
     const { mgr } = createManagerWithWindow({ isFocused: false })
 
     ;(mgr as any).sendToRenderer('agent:status', {
-      sessionId: 's1', agentId: 'a1', taskId: 'task-1', status: 'working'
+      sessionId: 's1', agentId: 'a1', taskId: 'task-1', status: SessionStatus.WORKING
     })
     ;(mgr as any).sendToRenderer('agent:status', {
-      sessionId: 's1', agentId: 'a1', taskId: 'task-1', status: 'waiting_approval'
+      sessionId: 's1', agentId: 'a1', taskId: 'task-1', status: SessionStatus.WAITING_APPROVAL
     })
 
     expect(notificationInstances).toHaveLength(1)
@@ -353,10 +354,10 @@ describe('AgentManager OS notifications', () => {
     const { mgr } = createManagerWithWindow({ isFocused: true })
 
     ;(mgr as any).sendToRenderer('agent:status', {
-      sessionId: 's1', agentId: 'a1', taskId: 'task-1', status: 'working'
+      sessionId: 's1', agentId: 'a1', taskId: 'task-1', status: SessionStatus.WORKING
     })
     ;(mgr as any).sendToRenderer('agent:status', {
-      sessionId: 's1', agentId: 'a1', taskId: 'task-1', status: 'idle'
+      sessionId: 's1', agentId: 'a1', taskId: 'task-1', status: SessionStatus.IDLE
     })
 
     expect(notificationInstances).toHaveLength(0)
@@ -366,10 +367,10 @@ describe('AgentManager OS notifications', () => {
     const { mgr } = createManagerWithWindow({ isFocused: false })
 
     ;(mgr as any).sendToRenderer('agent:status', {
-      sessionId: 's1', agentId: 'a1', taskId: 'task-1', status: 'idle'
+      sessionId: 's1', agentId: 'a1', taskId: 'task-1', status: SessionStatus.IDLE
     })
     ;(mgr as any).sendToRenderer('agent:status', {
-      sessionId: 's1', agentId: 'a1', taskId: 'task-1', status: 'idle'
+      sessionId: 's1', agentId: 'a1', taskId: 'task-1', status: SessionStatus.IDLE
     })
 
     expect(notificationInstances).toHaveLength(0)
@@ -379,10 +380,10 @@ describe('AgentManager OS notifications', () => {
     const { mgr, mockWindow } = createManagerWithWindow({ isFocused: false })
 
     ;(mgr as any).sendToRenderer('agent:status', {
-      sessionId: 's1', agentId: 'a1', taskId: 'task-1', status: 'working'
+      sessionId: 's1', agentId: 'a1', taskId: 'task-1', status: SessionStatus.WORKING
     })
     ;(mgr as any).sendToRenderer('agent:status', {
-      sessionId: 's1', agentId: 'a1', taskId: 'task-1', status: 'idle'
+      sessionId: 's1', agentId: 'a1', taskId: 'task-1', status: SessionStatus.IDLE
     })
 
     expect(notificationInstances).toHaveLength(1)
