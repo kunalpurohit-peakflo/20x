@@ -149,7 +149,7 @@ export function TaskListItem({ task, isSelected, onSelect }: TaskListItemProps) 
             )}
             {task.heartbeat_enabled && (
               <span title="Heartbeat monitoring active">
-                <HeartPulse className="h-3 w-3 text-rose-400 animate-pulse" />
+                <HeartPulse className="h-3 w-3 text-rose-400" />
               </span>
             )}
             {task.source !== 'local' && (
