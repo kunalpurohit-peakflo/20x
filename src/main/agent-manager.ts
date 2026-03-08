@@ -2363,7 +2363,7 @@ Current Labels: ${JSON.stringify(task.labels || [])}
 
 Follow these steps:
 
-1. Call \`find_similar_tasks\` with keywords from the title/description to find historical patterns. Use \`completed_only: true\`.
+1. Call \`find_similar_tasks\` with individual keywords extracted from the title/description. Pass them as space-separated words in \`title_keywords\` (e.g. "login bug fix" not the full title). Do NOT set \`completed_only\` — search all tasks so you find patterns even if tasks are still in progress.
 2. Call \`list_agents\` to see available agents and their capabilities.
 3. Call \`list_skills\` to see available skills.
 4. Call \`list_repos\` to see known repositories.
