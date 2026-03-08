@@ -47,6 +47,9 @@ interface AgentSession {
   partContentLengths: Map<string, string>
   learningMode?: boolean
   isTriageSession?: boolean
+  isHeartbeatSession?: boolean
+  heartbeatPrompt?: string
+  lastAssistantText?: string
   adapter?: CodingAgentAdapter
   secretSessionToken?: string
   pollingStarted?: boolean
@@ -1075,6 +1078,21 @@ export class AgentManager extends EventEmitter {
         }
       }
 
+      // Append heartbeat monitoring instructions
+      promptText += `\n\n## Heartbeat Monitoring (Optional)
+
+If this task involves something that should be monitored after your work is done (e.g., a PR awaiting review, a deployment to verify, an issue to track), create a \`heartbeat.md\` file in the working directory.
+
+Example heartbeat.md:
+\`\`\`markdown
+# Heartbeat Checks
+- [ ] Check if PR https://github.com/org/repo/pull/123 has new review comments or requested changes
+- [ ] Verify CI pipeline passed on the latest commit
+- [ ] Check if linked issue #456 has new updates
+\`\`\`
+
+Only create this file when there's genuinely useful monitoring to do. Do not create it for tasks that are fully self-contained.`
+
       // Append memory file read instruction to user message
       // (user messages are more reliably followed than system prompt instructions)
       const memoryFileName = this.getMemoryFileName(agentId)
@@ -1298,8 +1316,19 @@ export class AgentManager extends EventEmitter {
         }
       }
 
+      // Capture last assistant text for heartbeat sessions
+      const currentSession = this.sessions.get(sessionId)
+      if (currentSession?.isHeartbeatSession) {
+        for (const msg of batchMessages) {
+          if (msg.role === 'assistant' && msg.partType === 'text' && msg.content) {
+            currentSession.lastAssistantText = msg.content
+          }
+        }
+      }
+
       // Send all parts in a single IPC call
-      if (batchMessages.length > 0) {
+      if (batchMessages.length > 0 && !currentSession?.isHeartbeatSession) {
+        // Skip renderer output for heartbeat sessions — they're invisible to the user
         this.sendToRenderer('agent:output-batch', {
           sessionId,
           taskId: config.taskId,
@@ -1558,6 +1587,106 @@ export class AgentManager extends EventEmitter {
   }
 
   /**
+   * Starts a lightweight heartbeat session. Unlike normal sessions, heartbeat sessions:
+   * - Do NOT change the task status to agent_working
+   * - Do NOT write SKILL.md files
+   * - Do NOT extract output fields on completion
+   * - Use a minimal heartbeat-specific prompt
+   * - Skip the ready_for_review transition on completion
+   */
+  async startHeartbeatSession(agentId: string, taskId: string, heartbeatPrompt: string): Promise<string> {
+    const agent = this.db.getAgent(agentId)
+    if (!agent) {
+      throw new Error(`Agent not found: ${agentId}`)
+    }
+
+    // Reuse existing workspace — heartbeat doesn't create worktrees
+    const workspaceDir = this.db.getWorkspaceDir(taskId)
+
+    const adapter = this.getAdapter(agentId)
+    if (!adapter) {
+      throw new Error(`No adapter available for agent ${agentId}`)
+    }
+
+    // Build MCP servers config (heartbeat needs tools for checking)
+    const mcpServers = await this.buildMcpServersForAdapter(agentId, { ensureTaskManagement: false })
+
+    // Determine model — allow override via settings
+    const modelOverride = this.db.getSetting('heartbeat_model_override')
+    const model = modelOverride || agent.config?.model
+
+    const sessionConfig: SessionConfig = {
+      agentId,
+      taskId,
+      workspaceDir,
+      model,
+      systemPrompt: agent.config?.system_prompt,
+      mcpServers,
+      authMethod: agent.config?.auth_method,
+      apiKeys: agent.config?.api_keys
+    }
+
+    // Initialize adapter
+    await adapter.initialize()
+
+    // Create session via adapter
+    const adapterSessionId = await adapter.createSession(sessionConfig)
+
+    // Store session with heartbeat flag
+    this.sessions.set(adapterSessionId, {
+      id: adapterSessionId,
+      agentId,
+      taskId,
+      workspaceDir,
+      status: 'working',
+      createdAt: new Date(),
+      seenMessageIds: new Set(),
+      seenPartIds: new Set(),
+      partContentLengths: new Map(),
+      adapter,
+      isHeartbeatSession: true,
+      heartbeatPrompt
+    })
+
+    // Do NOT update task status or session_id for heartbeat sessions
+    // Do NOT notify renderer about "working" status
+
+    console.log(`[AgentManager] Started heartbeat session ${adapterSessionId} for task ${taskId}`)
+
+    // Start polling
+    this.startAdapterPolling(adapterSessionId, adapter, sessionConfig)
+
+    // Send the heartbeat prompt
+    const parts: MessagePart[] = [
+      { type: MessagePartType.TEXT, text: heartbeatPrompt }
+    ]
+    await adapter.sendPrompt(adapterSessionId, parts, sessionConfig)
+
+    return adapterSessionId
+  }
+
+  /**
+   * Get a session's current state (used by HeartbeatScheduler to poll status).
+   */
+  getSession(sessionId: string): AgentSession | undefined {
+    return this.sessions.get(sessionId)
+  }
+
+  /**
+   * Get the last assistant message text from a session's conversation.
+   * Used by HeartbeatScheduler to extract the heartbeat result.
+   */
+  getLastAssistantMessage(sessionId: string): string | null {
+    const session = this.sessions.get(sessionId)
+    if (!session?.adapter) return null
+
+    // The adapter should have the session's messages accessible
+    // We use the polling entry's seenPartIds to reconstruct content
+    // For simplicity, we store the last assistant text during polling
+    return session.lastAssistantText ?? null
+  }
+
+  /**
    * Reconnects to an existing session by its persisted session ID.
    * Replays all messages to the renderer and resumes polling.
    */
@@ -1591,6 +1720,14 @@ export class AgentManager extends EventEmitter {
 
     // In learning mode, skip output extraction, task status, and renderer notification
     if (session.learningMode) return
+
+    // In heartbeat mode, skip everything — just clean up the session
+    if (session.isHeartbeatSession) {
+      console.log(`[AgentManager] Heartbeat session ${sessionId} completed for task ${session.taskId}`)
+      // Session stays in map briefly so HeartbeatScheduler can read lastAssistantText
+      // It will be cleaned up when HeartbeatScheduler finishes processing
+      return
+    }
 
     // In triage mode, set status back to NotStarted (now with agent_id assigned) and return early
     if (session.isTriageSession) {
@@ -1669,13 +1806,19 @@ export class AgentManager extends EventEmitter {
       console.log(`[AgentManager] Updating task ${session.taskId} status to ReadyForReview`)
       this.db.updateTask(session.taskId, { status: TaskStatus.ReadyForReview })
 
+      // Auto-enable heartbeat if agent wrote a heartbeat.md file
+      this.autoEnableHeartbeat(session.taskId)
+
       // Get updated task with output fields and notify renderer
       const updatedTask = this.db.getTask(session.taskId)
       this.sendToRenderer('task:updated', {
         taskId: session.taskId,
         updates: {
           status: TaskStatus.ReadyForReview,
-          output_fields: updatedTask?.output_fields
+          output_fields: updatedTask?.output_fields,
+          heartbeat_enabled: updatedTask?.heartbeat_enabled,
+          heartbeat_interval_minutes: updatedTask?.heartbeat_interval_minutes,
+          heartbeat_next_check_at: updatedTask?.heartbeat_next_check_at
         }
       })
     }
@@ -2752,6 +2895,37 @@ Important:
    */
   addExternalListener(fn: (channel: string, data: unknown) => void): void {
     this.externalListeners.push(fn)
+  }
+
+  /**
+   * Auto-enable heartbeat for a task if a heartbeat.md file exists in the workspace.
+   * Called after a task transitions to ready_for_review.
+   */
+  private autoEnableHeartbeat(taskId: string): void {
+    try {
+      const workspaceDir = this.db.getWorkspaceDir(taskId)
+      const heartbeatPath = join(workspaceDir, 'heartbeat.md')
+
+      if (existsSync(heartbeatPath)) {
+        const content = readFileSync(heartbeatPath, 'utf-8').trim()
+        // Skip empty files or files with only headers
+        if (content && !/^(#[^\n]*\n?\s*)*$/.test(content)) {
+          const defaultInterval = parseInt(this.db.getSetting('heartbeat_default_interval') || '30', 10)
+          const now = new Date()
+          const nextCheck = new Date(now.getTime() + defaultInterval * 60_000)
+
+          this.db.updateTask(taskId, {
+            heartbeat_enabled: true,
+            heartbeat_interval_minutes: defaultInterval,
+            heartbeat_next_check_at: nextCheck.toISOString()
+          })
+
+          console.log(`[AgentManager] Auto-enabled heartbeat for task ${taskId} (found heartbeat.md)`)
+        }
+      }
+    } catch (err) {
+      console.error(`[AgentManager] Error auto-enabling heartbeat for task ${taskId}:`, err)
+    }
   }
 
   private sendToRenderer(channel: string, data: unknown): void {

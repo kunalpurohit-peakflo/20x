@@ -15,3 +15,19 @@ export const TASK_STATUSES: { value: TaskStatus; label: string }[] = [
   { value: TaskStatus.AgentLearning, label: 'Agent Learning' },
   { value: TaskStatus.Completed, label: 'Completed' }
 ]
+
+// ── Heartbeat types ─────────────────────────────────────────
+
+export enum HeartbeatStatus {
+  Ok = 'ok',
+  AttentionNeeded = 'attention_needed',
+  Error = 'error'
+}
+
+export const HEARTBEAT_OK_TOKEN = 'HEARTBEAT_OK'
+
+export const HEARTBEAT_DEFAULTS = {
+  intervalMinutes: 30,
+  maxConsecutiveErrors: 3,
+  checkIntervalMs: 60_000, // scheduler tick every 60s
+} as const

@@ -14,6 +14,7 @@ import { AssigneeSelect } from './AssigneeSelect'
 import { TaskStatus, CodingAgentType } from '@/types'
 import type { WorkfloTask, FileAttachment, OutputField, Agent, RecurrencePattern, RecurrencePatternObject } from '@/types'
 import { AnthropicLogo, OpenCodeLogo, OpenAILogo } from '@/components/icons/AgentLogos'
+import { HeartbeatSection } from './HeartbeatSection'
 
 function ordinal(n: number): string {
   if (n >= 11 && n <= 13) return `${n}th`
@@ -391,6 +392,11 @@ export function TaskDetailView({ task, agents, onEdit, onDelete, onUpdateAttachm
                 taskId={task.id}
               />
             </div>
+          )}
+
+          {/* Heartbeat monitoring section */}
+          {(task.status === TaskStatus.ReadyForReview || task.heartbeat_enabled) && (
+            <HeartbeatSection task={task} />
           )}
 
           {task.output_fields.length > 0 ? (
