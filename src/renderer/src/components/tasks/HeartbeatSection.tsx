@@ -141,24 +141,29 @@ export function HeartbeatSection({ task, onTaskUpdated }: HeartbeatSectionProps)
     <>
       {/* Property row — label */}
       <span className="text-muted-foreground flex items-center gap-2">
-        <HeartPulse className="h-3.5 w-3.5" /> Heartbeat
+        <HeartPulse className={`h-3.5 w-3.5 ${status?.enabled ? 'text-rose-500' : ''}`} /> Heartbeat
       </span>
 
-      {/* Property row — value */}
-      <div className="flex items-center gap-2">
-        {statusBadge}
-        <button
-          onClick={handleOpenModal}
-          className="text-xs text-muted-foreground hover:text-foreground underline decoration-dotted underline-offset-2 transition-colors truncate max-w-[220px]"
-        >
-          {heartbeatContent
-            ? heartbeatContent.split('\n').find(l => l.trim() && !l.startsWith('#'))?.trim() || 'View instructions'
-            : 'Set up instructions'}
-        </button>
-        {status?.nextCheckAt && status?.enabled && (
-          <span className="text-[10px] text-muted-foreground/60 shrink-0">
-            next {formatRelativeDate(status.nextCheckAt)}
-          </span>
+      {/* Property row — value: show full markdown instructions, click to edit */}
+      <div
+        className="cursor-pointer hover:bg-muted/50 rounded -mx-1 px-1 transition-colors"
+        onClick={handleOpenModal}
+        title="Click to edit heartbeat instructions"
+      >
+        <div className="flex items-center gap-2 mb-1">
+          {statusBadge}
+          {status?.nextCheckAt && status?.enabled && (
+            <span className="text-[10px] text-muted-foreground/60 shrink-0">
+              next {formatRelativeDate(status.nextCheckAt)}
+            </span>
+          )}
+        </div>
+        {heartbeatContent ? (
+          <div className="text-xs">
+            <Markdown size="xs">{heartbeatContent}</Markdown>
+          </div>
+        ) : (
+          <span className="text-xs text-muted-foreground/50">Click to set up instructions</span>
         )}
       </div>
 
