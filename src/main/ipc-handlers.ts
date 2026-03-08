@@ -810,4 +810,10 @@ export function registerIpcHandlers(
     if (!heartbeatScheduler) throw new Error('HeartbeatScheduler not initialized')
     return heartbeatScheduler.readHeartbeatFile(taskId)
   })
+
+  ipcMain.handle('heartbeat:writeFile', (_, taskId: string, content: string) => {
+    if (!heartbeatScheduler) throw new Error('HeartbeatScheduler not initialized')
+    heartbeatScheduler.writeHeartbeatFile(taskId, content)
+    return true
+  })
 }
