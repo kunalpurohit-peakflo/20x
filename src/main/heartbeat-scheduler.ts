@@ -6,7 +6,7 @@ import { promisify } from 'util'
 import { join } from 'path'
 import type { DatabaseManager, TaskRecord } from './database'
 import type { AgentManager } from './agent-manager'
-import { HeartbeatStatus, HEARTBEAT_OK_TOKEN, HEARTBEAT_DEFAULTS } from '../shared/constants'
+import { HeartbeatStatus, HEARTBEAT_OK_TOKEN, HEARTBEAT_INFO_TOKEN, HEARTBEAT_DEFAULTS } from '../shared/constants'
 
 const execFileAsync = promisify(execFile)
 
@@ -120,9 +120,22 @@ export class HeartbeatScheduler {
     }
 
     try {
-      const prompt = this.buildHeartbeatPrompt(task, heartbeatContent)
-      await this.agentManager.startHeartbeatSession(agentId, taskId, prompt)
-      console.log(`[HeartbeatScheduler] runNow: sent heartbeat check to agent for task "${task.title}"`)
+      // Phase 1: Send check to mastermind (skips preflight since user requested it)
+      const checkPrompt = this.buildHeartbeatPrompt(task, heartbeatContent)
+      const mastermindSessionId = await this.agentManager.sendHeartbeatViaMastermind(agentId, task.id, checkPrompt)
+
+      // Phase 2: Wait for mastermind result and forward to task agent if action needed
+      const mastermindResult = await this.waitForSessionResult(mastermindSessionId, taskId)
+      const classification = this.classifyMastermindResult(mastermindResult)
+
+      if (classification === 'action') {
+        console.log(`[HeartbeatScheduler] runNow: mastermind found action needed, forwarding to task agent`)
+        const actionPrompt = this.buildActionPrompt(task, mastermindResult)
+        await this.agentManager.startHeartbeatSession(agentId, taskId, actionPrompt)
+      } else {
+        console.log(`[HeartbeatScheduler] runNow: ${classification} for task "${task.title}"`)
+      }
+
       return 'sent'
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
@@ -230,13 +243,11 @@ export class HeartbeatScheduler {
   /**
    * Run a single heartbeat check for a task.
    *
-   * Cost optimization flow:
-   * 1. Read heartbeat.md
-   * 2. Run pre-flight checks (cheap, no LLM) — parse for GitHub URLs, check via `gh api`
-   * 3. If pre-flight finds no changes → log HEARTBEAT_OK, skip LLM
-   * 4. If pre-flight detects changes → spawn lightweight agent session
-   * 5. Parse result → HEARTBEAT_OK or attention needed
-   * 6. Log result + advance next check time (with adaptive interval)
+   * Two-phase approach to avoid polluting task agent context:
+   * 1. Pre-flight: cheap `gh api` checks (no LLM)
+   * 2. If changes detected → mastermind session evaluates findings
+   * 3. If mastermind says action needed → spawn task agent with specific instructions
+   * 4. If HEARTBEAT_OK → task agent is never touched
    */
   private async runHeartbeat(task: TaskRecord): Promise<void> {
     const heartbeatContent = this.readHeartbeatFile(task.id)
@@ -250,17 +261,14 @@ export class HeartbeatScheduler {
     try {
       console.log(`[HeartbeatScheduler] Running heartbeat for task "${task.title}" (${task.id})`)
 
-      // Phase 4.1: Pre-flight checks (cheap, no LLM)
+      // Phase 1: Pre-flight checks (cheap, no LLM)
       const preflightResult = await this.runPreflightChecks(heartbeatContent, task)
       if (preflightResult === 'no_changes') {
         console.log(`[HeartbeatScheduler] Pre-flight: no changes for task "${task.title}", skipping LLM`)
         this.logResult(task.id, HeartbeatStatus.Ok, 'Pre-flight: no changes detected (LLM skipped)')
-        this.advanceNextCheck(task, true) // pass isOk=true for adaptive interval
+        this.advanceNextCheck(task, true)
         return
       }
-
-      // Changes detected or pre-flight inconclusive → spawn agent session
-      const prompt = this.buildHeartbeatPrompt(task, heartbeatContent)
 
       const agentId = this.resolveAgentId(task)
       if (!agentId) {
@@ -270,9 +278,29 @@ export class HeartbeatScheduler {
         return
       }
 
-      const sessionId = await this.agentManager.startHeartbeatSession(agentId, task.id, prompt)
-      const result = await this.waitForSessionResult(sessionId, task.id)
-      this.handleResult(task, sessionId, result)
+      // Phase 2: Send check to mastermind session (doesn't pollute task context)
+      const checkPrompt = this.buildHeartbeatPrompt(task, heartbeatContent)
+      const mastermindSessionId = await this.agentManager.sendHeartbeatViaMastermind(agentId, task.id, checkPrompt)
+      const mastermindResult = await this.waitForSessionResult(mastermindSessionId, task.id)
+
+      // Phase 3: Evaluate mastermind result
+      const classification = this.classifyMastermindResult(mastermindResult)
+
+      if (classification === 'ok') {
+        console.log(`[HeartbeatScheduler] ${HEARTBEAT_OK_TOKEN} for task "${task.title}" (mastermind check)`)
+        this.logResult(task.id, HeartbeatStatus.Ok, 'All checks passed', mastermindSessionId)
+        this.advanceNextCheck(task, true)
+      } else if (classification === 'info') {
+        console.log(`[HeartbeatScheduler] Info for task "${task.title}": ${mastermindResult.substring(0, 100)}`)
+        this.logResult(task.id, HeartbeatStatus.Info, mastermindResult.substring(0, 500), mastermindSessionId)
+        this.advanceNextCheck(task, true) // no action needed, treat like OK for interval
+      } else {
+        console.log(`[HeartbeatScheduler] Action needed for task "${task.title}", forwarding to task agent`)
+        const actionPrompt = this.buildActionPrompt(task, mastermindResult)
+        const taskSessionId = await this.agentManager.startHeartbeatSession(agentId, task.id, actionPrompt)
+        const taskResult = await this.waitForSessionResult(taskSessionId, task.id)
+        this.handleResult(task, taskSessionId, taskResult)
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       console.error(`[HeartbeatScheduler] Heartbeat error for task ${task.id}:`, message)
@@ -286,25 +314,47 @@ export class HeartbeatScheduler {
   }
 
   /**
-   * Build the prompt for a heartbeat agent session.
-   * Kept minimal to reduce token usage.
+   * Build the prompt for the mastermind heartbeat check.
+   * Mastermind evaluates the status — it doesn't make changes.
    */
   private buildHeartbeatPrompt(task: TaskRecord, heartbeatContent: string): string {
-    return `You are performing a periodic heartbeat check for task: "${task.title}"
+    const globalInstructions = this.dbManager.getSetting('heartbeat_global_instructions') || ''
+    const lastCheck = task.heartbeat_last_check_at
 
-Here are the monitoring instructions from heartbeat.md:
+    let prompt = `Heartbeat check for task: "${task.title}"\n\n`
 
-${heartbeatContent}
+    if (lastCheck) {
+      prompt += `IMPORTANT: Only consider events after ${lastCheck}. Ignore anything older — it has already been handled.\n\n`
+    }
 
-For each check item:
-1. Use available tools to verify the current status
-2. Note if anything needs user attention
+    if (globalInstructions.trim()) {
+      prompt += `${globalInstructions.trim()}\n\n`
+    }
 
-After checking all items, respond with one of:
-- If nothing needs attention: reply with exactly "${HEARTBEAT_OK_TOKEN}"
-- If something needs attention: describe what needs attention clearly and concisely
+    prompt += `${heartbeatContent}\n\n`
+    prompt += `Run the checks above. Reply with one of:\n`
+    prompt += `- "${HEARTBEAT_OK_TOKEN}" — nothing new since last check\n`
+    prompt += `- "${HEARTBEAT_INFO_TOKEN}: <summary>" — something new but no action needed (e.g. approval, positive comment)\n`
+    prompt += `- Otherwise describe specific new findings that need action. Do NOT take action yourself — just report.`
 
-Keep your response concise. This is a monitoring check, not a full work session.`
+    return prompt
+  }
+
+  /**
+   * Build the prompt for the task agent when mastermind found something.
+   * This goes to the task's own session so the agent can act on findings.
+   */
+  private buildActionPrompt(task: TaskRecord, mastermindFindings: string): string {
+    return `[Heartbeat] The following was detected during a periodic check of task "${task.title}":\n\n${mastermindFindings}\n\nPlease address the findings above. When done, end your message with "${HEARTBEAT_OK_TOKEN}".`
+  }
+
+  /**
+   * Classify the mastermind's response into one of three categories.
+   */
+  private classifyMastermindResult(result: string): 'ok' | 'info' | 'action' {
+    if (result.includes(HEARTBEAT_OK_TOKEN)) return 'ok'
+    if (result.includes(HEARTBEAT_INFO_TOKEN)) return 'info'
+    return 'action'
   }
 
   /**

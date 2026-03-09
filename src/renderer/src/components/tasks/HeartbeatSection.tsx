@@ -8,7 +8,7 @@ import { Dialog, DialogContent, DialogHeader, DialogBody, DialogTitle } from '@/
 import type { WorkfloTask } from '@/types'
 import type { HeartbeatStatusResult } from '@/types/electron'
 import { HeartbeatStatus } from '@/types'
-import { formatRelativeDate } from '@/lib/utils'
+import { formatRelativeDate, formatRelativeFuture } from '@/lib/utils'
 
 interface HeartbeatLog {
   id: string
@@ -162,9 +162,14 @@ export function HeartbeatSection({ task, onTaskUpdated }: HeartbeatSectionProps)
       >
         <div className="flex items-center gap-2 mb-1">
           {statusBadge}
-          {status?.nextCheckAt && status?.enabled && (
+          {status?.enabled && status?.lastCheckAt && (
             <span className="text-[10px] text-muted-foreground/60 shrink-0">
-              next {formatRelativeDate(status.nextCheckAt)}
+              checked {formatRelativeDate(status.lastCheckAt)}
+            </span>
+          )}
+          {status?.enabled && status?.nextCheckAt && (
+            <span className="text-[10px] text-muted-foreground/60 shrink-0">
+              · next {formatRelativeFuture(status.nextCheckAt)}
             </span>
           )}
         </div>

@@ -27,11 +27,13 @@ export const TASK_STATUSES: { value: TaskStatus; label: string }[] = [
 
 export enum HeartbeatStatus {
   Ok = 'ok',
+  Info = 'info',
   AttentionNeeded = 'attention_needed',
   Error = 'error'
 }
 
 export const HEARTBEAT_OK_TOKEN = 'HEARTBEAT_OK'
+export const HEARTBEAT_INFO_TOKEN = 'HEARTBEAT_INFO'
 
 export const HEARTBEAT_DEFAULTS = {
   intervalMinutes: 30,

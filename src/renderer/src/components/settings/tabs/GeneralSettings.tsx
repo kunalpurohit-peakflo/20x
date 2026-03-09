@@ -16,6 +16,7 @@ export function GeneralSettings() {
   const [heartbeatInterval, setHeartbeatInterval] = useState('30')
   const [heartbeatActiveStart, setHeartbeatActiveStart] = useState('')
   const [heartbeatActiveEnd, setHeartbeatActiveEnd] = useState('')
+  const [heartbeatGlobalInstructions, setHeartbeatGlobalInstructions] = useState('')
 
   useEffect(() => {
     const loadSettings = async () => {
@@ -52,6 +53,9 @@ export function GeneralSettings() {
 
         const hbEnd = await settingsApi.get('heartbeat_active_hours_end')
         if (hbEnd) setHeartbeatActiveEnd(hbEnd)
+
+        const hbGlobal = await settingsApi.get('heartbeat_global_instructions')
+        if (hbGlobal) setHeartbeatGlobalInstructions(hbGlobal)
       } catch (error) {
         console.error('Failed to load heartbeat settings:', error)
       }
@@ -271,6 +275,27 @@ export function GeneralSettings() {
               placeholder="22:00"
             />
           </div>
+        </div>
+
+        <div className="py-2">
+          <div className="space-y-1.5 mb-2">
+            <Label htmlFor="heartbeat-global-instructions">Global instructions</Label>
+            <p className="text-xs text-muted-foreground">
+              Default instructions prepended to every heartbeat check. Per-task heartbeat.md takes priority.
+            </p>
+          </div>
+          <textarea
+            id="heartbeat-global-instructions"
+            value={heartbeatGlobalInstructions}
+            onChange={(e) => setHeartbeatGlobalInstructions(e.target.value)}
+            onBlur={async () => {
+              await settingsApi.set('heartbeat_global_instructions', heartbeatGlobalInstructions)
+            }}
+            disabled={loading || !heartbeatEnabled}
+            rows={6}
+            className="w-full bg-transparent border rounded px-3 py-2 text-sm font-mono disabled:opacity-50 resize-y placeholder:text-muted-foreground"
+            placeholder="e.g. Always run `gh api` calls to verify status. Never skip checks. Reply HEARTBEAT_OK only when everything is clean."
+          />
         </div>
       </div>
     </SettingsSection>

@@ -1593,15 +1593,47 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
    * The heartbeat message appears in the normal conversation transcript
    * so the user can see what was checked.
    */
-  async startHeartbeatSession(agentId: string, taskId: string, heartbeatPrompt: string): Promise<string> {
-    const task = this.db.getTask(taskId)
-    const sessionId = task?.session_id
+  /**
+   * Send a heartbeat check via a dedicated heartbeat session for this task.
+   * Uses a separate session (heartbeat-{taskId}) to keep checks out of the task's working session.
+   * Each task gets its own heartbeat session so checks don't mix across tasks.
+   */
+  async sendHeartbeatViaMastermind(agentId: string, taskId: string, heartbeatPrompt: string): Promise<string> {
+    const heartbeatTaskId = `heartbeat-${taskId}`
 
-    if (!sessionId) {
-      throw new Error(`No session found for task ${taskId} — heartbeat requires an existing session`)
+    // Check if heartbeat session for this task exists in memory
+    let sessionId: string | undefined
+    for (const [id, session] of this.sessions.entries()) {
+      if (session.taskId === heartbeatTaskId) {
+        sessionId = id
+        break
+      }
     }
 
-    console.log(`[AgentManager] Heartbeat: sending check to session ${sessionId} for task ${taskId}`)
+    if (!sessionId) {
+      console.log(`[AgentManager] Heartbeat: creating heartbeat session for task ${taskId}`)
+      sessionId = await this.startSession(agentId, heartbeatTaskId, undefined, true /* skipInitialPrompt */)
+    }
+
+    console.log(`[AgentManager] Heartbeat: sending check via heartbeat session ${sessionId} for task ${taskId}`)
+    const result = await this.sendMessage(sessionId, heartbeatPrompt, heartbeatTaskId, agentId)
+    return result.newSessionId || sessionId
+  }
+
+  /**
+   * Send action findings to the task agent's own session.
+   * Only called when mastermind detected something that needs the task agent to act on.
+   */
+  async startHeartbeatSession(agentId: string, taskId: string, heartbeatPrompt: string): Promise<string> {
+    const task = this.db.getTask(taskId)
+    let sessionId = task?.session_id
+
+    if (!sessionId) {
+      console.log(`[AgentManager] Heartbeat: no session for task ${taskId}, creating new session`)
+      sessionId = await this.startSession(agentId, taskId, undefined, true /* skipInitialPrompt */)
+    }
+
+    console.log(`[AgentManager] Heartbeat: forwarding action to task session ${sessionId} for task ${taskId}`)
 
     // sendMessage handles everything: resume if dead, send the prompt, start polling
     const result = await this.sendMessage(sessionId, heartbeatPrompt, taskId, agentId)
