@@ -8,9 +8,12 @@ import type {
   PluginSyncResult,
   ActionResult
 } from './types'
-import type { TaskRecord, OutputFieldRecord } from '../database'
+import type { TaskRecord, OutputFieldRecord, FileAttachmentRecord } from '../database'
 import type { SourceUser, ReassignResult } from '../../shared/types'
 import { TaskStatus } from '../../shared/constants'
+import { join } from 'path'
+import { writeFileSync } from 'fs'
+import * as crypto from 'crypto'
 
 // ── Peakflo API response shapes ─────────────────────────────
 
@@ -131,12 +134,30 @@ function mapPeakfloTask(raw: PeakfloRawTask): MappedTask | null {
     console.log('[peakflo] mapped output_fields for', title, ':', JSON.stringify(outputFields))
   }
 
-  // Build description from non-action data fields
+  // Build description from non-action, non-file data fields as a table
   const descParts: string[] = []
   if (raw.description) descParts.push(String(raw.description))
+
+  const tableRows: string[] = []
   for (const f of fields) {
-    if (f.id === 'action' || f.value == null || f.value === '') continue
-    descParts.push(`**${f.label ?? f.id}**\n${f.value}`)
+    if (f.id === 'action') continue
+    if (f.type === 'file') continue
+    if (f.value == null || f.value === '') continue
+
+    const val = Array.isArray(f.value)
+      ? f.value.filter((v) => v != null && v !== '').map(String).join(', ')
+      : typeof f.value === 'boolean'
+        ? (f.value ? 'Yes' : 'No')
+        : String(f.value)
+
+    if (val) {
+      tableRows.push(`| ${f.label ?? f.id} | ${val} |`)
+    }
+  }
+  if (tableRows.length > 0) {
+    descParts.push(
+      '---\n\n**Fields**\n\n| Field | Value |\n| --- | --- |\n' + tableRows.join('\n')
+    )
   }
 
   return {
@@ -172,7 +193,15 @@ export class PeakfloPlugin implements TaskSourcePlugin {
   displayName = 'Peakflo Workflo'
   description = 'Import and manage tasks from Peakflo Workflo platform'
   icon = 'Zap'
-  requiresMcpServer = true
+  requiresMcpServer = false // No longer required — enterprise mode uses REST API
+
+  /** Check if running in enterprise mode (REST API instead of MCP) */
+  private isEnterpriseMode(
+    config: Record<string, unknown>,
+    ctx: PluginContext
+  ): boolean {
+    return !!(config.enterprise_mode || ctx.workfloApiClient)
+  }
 
   getConfigSchema(): PluginConfigSchema {
     return [
@@ -246,8 +275,14 @@ export class PeakfloPlugin implements TaskSourcePlugin {
   ): Promise<PluginSyncResult> {
     const result: PluginSyncResult = { imported: 0, updated: 0, errors: [] }
 
+    // ── Enterprise mode: fetch from Workflo REST API ──────────
+    if (this.isEnterpriseMode(config, ctx)) {
+      return this.importTasksEnterprise(sourceId, config, ctx, result)
+    }
+
+    // ── Legacy MCP mode ───────────────────────────────────────
     if (!ctx.mcpServer) {
-      result.errors.push('MCP server not found')
+      result.errors.push('MCP server not found and enterprise not connected')
       return result
     }
 
@@ -329,25 +364,361 @@ export class PeakfloPlugin implements TaskSourcePlugin {
     return result
   }
 
-  async exportUpdate(
-    _task: TaskRecord,
-    _changedFields: Record<string, unknown>,
-    _config: Record<string, unknown>,
-    _ctx: PluginContext
+  // ── Enterprise import: fetch tasks from Workflo REST API ──────────
+
+  private async importTasksEnterprise(
+    sourceId: string,
+    config: Record<string, unknown>,
+    ctx: PluginContext,
+    result: PluginSyncResult
+  ): Promise<PluginSyncResult> {
+    const apiClient = ctx.workfloApiClient
+    if (!apiClient) {
+      result.errors.push('Enterprise API client not available')
+      return result
+    }
+
+    const source = ctx.db.getTaskSource(sourceId)
+    const sourceName = source?.name ?? 'Peakflo'
+    const statusFilter = (config.status_filter as string) || 'all'
+
+    // Collect file download jobs to run after the sync loop
+    const fileDownloadJobs: Array<{ taskId: string; fields: PeakfloField[] }> = []
+
+    try {
+      // Paginated fetch from Workflo API
+      let page = 1
+      const pageSize = 100
+      let hasMore = true
+
+      while (hasMore) {
+        const response = await apiClient.listTasks({
+          status: statusFilter !== 'all' ? statusFilter : undefined,
+          page,
+          pageSize,
+          myTasks: true
+        })
+
+        console.log(
+          `[peakflo] Enterprise sync page ${page}: ${response.tasks.length} tasks, ` +
+          `total=${response.pagination.total}, totalPages=${response.pagination.totalPages}`
+        )
+
+        for (const task of response.tasks) {
+          try {
+            const externalId = task.id // Workflo task ID is the external ID
+            const existing = ctx.db.getTaskByExternalId(sourceId, externalId)
+
+            // Map Workflo task status to local status
+            const status = this.mapWorkfloStatus(task.status)
+            const priority = task.priority || 'medium'
+            const assignee = task.assignees?.[0]?.assigneeValue
+
+            // Extract fields and outputs from taskData
+            const fields: PeakfloField[] = (task.taskData as Record<string, unknown>)?.fields as PeakfloField[] ?? []
+            const outputs: PeakfloOutput[] = (task.taskData as Record<string, unknown>)?.outputs as PeakfloOutput[] ?? []
+
+            // Build description: original description + fields table
+            const description = this.buildEnterpriseDescription(task.description, fields)
+
+            // Map output fields (same logic as mapPeakfloTask)
+            const fieldsById = new Map(fields.map((f) => [f.id, f]))
+            const outputFields: OutputFieldRecord[] = outputs.map((o) => {
+              const field = fieldsById.get(o.id)
+              return {
+                id: String(o.id ?? ''),
+                name: String(o.name ?? o.id ?? ''),
+                type: o.type === 'string' && field?.options ? 'list' : (o.type ?? 'text'),
+                value: field?.value,
+                options: Array.isArray(field?.options) ? field.options.map(String) : undefined,
+                required: field?.required ?? false,
+                multiple: field?.multiple ?? false
+              }
+            })
+
+            if (existing) {
+              ctx.db.updateTask(existing.id, {
+                title: task.title,
+                description,
+                status,
+                priority,
+                assignee,
+                due_date: task.dueDate,
+                output_fields: outputFields.length > 0 ? outputFields : undefined
+              })
+              result.updated++
+
+              // Queue file download for after sync completes
+              if (fields.some((f) => f.type === 'file')) {
+                fileDownloadJobs.push({ taskId: existing.id, fields })
+              }
+            } else {
+              const created = ctx.db.createTask({
+                title: task.title,
+                description,
+                type: 'general',
+                priority,
+                status,
+                assignee,
+                due_date: task.dueDate,
+                external_id: externalId,
+                source_id: sourceId,
+                source: sourceName,
+                output_fields: outputFields.length > 0 ? outputFields : undefined
+              })
+              result.imported++
+
+              // Queue file download for after sync completes
+              if (created && fields.some((f) => f.type === 'file')) {
+                fileDownloadJobs.push({ taskId: created.id, fields })
+              }
+            }
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : 'Unknown error'
+            result.errors.push(`Task ${task.id}: ${msg}`)
+          }
+        }
+
+        if (
+          response.tasks.length < pageSize ||
+          page >= response.pagination.totalPages
+        ) {
+          hasMore = false
+        } else {
+          page++
+        }
+      }
+
+      ctx.db.updateTaskSourceLastSynced(sourceId)
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error'
+      result.errors.push(`Enterprise import failed: ${msg}`)
+    }
+
+    // Download file attachments after sync loop completes (sequential per task, no races)
+    if (fileDownloadJobs.length > 0) {
+      console.log(`[peakflo] Downloading files for ${fileDownloadJobs.length} task(s)...`)
+      for (const job of fileDownloadJobs) {
+        try {
+          await this.downloadWorkfloFiles(job.taskId, job.fields, apiClient, ctx)
+        } catch (err) {
+          console.error(`[peakflo] Failed to download files for task ${job.taskId}:`, err)
+        }
+      }
+    }
+
+    return result
+  }
+
+  /**
+   * Build task description with fields formatted as a markdown table.
+   * File-type fields are skipped (handled as attachments instead).
+   */
+  private buildEnterpriseDescription(
+    rawDescription: string | null,
+    fields: PeakfloField[]
+  ): string {
+    const descParts: string[] = []
+    if (rawDescription) descParts.push(rawDescription)
+
+    // Build table rows from non-action, non-file fields
+    const tableRows: string[] = []
+    for (const f of fields) {
+      if (f.id === 'action') continue
+      if (f.type === 'file') continue // files are handled as attachments
+
+      const val = this.formatFieldValue(f)
+      if (val) {
+        tableRows.push(`| ${f.label ?? f.id} | ${val} |`)
+      }
+    }
+
+    if (tableRows.length > 0) {
+      descParts.push(
+        '---\n\n**Fields**\n\n| Field | Value |\n| --- | --- |\n' + tableRows.join('\n')
+      )
+    }
+
+    return descParts.join('\n\n')
+  }
+
+  /**
+   * Format a single field value for display in a markdown table cell.
+   */
+  private formatFieldValue(field: PeakfloField): string | null {
+    if (field.value == null || field.value === '') return null
+
+    if (Array.isArray(field.value)) {
+      const items = field.value.filter((v) => v != null && v !== '')
+      if (items.length === 0) return null
+      return items.map(String).join(', ')
+    }
+
+    if (typeof field.value === 'boolean') {
+      return field.value ? 'Yes' : 'No'
+    }
+
+    return String(field.value)
+  }
+
+  /**
+   * Extract file URLs from task fields and download them as attachments.
+   * Handles both single file and array-of-files field values.
+   *
+   * File field values are FileDataTypeValue objects:
+   *   { path: "uploads/1234-file.pdf", originalName: "file.pdf", size: 12345, mimeType: "application/pdf" }
+   */
+  private async downloadWorkfloFiles(
+    taskId: string,
+    fields: PeakfloField[],
+    apiClient: import('../workflo-api-client').WorkfloApiClient,
+    ctx: PluginContext
   ): Promise<void> {
-    // Peakflo uses action-based completion, not field updates
-    // Export is a no-op; use executeAction instead
+    // Collect all file entries from file-type fields
+    const fileEntries: Array<{ path: string; originalName: string; mimeType?: string }> = []
+
+    for (const field of fields) {
+      if (field.type !== 'file') continue
+      if (field.value == null) continue
+
+      const values = Array.isArray(field.value) ? field.value : [field.value]
+      for (const v of values) {
+        if (v && typeof v === 'object' && 'path' in (v as Record<string, unknown>)) {
+          const fileVal = v as { path: string; originalName?: string; mimeType?: string }
+          if (fileVal.path) {
+            fileEntries.push({
+              path: fileVal.path,
+              originalName: fileVal.originalName || fileVal.path.split('/').pop() || 'file',
+              mimeType: fileVal.mimeType
+            })
+          }
+        }
+      }
+    }
+
+    if (fileEntries.length === 0) return
+
+    const task = ctx.db.getTask(taskId)
+    if (!task) return
+
+    const existingAttachments: FileAttachmentRecord[] = task.attachments || []
+    // Build a set of existing file paths to skip re-downloads
+    const existingPaths = new Set(
+      existingAttachments
+        .map((a) => a.workflo_path)
+        .filter(Boolean) as string[]
+    )
+
+    console.log(`[peakflo] Found ${fileEntries.length} file(s) for task "${task.title}"`)
+
+    for (const entry of fileEntries) {
+      if (existingPaths.has(entry.path)) continue
+
+      try {
+        console.log(`[peakflo] Downloading: ${entry.originalName}`)
+        const { buffer, contentType } = await apiClient.downloadFile(entry.path)
+
+        const attachmentId = crypto.randomUUID()
+        const attachmentsDir = ctx.db.getAttachmentsDir(taskId)
+        const filePath = join(attachmentsDir, `${attachmentId}-${entry.originalName}`)
+        writeFileSync(filePath, buffer)
+
+        const newAttachment: FileAttachmentRecord = {
+          id: attachmentId,
+          filename: entry.originalName,
+          size: buffer.length,
+          mime_type: entry.mimeType || contentType || 'application/octet-stream',
+          added_at: new Date().toISOString(),
+          workflo_path: entry.path
+        }
+
+        ctx.db.updateTask(taskId, {
+          attachments: [...existingAttachments, newAttachment]
+        })
+
+        existingAttachments.push(newAttachment)
+        existingPaths.add(entry.path)
+
+        console.log(`[peakflo] Saved attachment: ${entry.originalName} (${buffer.length} bytes)`)
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Unknown error'
+        console.error(`[peakflo] Failed to download ${entry.originalName}: ${msg}`)
+      }
+    }
+  }
+
+  private mapWorkfloStatus(status: string): TaskStatus {
+    switch (status?.toLowerCase()) {
+      case 'completed':
+        return TaskStatus.Completed
+      case 'in_progress':
+        return TaskStatus.Triaging
+      case 'pending':
+        return TaskStatus.NotStarted
+      default:
+        return TaskStatus.NotStarted
+    }
+  }
+
+  async exportUpdate(
+    task: TaskRecord,
+    changedFields: Record<string, unknown>,
+    config: Record<string, unknown>,
+    ctx: PluginContext
+  ): Promise<void> {
+    // Enterprise mode: push updates to Workflo via REST API
+    if (this.isEnterpriseMode(config, ctx) && ctx.workfloApiClient && task.external_id) {
+      const updateData: Record<string, unknown> = {}
+      if (changedFields.title !== undefined) updateData.title = changedFields.title
+      if (changedFields.description !== undefined) updateData.description = changedFields.description
+      if (changedFields.priority !== undefined) updateData.priority = changedFields.priority
+      if (changedFields.due_date !== undefined) updateData.dueDate = changedFields.due_date
+      // Note: status is NOT exported — 20x statuses (not_started, triaging, etc.)
+      // don't map to workflo statuses (pending, in_progress). Completion goes
+      // through executeAction instead.
+
+      if (Object.keys(updateData).length > 0) {
+        await ctx.workfloApiClient.updateTask(task.external_id, updateData)
+      }
+      return
+    }
+
+    // Legacy MCP mode: no-op (uses action-based completion)
   }
 
   async executeAction(
     actionId: string,
     task: TaskRecord,
     input: string | undefined,
-    _config: Record<string, unknown>,
+    config: Record<string, unknown>,
     ctx: PluginContext
   ): Promise<ActionResult> {
-    if (!ctx.mcpServer || !task.external_id) {
-      return { success: false, error: 'Missing MCP server or external task ID' }
+    if (!task.external_id) {
+      return { success: false, error: 'Missing external task ID' }
+    }
+
+    // ── Enterprise mode: call Workflo REST API ──────────────────
+    if (this.isEnterpriseMode(config, ctx) && ctx.workfloApiClient) {
+      try {
+        const outputs: Record<string, unknown> = { action: actionId }
+        for (const field of task.output_fields) {
+          if (field.value !== undefined && field.value !== null && field.value !== '') {
+            outputs[field.id] = field.value
+          }
+        }
+        if (input) outputs.reason = input
+
+        await ctx.workfloApiClient.executeAction(task.external_id, outputs)
+        return { success: true, taskUpdate: { status: TaskStatus.Completed } }
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : 'Action failed'
+        return { success: false, error: msg }
+      }
+    }
+
+    // ── Legacy MCP mode ─────────────────────────────────────────
+    if (!ctx.mcpServer) {
+      return { success: false, error: 'Missing MCP server and enterprise not connected' }
     }
 
     // Build outputs from all output_fields with values
