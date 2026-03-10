@@ -207,7 +207,7 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
         return
       }
     }
-    handleApiRoute(req, res, pathname, url)
+    void handleApiRoute(req, res, pathname, url)
     return
   }
 
@@ -218,7 +218,7 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
 
 // ── API router ───────────────────────────────────────────────
 
-function handleApiRoute(req: IncomingMessage, res: ServerResponse, pathname: string, url: URL): void {
+async function handleApiRoute(req: IncomingMessage, res: ServerResponse, pathname: string, url: URL): Promise<void> {
   res.setHeader('Content-Type', 'application/json')
 
   // Collect body for POST requests
@@ -258,7 +258,7 @@ function handleApiRoute(req: IncomingMessage, res: ServerResponse, pathname: str
   // GET requests
   if (req.method === 'GET') {
     try {
-      const result = routeGet(pathname, url)
+      const result = await routeGet(pathname, url)
       res.writeHead(200)
       res.end(JSON.stringify(result))
     } catch (err: unknown) {
@@ -276,7 +276,7 @@ function handleApiRoute(req: IncomingMessage, res: ServerResponse, pathname: str
 
 // ── GET routes ───────────────────────────────────────────────
 
-function routeGet(pathname: string, url: URL): unknown {
+async function routeGet(pathname: string, url: URL): Promise<unknown> {
   const db = dbRef!
 
   // GET /api/tasks
@@ -360,8 +360,8 @@ function routeGet(pathname: string, url: URL): unknown {
     if (!githubRef) throw Object.assign(new Error('GitHub not configured'), { status: 500 })
 
     const [status, orgs] = await Promise.all([
-      githubRef.checkCli(),
-      githubRef.fetchOrgs()
+      githubRef.checkGhCli(),
+      githubRef.fetchUserOrgs()
     ])
 
     const owners: Array<{ value: string; label: string }> = []
