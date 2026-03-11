@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from 'vitest'
-import { render, fireEvent } from '@testing-library/react'
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import { render, fireEvent, cleanup } from '@testing-library/react'
 import { MessageBubble } from './MessageBubble'
 import type { AgentMessage } from '../stores/agent-store'
 
@@ -25,6 +25,9 @@ function makeQuestionMessage(): AgentMessage {
 }
 
 describe('MessageBubble question actions', () => {
+  afterEach(() => {
+    cleanup()
+  })
   it('does not allow submitting non-active questions', () => {
     const onAnswer = vi.fn()
     const { queryByText, getByText } = render(

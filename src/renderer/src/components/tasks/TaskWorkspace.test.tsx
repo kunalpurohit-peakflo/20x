@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, act, fireEvent, screen, waitFor } from '@testing-library/react'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { render, act, fireEvent, screen, waitFor, cleanup } from '@testing-library/react'
 import { TaskWorkspace } from './TaskWorkspace'
 import { useAgentStore, SessionStatus } from '@/stores/agent-store'
 import { TaskStatus } from '@/types'
@@ -83,6 +83,10 @@ function renderWorkspace(task: WorkfloTask, agents: Agent[] = [makeAgent()]) {
     />
   )
 }
+
+afterEach(() => {
+  cleanup()
+})
 
 beforeEach(() => {
   useAgentStore.setState({
