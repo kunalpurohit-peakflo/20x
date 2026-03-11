@@ -30,6 +30,8 @@ export enum CodingAgentType {
   CODEX = 'codex'
 }
 
+export type AgentPermissionMode = 'ask' | 'allow'
+
 export type ClaudeAuthMethod = 'subscription' | 'api_key'
 
 export const CODING_AGENTS: { value: CodingAgentType; label: string }[] = [
@@ -150,6 +152,7 @@ export interface AgentConfig {
   coding_agent?: CodingAgentType
   model?: string
   auth_method?: ClaudeAuthMethod
+  permission_mode?: AgentPermissionMode
   system_prompt?: string
   mcp_servers?: Array<string | AgentMcpServerEntry>
   skill_ids?: string[]
