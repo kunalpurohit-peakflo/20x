@@ -2,6 +2,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { AgentManager } from './agent-manager'
 import { SessionStatus } from '../shared/constants'
+import { MessagePartType, MessageRole } from './adapters/coding-agent-adapter'
 
 // Mock filesystem operations
 vi.mock('fs', async (importOriginal) => {
@@ -13,6 +14,10 @@ vi.mock('fs', async (importOriginal) => {
     existsSync: vi.fn(() => false),
   }
 })
+vi.mock('fs/promises', () => ({
+  mkdir: vi.fn(async () => undefined),
+  writeFile: vi.fn(async () => undefined),
+}))
 
 // Mock heavy dependencies to avoid loading electron/native modules
 vi.mock('child_process', () => ({ spawn: vi.fn() }))
@@ -44,10 +49,10 @@ vi.mock('./secret-broker', () => ({
   writeSecretShellWrapper: vi.fn(),
 }))
 
-import { mkdirSync, writeFileSync } from 'fs'
+import { mkdir as mkdirAsync, writeFile as writeFileAsync } from 'fs/promises'
 
-const mockedMkdirSync = vi.mocked(mkdirSync)
-const mockedWriteFileSync = vi.mocked(writeFileSync)
+const mockedMkdirAsync = vi.mocked(mkdirAsync)
+const mockedWriteFileAsync = vi.mocked(writeFileAsync)
 
 function makeSkillRecord(overrides: Partial<{
   id: string; name: string; description: string; content: string;
@@ -101,18 +106,18 @@ describe('AgentManager skill file paths', () => {
   })
 
   describe('writeSkillFiles', () => {
-    it('writes SKILL.md files to .claude/skills/ for Claude Code agents', () => {
+    it('writes SKILL.md files to .claude/skills/ for Claude Code agents', async () => {
       const mockDb = createMockDb({ coding_agent: 'claude-code' })
       manager = new AgentManager(mockDb)
 
       const workspaceDir = '/tmp/test-workspace'
-      ;(manager as any).writeSkillFiles('task-1', 'agent-1', workspaceDir)
+      await (manager as any).writeSkillFiles('task-1', 'agent-1', workspaceDir)
 
-      // Verify SKILL.md was written under .claude/skills/
-      const mkdirCalls = mockedMkdirSync.mock.calls.map(c => c[0])
+      // Verify SKILL.md was written under .claude/skills/ (now uses async fs/promises)
+      const mkdirCalls = mockedMkdirAsync.mock.calls.map(c => c[0])
       expect(mkdirCalls).toContainEqual('/tmp/test-workspace/.claude/skills/test-skill')
 
-      const writeFilePaths = mockedWriteFileSync.mock.calls.map(c => c[0] as string)
+      const writeFilePaths = mockedWriteFileAsync.mock.calls.map(c => c[0] as string)
       expect(writeFilePaths).toContainEqual(
         '/tmp/test-workspace/.claude/skills/test-skill/SKILL.md'
       )
@@ -122,14 +127,14 @@ describe('AgentManager skill file paths', () => {
       expect(agentsWrites).toHaveLength(0)
     })
 
-    it('writes SKILL.md files to .agents/skills/ for OpenCode agents', () => {
+    it('writes SKILL.md files to .agents/skills/ for OpenCode agents', async () => {
       const mockDb = createMockDb({ coding_agent: 'opencode' })
       manager = new AgentManager(mockDb)
 
       const workspaceDir = '/tmp/test-workspace'
-      ;(manager as any).writeSkillFiles('task-1', 'agent-1', workspaceDir)
+      await (manager as any).writeSkillFiles('task-1', 'agent-1', workspaceDir)
 
-      const writeFilePaths = mockedWriteFileSync.mock.calls.map(c => c[0] as string)
+      const writeFilePaths = mockedWriteFileAsync.mock.calls.map(c => c[0] as string)
       expect(writeFilePaths).toContainEqual(
         '/tmp/test-workspace/.agents/skills/test-skill/SKILL.md'
       )
@@ -139,14 +144,14 @@ describe('AgentManager skill file paths', () => {
       expect(claudeWrites).toHaveLength(0)
     })
 
-    it('writes SKILL.md files to .agents/skills/ for Codex agents', () => {
+    it('writes SKILL.md files to .agents/skills/ for Codex agents', async () => {
       const mockDb = createMockDb({ coding_agent: 'codex' })
       manager = new AgentManager(mockDb)
 
       const workspaceDir = '/tmp/test-workspace'
-      ;(manager as any).writeSkillFiles('task-1', 'agent-1', workspaceDir)
+      await (manager as any).writeSkillFiles('task-1', 'agent-1', workspaceDir)
 
-      const writeFilePaths = mockedWriteFileSync.mock.calls.map(c => c[0] as string)
+      const writeFilePaths = mockedWriteFileAsync.mock.calls.map(c => c[0] as string)
       expect(writeFilePaths).toContainEqual(
         '/tmp/test-workspace/.agents/skills/test-skill/SKILL.md'
       )
@@ -156,14 +161,14 @@ describe('AgentManager skill file paths', () => {
       expect(claudeWrites).toHaveLength(0)
     })
 
-    it('defaults to .agents/skills/ when no coding_agent is configured', () => {
+    it('defaults to .agents/skills/ when no coding_agent is configured', async () => {
       const mockDb = createMockDb({})
       manager = new AgentManager(mockDb)
 
       const workspaceDir = '/tmp/test-workspace'
-      ;(manager as any).writeSkillFiles('task-1', 'agent-1', workspaceDir)
+      await (manager as any).writeSkillFiles('task-1', 'agent-1', workspaceDir)
 
-      const writeFilePaths = mockedWriteFileSync.mock.calls.map(c => c[0] as string)
+      const writeFilePaths = mockedWriteFileAsync.mock.calls.map(c => c[0] as string)
       expect(writeFilePaths).toContainEqual(
         '/tmp/test-workspace/.agents/skills/test-skill/SKILL.md'
       )
@@ -171,7 +176,7 @@ describe('AgentManager skill file paths', () => {
   })
 
   describe('writeAgentsDocumentation', () => {
-    it('writes AGENTS.md and CLAUDE.md to workspace root, not .agents/', () => {
+    it('writes AGENTS.md and CLAUDE.md to workspace root, not .agents/', async () => {
       const mockDb = createMockDb({ coding_agent: 'claude-code' })
       manager = new AgentManager(mockDb)
 
@@ -179,9 +184,9 @@ describe('AgentManager skill file paths', () => {
       const skills = [makeSkillRecord()]
       const repos = ['org/repo']
 
-      ;(manager as any).writeAgentsDocumentation(workspaceDir, skills, repos, 'agent-1')
+      await (manager as any).writeAgentsDocumentation(workspaceDir, skills, repos, 'agent-1')
 
-      const writeFilePaths = mockedWriteFileSync.mock.calls.map(c => c[0] as string)
+      const writeFilePaths = mockedWriteFileAsync.mock.calls.map(c => c[0] as string)
 
       // Both files should be written to workspace root
       expect(writeFilePaths).toContain('/tmp/test-workspace/AGENTS.md')
@@ -194,15 +199,15 @@ describe('AgentManager skill file paths', () => {
       expect(agentsDirWrites).toHaveLength(0)
     })
 
-    it('does not create .agents/ directory for documentation files', () => {
+    it('does not create .agents/ directory for documentation files', async () => {
       const mockDb = createMockDb({})
       manager = new AgentManager(mockDb)
 
       const workspaceDir = '/tmp/test-workspace'
-      ;(manager as any).writeAgentsDocumentation(workspaceDir, [], [], 'agent-1')
+      await (manager as any).writeAgentsDocumentation(workspaceDir, [], [], 'agent-1')
 
-      // mkdirSync should NOT be called for .agents/ directory
-      const mkdirCalls = mockedMkdirSync.mock.calls.map(c => c[0] as string)
+      // mkdir (async) should NOT be called for .agents/ directory
+      const mkdirCalls = mockedMkdirAsync.mock.calls.map(c => c[0] as string)
       const agentsDirCreates = mkdirCalls.filter(p => p.endsWith('.agents'))
       expect(agentsDirCreates).toHaveLength(0)
     })
@@ -394,5 +399,123 @@ describe('AgentManager OS notifications', () => {
 
     expect(mockWindow.show).toHaveBeenCalled()
     expect(mockWindow.focus).toHaveBeenCalled()
+  })
+})
+
+describe('AgentManager implicit resume behavior', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('does not replay transcript when sendMessage implicitly resumes a session', async () => {
+    const mockDb = {
+      getTask: vi.fn(() => ({
+        id: 'task-1',
+        title: 'Test Task',
+        agent_id: 'agent-1',
+        session_id: 'persisted-session-id',
+      })),
+      getAgent: vi.fn(() => ({
+        id: 'agent-1',
+        name: 'Test Agent',
+        config: { coding_agent: 'codex' },
+      })),
+      getWorkspaceDir: vi.fn(() => '/tmp/test-workspace'),
+      updateTask: vi.fn(),
+      getMcpServer: vi.fn(() => null),
+      getSecretsByIds: vi.fn(() => []),
+      getSecretsWithValues: vi.fn(() => []),
+      getSetting: vi.fn(() => null),
+    } as unknown as ConstructorParameters<typeof AgentManager>[0]
+
+    const manager = new AgentManager(mockDb)
+    const adapter = { initialize: vi.fn(async () => undefined), resumeSession: vi.fn(async () => ([])) }
+
+    vi.spyOn(manager as any, 'getAdapter').mockReturnValue(adapter)
+    vi.spyOn(manager as any, 'buildMcpServersForAdapter').mockResolvedValue({})
+    vi.spyOn(manager as any, 'setupSecretSession').mockReturnValue(null)
+    vi.spyOn(manager as any, 'buildSecretsSystemPrompt').mockReturnValue('')
+
+    const sendToRendererSpy = vi.spyOn(manager as any, 'sendToRenderer').mockImplementation(() => undefined)
+    const doSendAdapterMessageSpy = vi.spyOn(manager as any, 'doSendAdapterMessage').mockResolvedValue(undefined)
+
+    await manager.sendMessage('missing-live-session', 'root cause ?', 'task-1', 'agent-1')
+
+    expect(adapter.resumeSession).toHaveBeenCalledOnce()
+    expect(doSendAdapterMessageSpy).toHaveBeenCalledOnce()
+
+    const outputBatchEvents = sendToRendererSpy.mock.calls.filter(([channel]) => channel === 'agent:output-batch')
+    expect(outputBatchEvents).toHaveLength(0)
+
+    const userMessageEvents = sendToRendererSpy.mock.calls.filter(([channel, payload]) => (
+      channel === 'agent:output' && (payload as { data?: { role?: string; content?: string } }).data?.role === 'user'
+    ))
+    expect(userMessageEvents).toHaveLength(0)
+  })
+
+  it('still replays transcript during explicit resume', async () => {
+    const mockDb = {
+      getTask: vi.fn(() => ({
+        id: 'task-1',
+        title: 'Test Task',
+      })),
+      getAgent: vi.fn(() => ({
+        id: 'agent-1',
+        name: 'Test Agent',
+        config: { coding_agent: 'codex' },
+      })),
+      getWorkspaceDir: vi.fn(() => '/tmp/test-workspace'),
+      updateTask: vi.fn(),
+      getMcpServer: vi.fn(() => null),
+      getSecretsByIds: vi.fn(() => []),
+      getSecretsWithValues: vi.fn(() => []),
+      getSetting: vi.fn(() => null),
+    } as unknown as ConstructorParameters<typeof AgentManager>[0]
+
+    const manager = new AgentManager(mockDb)
+    const adapter = {
+      initialize: vi.fn(async () => undefined),
+      resumeSession: vi.fn(async () => ([{
+        id: 'msg-1',
+        role: MessageRole.ASSISTANT,
+        parts: [{ id: 'part-1', type: MessagePartType.TEXT, text: 'Earlier reply' }]
+      }]))
+    }
+
+    vi.spyOn(manager as any, 'getAdapter').mockReturnValue(adapter)
+    vi.spyOn(manager as any, 'buildMcpServersForAdapter').mockResolvedValue({})
+    vi.spyOn(manager as any, 'setupSecretSession').mockReturnValue(null)
+    vi.spyOn(manager as any, 'buildSecretsSystemPrompt').mockReturnValue('')
+
+    const sendToRendererSpy = vi.spyOn(manager as any, 'sendToRenderer').mockImplementation(() => undefined)
+
+    await manager.resumeSession('agent-1', 'task-1', 'persisted-session-id')
+
+    const outputBatchEvents = sendToRendererSpy.mock.calls.filter(([channel]) => channel === 'agent:output-batch')
+    expect(outputBatchEvents).toHaveLength(1)
+  })
+})
+
+describe('AgentManager shutdown', () => {
+  it('stopAllSessions waits for all stopSession promises', async () => {
+    const mockDb = createMockDb({})
+    const mgr = new AgentManager(mockDb)
+
+    ;(mgr as any).sessions.set('s1', { taskId: 'task-1' })
+    ;(mgr as any).sessions.set('s2', { taskId: 'task-2' })
+
+    let pendingStops = 0
+    vi.spyOn(mgr, 'stopSession').mockImplementation(async () => {
+      pendingStops += 1
+      await new Promise(resolve => setTimeout(resolve, 0))
+      pendingStops -= 1
+    })
+
+    await mgr.stopAllSessions()
+
+    expect(mgr.stopSession).toHaveBeenCalledTimes(2)
+    expect(mgr.stopSession).toHaveBeenCalledWith('s1', false)
+    expect(mgr.stopSession).toHaveBeenCalledWith('s2', false)
+    expect(pendingStops).toBe(0)
   })
 })

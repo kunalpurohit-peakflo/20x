@@ -34,6 +34,16 @@ interface AcpAdapterPrivate {
     partContentLengths: Map<string, string>,
     session?: AcpSessionForTest
   ): MessagePart[]
+  handlePermissionRequest(session: AcpSessionForTest, request: JsonRpcRequestForTest): void
+  sendRpcResponse(session: AcpSessionForTest, id: string | number, result: unknown): void
+  updateSessionStatus(session: AcpSessionForTest, notification: unknown): void
+}
+
+interface JsonRpcRequestForTest {
+  jsonrpc: '2.0'
+  id: string | number
+  method: string
+  params?: unknown
 }
 
 // Minimal session type for tests (mirrors private AcpSession)
@@ -51,11 +61,16 @@ interface AcpSessionForTest {
   }>
   nextRequestId: number
   pendingApproval: unknown | null
+  config: { permissionMode?: 'ask' | 'allow' }
   promptRequestId: number | null
   responseCounter: number
+  currentUserTurnId: number
   lastChunkTime: number | null
   currentTurnId: number
-  toolCallMetadata: Map<string, { name: string; input: string }>
+  lastSessionUpdateType: string | null
+  activeTurnId: number | null
+  pendingAssistantTurnSplit: boolean
+  toolCallMetadata: Map<string, { name: string; input: string; title?: string }>
 }
 
 /** Cast adapter to access private members for testing */
@@ -76,10 +91,15 @@ function createMockSession(sessionId: string): AcpSessionForTest {
     pendingRequests: new Map(),
     nextRequestId: 1,
     pendingApproval: null,
+    config: { permissionMode: 'ask' },
     promptRequestId: null,
     responseCounter: 0,
+    currentUserTurnId: 0,
     lastChunkTime: null,
     currentTurnId: 0,
+    lastSessionUpdateType: null,
+    activeTurnId: null,
+    pendingAssistantTurnSplit: false,
     toolCallMetadata: new Map()
   }
 }
@@ -99,6 +119,77 @@ describe('AcpAdapter - Turn Detection', () => {
     vi.clearAllMocks()
   })
 
+  describe('Permission handling', () => {
+    it('stores pending approval when permission mode is ask', () => {
+      const sessionId = 'test-session'
+      const priv = adapterPrivate(adapter)
+      const session = createMockSession(sessionId)
+      session.config.permissionMode = 'ask'
+
+      priv.handlePermissionRequest(session, {
+        jsonrpc: '2.0',
+        id: 'req-1',
+        method: 'session/request_permission',
+        params: {
+          toolCall: {
+            rawInput: { reason: 'Run ls' },
+            toolCallId: 'tool-1',
+            kind: 'shell'
+          },
+          options: [
+            { optionId: 'approved', name: 'Yes', kind: 'allow_once' },
+            { optionId: 'abort', name: 'No', kind: 'deny' }
+          ]
+        }
+      })
+
+      expect(session.pendingApproval).toEqual({
+        requestId: 'req-1',
+        toolCallId: 'tool-1',
+        question: 'Run ls',
+        options: [
+          { optionId: 'approved', name: 'Yes', kind: 'allow_once' },
+          { optionId: 'abort', name: 'No', kind: 'deny' }
+        ]
+      })
+    })
+
+    it('auto-approves when permission mode is allow', () => {
+      const sessionId = 'test-session'
+      const priv = adapterPrivate(adapter)
+      const session = createMockSession(sessionId)
+      session.config.permissionMode = 'allow'
+      const sendRpcResponseSpy = vi.spyOn(priv, 'sendRpcResponse')
+
+      priv.handlePermissionRequest(session, {
+        jsonrpc: '2.0',
+        id: 'req-2',
+        method: 'session/request_permission',
+        params: {
+          toolCall: {
+            rawInput: { reason: 'Run npm test' },
+            toolCallId: 'tool-2',
+            kind: 'shell'
+          },
+          options: [
+            { optionId: 'approved-for-session', name: 'Always', kind: 'allow_session' },
+            { optionId: 'approved', name: 'Yes', kind: 'allow_once' },
+            { optionId: 'abort', name: 'No', kind: 'deny' }
+          ]
+        }
+      })
+
+      expect(session.pendingApproval).toBeNull()
+      expect(sendRpcResponseSpy).toHaveBeenCalledWith(session, 'req-2', {
+        result: {
+          outcome: {
+            outcome: 'selected',
+            optionId: 'approved-for-session'
+          }
+        }
+      })
+    })
+  })
   describe('Time-based turn detection', () => {
     it('should use same turn ID for messages arriving within 2 seconds', async () => {
       const sessionId = 'test-session'
@@ -217,14 +308,126 @@ describe('AcpAdapter - Turn Detection', () => {
       expect(session.currentTurnId).toBe(2) // New turn
       expect(parts2[0].id).toBe('agent-response-2') // Different ID
     })
-  })
 
-  describe('Tool call turn detection', () => {
-    it('should NOT increment turn ID for tool calls within time threshold', async () => {
+    it('should keep same turn during long gaps when prompt-scoped turn is active', async () => {
       const sessionId = 'test-session'
       const priv = adapterPrivate(adapter)
 
       const session = priv.sessions.get(sessionId) || createMockSession(sessionId)
+      session.currentTurnId = 1
+      session.activeTurnId = 1
+
+      priv.sessions.set(sessionId, session)
+
+      const seenPartIds = new Set<string>()
+      const partContentLengths = new Map<string, string>()
+
+      const chunk1 = {
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Long response part 1' }
+          }
+        }
+      }
+
+      const parts1 = priv.convertAcpEventToMessageParts(
+        chunk1,
+        new Set(),
+        seenPartIds,
+        partContentLengths,
+        session
+      )
+
+      expect(parts1[0].id).toBe('agent-response-1')
+
+      // Simulate a long pause between chunks (stream stall/network jitter)
+      vi.advanceTimersByTime(3000)
+
+      const chunk2 = {
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: ' and part 2' }
+          }
+        }
+      }
+
+      const parts2 = priv.convertAcpEventToMessageParts(
+        chunk2,
+        new Set(),
+        seenPartIds,
+        partContentLengths,
+        session
+      )
+
+      expect(session.currentTurnId).toBe(1)
+      expect(parts2[0].id).toBe('agent-response-1')
+      expect(parts2[0].text).toBe('Long response part 1 and part 2')
+    })
+  })
+
+  describe('Resume buffer handling', () => {
+    it('clears replayed messageBuffer after resumeSession loads history', async () => {
+      const adapterAny = adapter as any
+      const replayEvent = {
+        method: 'session/update',
+        params: {
+          sessionId: 'persisted-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Replayed assistant message' }
+          }
+        }
+      }
+
+      vi.spyOn(adapterAny, 'sendRpcRequest').mockImplementation(async (...args: unknown[]) => {
+        const session = args[0] as AcpSessionForTest
+        const method = args[1] as string
+
+        if (method === 'initialize' || method === 'authenticate') return {}
+        if (method === 'session/load') {
+          session.messageBuffer.push(replayEvent)
+          session.permanentMessages.push(replayEvent)
+          return {}
+        }
+        return {}
+      })
+
+      const messages = await adapter.resumeSession('persisted-session-id', {
+        workspaceDir: '/tmp',
+        permissionMode: 'default'
+      } as any)
+
+      expect(messages).toHaveLength(1)
+
+      const session = adapterPrivate(adapter).sessions.get('persisted-session-id')
+      expect(session).toBeTruthy()
+      expect(session?.messageBuffer).toHaveLength(0)
+
+      const polled = await adapter.pollMessages(
+        'persisted-session-id',
+        new Set(),
+        new Set(),
+        new Map(),
+        {} as any
+      )
+      expect(polled).toHaveLength(0)
+    })
+  })
+
+  describe('Tool call turn detection', () => {
+    it('should start a new turn after a completed tool call within an active prompt turn', async () => {
+      const sessionId = 'test-session'
+      const priv = adapterPrivate(adapter)
+
+      const session = priv.sessions.get(sessionId) || createMockSession(sessionId)
+      session.currentTurnId = 1
+      session.activeTurnId = 1
 
       priv.sessions.set(sessionId, session)
 
@@ -250,7 +453,7 @@ describe('AcpAdapter - Turn Detection', () => {
 
       expect(session.currentTurnId).toBe(1)
 
-      // Tool call (within 2s)
+      // Tool call inside the same prompt turn
       vi.advanceTimersByTime(500)
 
       const toolCall = {
@@ -276,7 +479,7 @@ describe('AcpAdapter - Turn Detection', () => {
         session
       )
 
-      // Next message chunk (within 2s — should stay on same turn)
+      // Next assistant chunk after a completed tool call should become a new turn
       vi.advanceTimersByTime(500)
 
       const chunk2 = {
@@ -298,9 +501,8 @@ describe('AcpAdapter - Turn Detection', () => {
         session
       )
 
-      // Tool calls no longer force a new turn — only time gaps do
-      expect(session.currentTurnId).toBe(1)
-      expect(parts2[0].id).toBe('agent-response-1')
+      expect(session.currentTurnId).toBe(2)
+      expect(parts2[0].id).toBe('agent-response-2')
     })
 
     it('should cache tool metadata from initial tool_call and use it on completion', async () => {
@@ -367,11 +569,159 @@ describe('AcpAdapter - Turn Detection', () => {
       expect(parts.length).toBe(1)
       expect(parts[0].type).toBe(MessagePartType.TOOL)
       expect(parts[0].tool?.name).toBe('shell')
+      expect(parts[0].tool?.title).toBe('ls -la')
       expect(parts[0].tool?.input).toBe('ls -la')
       expect(parts[0].tool?.output).toBe('file.txt\ndir/')
 
       // Cached metadata should be cleaned up
       expect(session.toolCallMetadata.has('tool-1')).toBe(false)
+    })
+
+    it('should normalize exec_command to command and use command as title', async () => {
+      const sessionId = 'test-session'
+      const priv = adapterPrivate(adapter)
+
+      const session = priv.sessions.get(sessionId) || createMockSession(sessionId)
+      priv.sessions.set(sessionId, session)
+
+      const toolCallComplete = {
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'tool-1',
+            status: 'completed',
+            title: 'exec_command',
+            rawInput: { command: 'pwd' },
+            rawOutput: { stdout: '/tmp' }
+          }
+        }
+      }
+
+      const parts = priv.convertAcpEventToMessageParts(
+        toolCallComplete,
+        new Set(),
+        new Set(),
+        new Map(),
+        session
+      )
+
+      expect(parts).toHaveLength(1)
+      expect(parts[0].tool?.name).toBe('command')
+      expect(parts[0].tool?.title).toBe('pwd')
+      expect(parts[0].tool?.input).toBe('pwd')
+    })
+
+    it('should use rawInput.cmd for exec_command title', async () => {
+      const sessionId = 'test-session'
+      const priv = adapterPrivate(adapter)
+
+      const session = priv.sessions.get(sessionId) || createMockSession(sessionId)
+      priv.sessions.set(sessionId, session)
+
+      const toolCallComplete = {
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'tool-cmd',
+            status: 'completed',
+            title: 'exec_command',
+            rawInput: { cmd: 'pwd' },
+            rawOutput: { stdout: '/tmp' }
+          }
+        }
+      }
+
+      const parts = priv.convertAcpEventToMessageParts(
+        toolCallComplete,
+        new Set(),
+        new Set(),
+        new Map(),
+        session
+      )
+
+      expect(parts).toHaveLength(1)
+      expect(parts[0].tool?.name).toBe('command')
+      expect(parts[0].tool?.title).toBe('pwd')
+      expect(parts[0].tool?.input).toBe('pwd')
+    })
+
+    it('should normalize write_stdin and summarize chars as title', async () => {
+      const sessionId = 'test-session'
+      const priv = adapterPrivate(adapter)
+
+      const session = priv.sessions.get(sessionId) || createMockSession(sessionId)
+      priv.sessions.set(sessionId, session)
+
+      const toolCallComplete = {
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'tool-stdin',
+            status: 'completed',
+            title: 'write_stdin',
+            rawInput: { chars: 'y\n' },
+            rawOutput: { stdout: '' }
+          }
+        }
+      }
+
+      const parts = priv.convertAcpEventToMessageParts(
+        toolCallComplete,
+        new Set(),
+        new Set(),
+        new Map(),
+        session
+      )
+
+      expect(parts).toHaveLength(1)
+      expect(parts[0].tool?.name).toBe('stdin')
+      expect(parts[0].tool?.title).toBe('y')
+    })
+
+    it('should normalize update_plan and summarize first step as title', async () => {
+      const sessionId = 'test-session'
+      const priv = adapterPrivate(adapter)
+
+      const session = priv.sessions.get(sessionId) || createMockSession(sessionId)
+      priv.sessions.set(sessionId, session)
+
+      const toolCallComplete = {
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'tool-plan',
+            status: 'completed',
+            title: 'update_plan',
+            rawInput: {
+              plan: [
+                { step: 'Trace replay messages', status: 'completed' },
+                { step: 'Patch transcript labels', status: 'in_progress' }
+              ]
+            },
+            rawOutput: { stdout: '' }
+          }
+        }
+      }
+
+      const parts = priv.convertAcpEventToMessageParts(
+        toolCallComplete,
+        new Set(),
+        new Set(),
+        new Map(),
+        session
+      )
+
+      expect(parts).toHaveLength(1)
+      expect(parts[0].tool?.name).toBe('plan')
+      expect(parts[0].tool?.title).toBe('2 steps: Trace replay messages')
     })
 
     it('should extract output from Codex rawOutput content array', async () => {
@@ -660,9 +1010,454 @@ describe('AcpAdapter - Turn Detection', () => {
       expect(parts2[0].id).toBe('agent-response-2') // Different ID
       expect(parts2[0].text).toBe('Second reply')
     })
+
+    it('keeps separate replayed user and assistant turns even without time gaps', async () => {
+      const sessionId = 'test-session'
+      const priv = adapterPrivate(adapter)
+      const session = priv.sessions.get(sessionId) || createMockSession(sessionId)
+      const seenPartIds = new Set<string>()
+      const partContentLengths = new Map<string, string>()
+
+      priv.sessions.set(sessionId, session)
+
+      const firstUser = {
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text: 'First task prompt' }
+          }
+        }
+      }
+
+      const firstAssistant = {
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'First assistant reply' }
+          }
+        }
+      }
+
+      const toolCall = {
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'tool-1',
+            title: 'exec_command',
+            status: 'completed',
+            rawInput: { command: 'pwd' }
+          }
+        }
+      }
+
+      const secondUser = {
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text: 'Second task prompt' }
+          }
+        }
+      }
+
+      const secondAssistant = {
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Second assistant reply' }
+          }
+        }
+      }
+
+      const firstUserParts = priv.convertAcpEventToMessageParts(firstUser, new Set(), seenPartIds, partContentLengths, session)
+      const firstAssistantParts = priv.convertAcpEventToMessageParts(firstAssistant, new Set(), seenPartIds, partContentLengths, session)
+      priv.convertAcpEventToMessageParts(toolCall, new Set(), seenPartIds, partContentLengths, session)
+      const secondUserParts = priv.convertAcpEventToMessageParts(secondUser, new Set(), seenPartIds, partContentLengths, session)
+      const secondAssistantParts = priv.convertAcpEventToMessageParts(secondAssistant, new Set(), seenPartIds, partContentLengths, session)
+
+      expect(firstUserParts[0].id).toBe('user-message-1')
+      expect(secondUserParts[0].id).toBe('user-message-2')
+      expect(firstAssistantParts[0].id).toBe('agent-response-1')
+      expect(secondAssistantParts[0].id).toBe('agent-response-2')
+      expect(secondAssistantParts[0].text).toBe('Second assistant reply')
+    })
+
+    it('starts a new assistant turn after tool activity even with active prompt turn', async () => {
+      const sessionId = 'test-session'
+      const priv = adapterPrivate(adapter)
+      const session = priv.sessions.get(sessionId) || createMockSession(sessionId)
+      const seenPartIds = new Set<string>()
+      const partContentLengths = new Map<string, string>()
+
+      session.currentTurnId = 1
+      session.activeTurnId = 1
+      session.lastSessionUpdateType = 'agent_message_chunk'
+      priv.sessions.set(sessionId, session)
+
+      const toolCall = {
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'tool-active',
+            title: 'exec_command',
+            status: 'completed',
+            rawInput: { cmd: 'pwd' }
+          }
+        }
+      }
+
+      const assistantAfterTool = {
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Here is the result.' }
+          }
+        }
+      }
+
+      priv.convertAcpEventToMessageParts(toolCall, new Set(), seenPartIds, partContentLengths, session)
+      const afterToolParts = priv.convertAcpEventToMessageParts(assistantAfterTool, new Set(), seenPartIds, partContentLengths, session)
+
+      expect(session.currentTurnId).toBe(2)
+      expect(session.activeTurnId).toBe(2)
+      expect(afterToolParts[0].id).toBe('agent-response-2')
+    })
+
+    it('clears active turn immediately when live tool activity arrives', async () => {
+      const sessionId = 'test-session'
+      const priv = adapterPrivate(adapter)
+      const session = priv.sessions.get(sessionId) || createMockSession(sessionId)
+      const seenPartIds = new Set<string>()
+      const partContentLengths = new Map<string, string>()
+
+      session.currentTurnId = 1
+      session.activeTurnId = 1
+      session.lastSessionUpdateType = 'agent_message_chunk'
+      priv.sessions.set(sessionId, session)
+
+      const toolCall = {
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'tool-live',
+            title: 'exec_command',
+            status: 'completed',
+            rawInput: { cmd: 'pwd' }
+          }
+        }
+      }
+
+      priv.updateSessionStatus(session, toolCall as never)
+      expect(session.activeTurnId).toBeNull()
+
+      const assistantAfterTool = {
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Here is the result.' }
+          }
+        }
+      }
+
+      const afterToolParts = priv.convertAcpEventToMessageParts(assistantAfterTool, new Set(), seenPartIds, partContentLengths, session)
+
+      expect(session.currentTurnId).toBe(2)
+      expect(afterToolParts[0].id).toBe('agent-response-2')
+    })
+
+    it('starts a new live assistant turn after usage_update follows a tool call', async () => {
+      const sessionId = 'test-session'
+      const priv = adapterPrivate(adapter)
+      const session = priv.sessions.get(sessionId) || createMockSession(sessionId)
+      const seenPartIds = new Set<string>()
+      const partContentLengths = new Map<string, string>()
+
+      session.currentTurnId = 1
+      session.activeTurnId = 1
+      session.lastSessionUpdateType = 'agent_message_chunk'
+      priv.sessions.set(sessionId, session)
+
+      const toolCall = {
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'tool-live-usage',
+            title: 'Run pwd',
+            status: 'completed',
+            rawInput: { command: ['pwd'] }
+          }
+        }
+      }
+
+      const usageUpdate = {
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'usage_update'
+          }
+        }
+      }
+
+      const assistantAfterTool = {
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'am2' }
+          }
+        }
+      }
+
+      priv.updateSessionStatus(session, toolCall as never)
+      priv.convertAcpEventToMessageParts(toolCall, new Set(), seenPartIds, partContentLengths, session)
+      priv.convertAcpEventToMessageParts(usageUpdate, new Set(), seenPartIds, partContentLengths, session)
+      const afterToolParts = priv.convertAcpEventToMessageParts(assistantAfterTool, new Set(), seenPartIds, partContentLengths, session)
+
+      expect(session.pendingAssistantTurnSplit).toBe(false)
+      expect(session.currentTurnId).toBe(2)
+      expect(afterToolParts[0].id).toBe('agent-response-2')
+      expect(afterToolParts[0].text).toBe('am2')
+    })
+
+    it('starts a new assistant replay turn after tool activity', async () => {
+      const sessionId = 'test-session'
+      const priv = adapterPrivate(adapter)
+      const session = priv.sessions.get(sessionId) || createMockSession(sessionId)
+      const seenPartIds = new Set<string>()
+      const partContentLengths = new Map<string, string>()
+
+      priv.sessions.set(sessionId, session)
+
+      const assistantBeforeTool = {
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Let me inspect that.' }
+          }
+        }
+      }
+
+      const toolCall = {
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'tool-2',
+            title: 'exec_command',
+            status: 'completed',
+            rawInput: { command: 'ls' }
+          }
+        }
+      }
+
+      const assistantAfterTool = {
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'I found the issue.' }
+          }
+        }
+      }
+
+      const beforeToolParts = priv.convertAcpEventToMessageParts(assistantBeforeTool, new Set(), seenPartIds, partContentLengths, session)
+      priv.convertAcpEventToMessageParts(toolCall, new Set(), seenPartIds, partContentLengths, session)
+      const afterToolParts = priv.convertAcpEventToMessageParts(assistantAfterTool, new Set(), seenPartIds, partContentLengths, session)
+
+      expect(beforeToolParts[0].id).toBe('agent-response-1')
+      expect(afterToolParts[0].id).toBe('agent-response-2')
+      expect(afterToolParts[0].text).toBe('I found the issue.')
+    })
+  })
+
+  describe('Resume message grouping', () => {
+    it('keeps assistant text after tool calls as a separate resumed message', async () => {
+      const sessionId = 'test-session'
+      const priv = adapterPrivate(adapter)
+      const session = priv.sessions.get(sessionId) || createMockSession(sessionId)
+
+      const assistantBeforeTool = {
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Let me inspect that.' }
+          }
+        }
+      }
+
+      const toolCall = {
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'tool-2',
+            title: 'exec_command',
+            status: 'completed',
+            rawInput: { cmd: 'pwd' }
+          }
+        }
+      }
+
+      const assistantAfterTool = {
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'I found the issue.' }
+          }
+        }
+      }
+
+      session.permanentMessages.push(assistantBeforeTool, toolCall, assistantAfterTool)
+      priv.sessions.set(sessionId, session)
+
+      const messages = await adapter.getAllMessages(sessionId, {
+        agentId: 'codex',
+        taskId: 'task-1',
+        workspaceDir: '/tmp'
+      })
+
+      expect(messages).toHaveLength(3)
+      expect(messages[0].parts[0].id).toBe('agent-response-1')
+      expect(messages[1].parts[0].id).toBe('tool-2')
+      expect(messages[2].parts[0].id).toBe('agent-response-2')
+      expect(messages[2].parts[0].text).toBe('I found the issue.')
+    })
   })
 
   describe('Edge cases', () => {
+    it('converts non-chunk replayed user and agent messages', async () => {
+      const sessionId = 'test-session'
+      const priv = adapterPrivate(adapter)
+      const session = priv.sessions.get(sessionId) || createMockSession(sessionId)
+      const seenPartIds = new Set<string>()
+      const partContentLengths = new Map<string, string>()
+
+      priv.sessions.set(sessionId, session)
+
+      const userMessage = {
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'user_message',
+            messageId: 'user-1',
+            content: { type: 'text', text: 'Please run tests' }
+          }
+        }
+      }
+
+      const agentMessage = {
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'agent_message',
+            messageId: 'assistant-1',
+            content: [
+              {
+                type: 'content',
+                content: { type: 'text', text: 'Running tests now.' }
+              }
+            ]
+          }
+        }
+      }
+
+      const userParts = priv.convertAcpEventToMessageParts(userMessage, new Set(), seenPartIds, partContentLengths, session)
+      const agentParts = priv.convertAcpEventToMessageParts(agentMessage, new Set(), seenPartIds, partContentLengths, session)
+
+      expect(userParts).toHaveLength(1)
+      expect(userParts[0].role).toBe('user')
+      expect(userParts[0].type).toBe(MessagePartType.TEXT)
+      expect(userParts[0].text).toBe('Please run tests')
+
+      expect(agentParts).toHaveLength(1)
+      expect(agentParts[0].role).toBe('assistant')
+      expect(agentParts[0].type).toBe(MessagePartType.TEXT)
+      expect(agentParts[0].text).toBe('Running tests now.')
+    })
+
+    it('converts alternate completed message aliases and array text shapes', async () => {
+      const sessionId = 'test-session'
+      const priv = adapterPrivate(adapter)
+      const session = priv.sessions.get(sessionId) || createMockSession(sessionId)
+      const seenPartIds = new Set<string>()
+      const partContentLengths = new Map<string, string>()
+
+      priv.sessions.set(sessionId, session)
+
+      const assistantMessage = {
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'assistant_message',
+            messageId: 'assistant-2',
+            content: [
+              { type: 'text', text: 'Done inspecting resume history.' },
+              { type: 'text', text: 'Found the gap.' }
+            ]
+          }
+        }
+      }
+
+      const humanMessage = {
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'human_message',
+            messageId: 'user-2',
+            content: {
+              type: 'wrapper',
+              content: { type: 'text', text: 'Please keep digging.' }
+            }
+          }
+        }
+      }
+
+      const assistantParts = priv.convertAcpEventToMessageParts(assistantMessage, new Set(), seenPartIds, partContentLengths, session)
+      const humanParts = priv.convertAcpEventToMessageParts(humanMessage, new Set(), seenPartIds, partContentLengths, session)
+
+      expect(assistantParts).toHaveLength(1)
+      expect(assistantParts[0].role).toBe('assistant')
+      expect(assistantParts[0].text).toBe('Done inspecting resume history.\nFound the gap.')
+
+      expect(humanParts).toHaveLength(1)
+      expect(humanParts[0].role).toBe('user')
+      expect(humanParts[0].text).toBe('Please keep digging.')
+    })
+
     it('should handle first chunk when lastChunkTime is null', async () => {
       const sessionId = 'test-session'
       const priv = adapterPrivate(adapter)

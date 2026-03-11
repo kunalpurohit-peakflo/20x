@@ -45,6 +45,27 @@ let heartbeatScheduler: HeartbeatScheduler | null = null
 let claudePluginManager: ClaudePluginManager | null = null
 let enterpriseHeartbeatInstance: EnterpriseHeartbeat | null = null
 let enterpriseStateSyncInstance: EnterpriseStateSync | null = null
+let isShuttingDown = false
+
+async function shutdownAppServices(): Promise<void> {
+  enterpriseHeartbeatInstance?.stop()
+  heartbeatScheduler?.stop()
+
+  await agentManager?.stopAllSessions()
+  await agentManager?.stopServer()
+
+  mcpToolCaller?.destroy()
+  oauthManager?.destroy()
+  stopSecretBroker()
+  stopMobileApiServer()
+
+  db?.close()
+
+  if (tray) {
+    tray.destroy()
+    tray = null
+  }
+}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -408,34 +429,21 @@ app.whenReady().then(async () => {
 })
 
 app.on('window-all-closed', () => {
-  // Stop all agent sessions and server
-  agentManager?.stopAllSessions()
-  agentManager?.stopServer()
-  oauthManager?.destroy()
-  stopSecretBroker()
-  stopMobileApiServer()
-
   if (process.platform !== 'darwin') {
     app.quit()
   }
 })
 
-app.on('before-quit', () => {
-  isQuitting = true
-  // Ensure cleanup before quitting
-  enterpriseHeartbeatInstance?.stop()
-  heartbeatScheduler?.stop()
-  agentManager?.stopAllSessions()
-  agentManager?.stopServer()
-  mcpToolCaller?.destroy()
-  oauthManager?.destroy()
-
-  // Checkpoint WAL and close database
-  db?.close()
-
-  // Destroy tray
-  if (tray) {
-    tray.destroy()
-    tray = null
+app.on('before-quit', (event) => {
+  if (isShuttingDown) {
+    return
   }
+
+  event.preventDefault()
+  isShuttingDown = true
+  isQuitting = true
+
+  void shutdownAppServices().finally(() => {
+    app.exit(0)
+  })
 })

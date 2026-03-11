@@ -70,6 +70,18 @@ function sanitizeToolContent(content: unknown): string {
 
   return str.substring(0, MAX_DISPLAY_LENGTH) + `\n\n... (${str.length - MAX_DISPLAY_LENGTH} more characters)`
 }
+function deriveToolSubtitle(tool?: AgentMessage['tool']): string {
+  if (!tool) return ''
+  if (tool.title) return tool.title
+
+  if (tool.name === 'command' && typeof tool.input === 'string') {
+    const firstLine = tool.input.split('\n').map((line) => line.trim()).find(Boolean)
+    return firstLine ? firstLine.slice(0, 120) : ''
+  }
+
+  return ''
+}
+
 
 interface AgentTranscriptPanelProps {
   title?: string
@@ -81,19 +93,20 @@ interface AgentTranscriptPanelProps {
   className?: string
 }
 
-function QuestionMessage({ message, onAnswer }: { message: AgentMessage; onAnswer?: (answer: string) => void }) {
+function QuestionMessage({ message, onAnswer, canAnswer }: { message: AgentMessage; onAnswer?: (answer: string) => void; canAnswer: boolean }) {
   const questions = message.tool?.questions || []
   const [answers, setAnswers] = useState<Record<number, string>>({})
   const [textInputs, setTextInputs] = useState<Record<number, string>>({})
   const [submitted, setSubmitted] = useState(false)
+  const isLocked = submitted || !canAnswer
 
   const handleSelect = (qi: number, optionLabel: string) => {
-    if (submitted) return
+    if (isLocked) return
     setAnswers(prev => ({ ...prev, [qi]: optionLabel }))
   }
 
   const handleTextChange = (qi: number, value: string) => {
-    if (submitted) return
+    if (isLocked) return
     setTextInputs(prev => ({ ...prev, [qi]: value }))
     setAnswers(prev => ({ ...prev, [qi]: value }))
   }
@@ -101,7 +114,7 @@ function QuestionMessage({ message, onAnswer }: { message: AgentMessage; onAnswe
   const allAnswered = questions.every((_, qi) => answers[qi]?.trim())
 
   const handleSubmit = () => {
-    if (!allAnswered || submitted) return
+    if (!allAnswered || isLocked) return
     setSubmitted(true)
     // Format: single answer for 1 question, JSON for multiple
     if (questions.length === 1) {
@@ -128,11 +141,11 @@ function QuestionMessage({ message, onAnswer }: { message: AgentMessage; onAnswe
                     <button
                       key={oi}
                       onClick={() => handleSelect(qi, opt.label)}
-                      disabled={submitted}
+                      disabled={isLocked}
                       className={`w-full text-left rounded px-3 py-2 text-xs transition-colors border ${
                         isSelected
                           ? 'bg-primary/20 border-primary/50 text-foreground'
-                          : submitted
+                          : isLocked
                             ? 'border-border/30 text-muted-foreground opacity-50 cursor-default'
                             : 'border-border/50 hover:bg-white/5 hover:border-border text-gray-300 cursor-pointer'
                       }`}
@@ -150,7 +163,7 @@ function QuestionMessage({ message, onAnswer }: { message: AgentMessage; onAnswe
                 type="text"
                 value={textInputs[qi] || ''}
                 onChange={(e) => handleTextChange(qi, e.target.value)}
-                disabled={submitted}
+                disabled={isLocked}
                 placeholder="Type your answer..."
                 className="w-full bg-background border border-border/50 rounded px-3 py-2 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary/50"
                 onKeyDown={(e) => { if (e.key === 'Enter' && allAnswered) handleSubmit() }}
@@ -159,7 +172,7 @@ function QuestionMessage({ message, onAnswer }: { message: AgentMessage; onAnswe
           </div>
         )
       })}
-      {!submitted && (
+      {!isLocked && (
         <div className="px-4 py-3 border-t border-border/30">
           <button
             onClick={handleSubmit}
@@ -248,6 +261,7 @@ function ToolCallMessage({ message }: { message: AgentMessage }) {
   const tool = message.tool!
   const isRunning = !tool.status || tool.status === 'in_progress' || tool.status === 'running' || tool.status === 'pending'
   const isError = tool.status === 'error' || tool.status === 'failed'
+  const subtitle = deriveToolSubtitle(tool)
 
   return (
     <div className="rounded-md bg-[#161b22] border border-border/50 overflow-hidden">
@@ -258,7 +272,7 @@ function ToolCallMessage({ message }: { message: AgentMessage }) {
         <ChevronRight className={`h-3 w-3 text-muted-foreground shrink-0 transition-transform ${expanded ? 'rotate-90' : ''}`} />
         <Wrench className="h-3 w-3 text-muted-foreground shrink-0" />
         <span className="text-foreground">{tool.name}</span>
-        {tool.title && <span className="text-muted-foreground truncate">— {tool.title}</span>}
+        {subtitle && <span className="text-muted-foreground truncate"> {subtitle}</span>}
         {isRunning && <Loader2 className="h-3 w-3 ml-auto shrink-0 text-muted-foreground animate-spin" />}
         {isError && <AlertTriangle className="h-3 w-3 ml-auto shrink-0 text-red-400" />}
       </button>
@@ -294,9 +308,9 @@ function ToolCallMessage({ message }: { message: AgentMessage }) {
   )
 }
 
-function MessageBubble({ message, onAnswer, viewMode }: { message: AgentMessage; onAnswer?: (answer: string) => void; viewMode?: ViewMode }) {
+function MessageBubble({ message, onAnswer, viewMode, canAnswerQuestion = false }: { message: AgentMessage; onAnswer?: (answer: string) => void; viewMode?: ViewMode; canAnswerQuestion?: boolean }) {
   if (message.partType === 'question' && message.tool?.questions) {
-    return <QuestionMessage message={message} onAnswer={onAnswer} />
+    return <QuestionMessage message={message} onAnswer={onAnswer} canAnswer={canAnswerQuestion} />
   }
 
   if (message.partType === 'todowrite' && message.tool?.todos) {
@@ -429,6 +443,16 @@ export function AgentTranscriptPanel({ title = 'Agent transcript', messages, sta
     }
     return null
   }, [messages])
+
+  const activeQuestionId = useMemo(() => {
+    if (status !== SessionStatus.WAITING_APPROVAL) return null
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].partType === 'question' && messages[i].tool?.questions) {
+        return messages[i].id
+      }
+    }
+    return null
+  }, [messages, status])
 
   /** Auto-resize the textarea to fit its content, up to a max height */
   const autoResize = useCallback(() => {
@@ -599,7 +623,12 @@ export function AgentTranscriptPanel({ title = 'Agent transcript', messages, sta
                     }}
                   >
                     <div className="pb-2">
-                      <MemoizedMessageBubble message={messages[virtualRow.index]} onAnswer={onSend} viewMode={viewMode} />
+                      <MemoizedMessageBubble
+                        message={messages[virtualRow.index]}
+                        onAnswer={onSend}
+                        viewMode={viewMode}
+                        canAnswerQuestion={messages[virtualRow.index].id === activeQuestionId}
+                      />
                     </div>
                   </div>
                 ))}

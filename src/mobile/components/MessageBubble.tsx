@@ -3,15 +3,16 @@ import { Markdown } from '@/components/ui/Markdown'
 import { cn } from '../lib/utils'
 import type { AgentMessage } from '../stores/agent-store'
 
-function QuestionMessage({ message, onAnswer }: { message: AgentMessage; onAnswer?: (answer: string) => void }) {
+function QuestionMessage({ message, onAnswer, canAnswer }: { message: AgentMessage; onAnswer?: (answer: string) => void; canAnswer: boolean }) {
   const questions = message.tool?.questions || []
   const [answers, setAnswers] = useState<Record<number, string>>({})
   const [submitted, setSubmitted] = useState(false)
+  const isLocked = submitted || !canAnswer
 
   const allAnswered = questions.every((_, qi) => answers[qi]?.trim())
 
   const handleSubmit = () => {
-    if (!allAnswered || submitted) return
+    if (!allAnswered || isLocked) return
     setSubmitted(true)
     if (questions.length === 1) {
       onAnswer?.(answers[0])
@@ -40,14 +41,14 @@ function QuestionMessage({ message, onAnswer }: { message: AgentMessage; onAnswe
                 return (
                   <button
                     key={oi}
-                    onClick={() => !submitted && setAnswers(prev => ({ ...prev, [qi]: opt.label }))}
-                    disabled={submitted}
+                    onClick={() => !isLocked && setAnswers(prev => ({ ...prev, [qi]: opt.label }))}
+                    disabled={isLocked}
                     className={cn(
                       'w-full text-left rounded px-3 py-2 text-xs transition-colors border',
                       isSelected
                         ? 'bg-primary/20 border-primary/50 text-foreground'
                         : 'border-border/50 hover:bg-white/5 hover:border-border text-gray-300',
-                      submitted && 'opacity-50 cursor-default'
+                      isLocked && 'opacity-50 cursor-default'
                     )}
                   >
                     <div className="font-medium">{opt.label}</div>
@@ -59,7 +60,7 @@ function QuestionMessage({ message, onAnswer }: { message: AgentMessage; onAnswe
           )}
         </div>
       ))}
-      {!submitted && allAnswered && (
+      {!isLocked && allAnswered && (
         <div className="px-4 py-2.5 border-t border-border/30">
           <button
             onClick={handleSubmit}
@@ -132,11 +133,24 @@ function PlanReviewMessage({ message }: { message: AgentMessage }) {
   )
 }
 
+function deriveToolSubtitle(tool?: AgentMessage['tool']): string {
+  if (!tool) return ''
+  if (tool.title) return tool.title
+
+  if (tool.name === 'command' && typeof tool.input === 'string') {
+    const firstLine = tool.input.split('\n').map((line) => line.trim()).find(Boolean)
+    return firstLine ? firstLine.slice(0, 120) : ''
+  }
+
+  return ''
+}
+
 function ToolCallMessage({ message }: { message: AgentMessage }) {
   const [expanded, setExpanded] = useState(false)
   const tool = message.tool!
   const isRunning = !tool.status || tool.status === 'in_progress' || tool.status === 'running' || tool.status === 'pending'
   const isError = tool.status === 'error' || tool.status === 'failed'
+  const subtitle = deriveToolSubtitle(tool)
 
   return (
     <div className="rounded-md bg-[#161b22] border border-border/50 overflow-hidden">
@@ -149,7 +163,7 @@ function ToolCallMessage({ message }: { message: AgentMessage }) {
           <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
         </svg>
         <span className="text-foreground font-medium">{tool.name}</span>
-        {tool.title && <span className="text-muted-foreground truncate">{tool.title}</span>}
+        {subtitle && <span className="text-muted-foreground truncate"> {subtitle}</span>}
         {isRunning && (
           <svg className="h-3 w-3 ml-auto shrink-0 text-muted-foreground animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
@@ -194,12 +208,13 @@ function ToolCallMessage({ message }: { message: AgentMessage }) {
 interface MessageBubbleProps {
   message: AgentMessage
   onAnswer?: (answer: string) => void
+  canAnswerQuestion?: boolean
 }
 
-export function MessageBubble({ message, onAnswer }: MessageBubbleProps) {
+export function MessageBubble({ message, onAnswer, canAnswerQuestion = false }: MessageBubbleProps) {
   // Question — check by data content so it renders correctly regardless of partType
   if (message.tool?.questions && message.tool.questions.length > 0) {
-    return <QuestionMessage message={message} onAnswer={onAnswer} />
+    return <QuestionMessage message={message} onAnswer={onAnswer} canAnswer={canAnswerQuestion} />
   }
 
   // Todo list — check by data content so it renders correctly regardless of partType

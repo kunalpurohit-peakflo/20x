@@ -46,6 +46,7 @@ export interface SessionConfig {
   mcpServers?: Record<string, McpServerConfig>
   /** Claude Code auth method: 'subscription' (OAuth/Pro/Max) or 'api_key' (pay-per-use). Defaults to 'subscription'. */
   authMethod?: 'subscription' | 'api_key'
+  permissionMode?: 'ask' | 'allow'
   apiKeys?: {
     openai?: string
     anthropic?: string
@@ -211,4 +212,14 @@ export interface CodingAgentAdapter {
    * Check if this adapter's backend is available and healthy
    */
   checkHealth(): Promise<{ available: boolean; reason?: string }>
+
+  /**
+   * Optional callback invoked by the adapter when new data is buffered and
+   * ready for consumption.  The polling coordinator uses this to trigger an
+   * immediate poll cycle instead of waiting for the next 2-second heartbeat,
+   * which dramatically reduces perceived latency during active streaming.
+   *
+   * Set by agent-manager when the session is registered for polling.
+   */
+  onDataAvailable?: (sessionId: string) => void
 }
