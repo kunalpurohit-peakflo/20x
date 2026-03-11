@@ -118,6 +118,7 @@ interface AcpSession {
   }>
   nextRequestId: number
   pendingApproval: AcpPermissionRequest | null  // Permission request awaiting user response
+  config: SessionConfig
   promptRequestId: number | null  // ID of the current session/prompt request
   responseCounter: number  // Counter for unique message IDs per response turn
   lastChunkTime: number | null  // Timestamp of last agent_message_chunk
@@ -282,6 +283,7 @@ export class AcpAdapter implements CodingAgentAdapter {
       pendingRequests: new Map(),
       nextRequestId: 1,
       pendingApproval: null,
+      config,
       promptRequestId: null,
       responseCounter: 0,
       lastChunkTime: null,
@@ -447,6 +449,7 @@ export class AcpAdapter implements CodingAgentAdapter {
       pendingRequests: new Map(),
       nextRequestId: 1,
       pendingApproval: null,
+      config,
       promptRequestId: null,
       responseCounter: 0,
       lastChunkTime: null,
@@ -1069,16 +1072,35 @@ export class AcpAdapter implements CodingAgentAdapter {
     console.log(`  Tool: ${toolCall?.kind} - ${toolCall?.toolCallId}`)
     console.log(`  Options: ${options.map((o) => `${o.name} (${o.optionId})`).join(', ')}`)
 
+    const approvalOptions = options.map((o) => ({
+      optionId: o.optionId,
+      name: o.name,
+      kind: o.kind
+    }))
+
+    if (session.config.permissionMode === 'allow') {
+      const autoApprovedOptionId = approvalOptions.find((option) => option.optionId === 'approved-for-session')?.optionId
+        || approvalOptions.find((option) => option.optionId === 'approved')?.optionId
+        || 'approved'
+
+      console.log(`[AcpAdapter/${this.agentType}] Auto-approving permission with: ${autoApprovedOptionId}`)
+      this.sendRpcResponse(session, request.id, {
+        result: {
+          outcome: {
+            outcome: 'selected',
+            optionId: autoApprovedOptionId
+          }
+        }
+      })
+      return
+    }
+
     // Store the permission request for UI to handle
     session.pendingApproval = {
       requestId: request.id,
       toolCallId: toolCall?.toolCallId || '',
       question,
-      options: options.map((o) => ({
-        optionId: o.optionId,
-        name: o.name,
-        kind: o.kind
-      }))
+      options: approvalOptions
     }
 
     // Update session status to waiting for approval

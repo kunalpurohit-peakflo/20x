@@ -34,6 +34,15 @@ interface AcpAdapterPrivate {
     partContentLengths: Map<string, string>,
     session?: AcpSessionForTest
   ): MessagePart[]
+  handlePermissionRequest(session: AcpSessionForTest, request: JsonRpcRequestForTest): void
+  sendRpcResponse(session: AcpSessionForTest, id: string | number, result: unknown): void
+}
+
+interface JsonRpcRequestForTest {
+  jsonrpc: '2.0'
+  id: string | number
+  method: string
+  params?: unknown
 }
 
 // Minimal session type for tests (mirrors private AcpSession)
@@ -51,6 +60,7 @@ interface AcpSessionForTest {
   }>
   nextRequestId: number
   pendingApproval: unknown | null
+  config: { permissionMode?: 'ask' | 'allow' }
   promptRequestId: number | null
   responseCounter: number
   lastChunkTime: number | null
@@ -77,6 +87,7 @@ function createMockSession(sessionId: string): AcpSessionForTest {
     pendingRequests: new Map(),
     nextRequestId: 1,
     pendingApproval: null,
+    config: { permissionMode: 'ask' },
     promptRequestId: null,
     responseCounter: 0,
     lastChunkTime: null,
@@ -101,6 +112,77 @@ describe('AcpAdapter - Turn Detection', () => {
     vi.clearAllMocks()
   })
 
+  describe('Permission handling', () => {
+    it('stores pending approval when permission mode is ask', () => {
+      const sessionId = 'test-session'
+      const priv = adapterPrivate(adapter)
+      const session = createMockSession(sessionId)
+      session.config.permissionMode = 'ask'
+
+      priv.handlePermissionRequest(session, {
+        jsonrpc: '2.0',
+        id: 'req-1',
+        method: 'session/request_permission',
+        params: {
+          toolCall: {
+            rawInput: { reason: 'Run ls' },
+            toolCallId: 'tool-1',
+            kind: 'shell'
+          },
+          options: [
+            { optionId: 'approved', name: 'Yes', kind: 'allow_once' },
+            { optionId: 'abort', name: 'No', kind: 'deny' }
+          ]
+        }
+      })
+
+      expect(session.pendingApproval).toEqual({
+        requestId: 'req-1',
+        toolCallId: 'tool-1',
+        question: 'Run ls',
+        options: [
+          { optionId: 'approved', name: 'Yes', kind: 'allow_once' },
+          { optionId: 'abort', name: 'No', kind: 'deny' }
+        ]
+      })
+    })
+
+    it('auto-approves when permission mode is allow', () => {
+      const sessionId = 'test-session'
+      const priv = adapterPrivate(adapter)
+      const session = createMockSession(sessionId)
+      session.config.permissionMode = 'allow'
+      const sendRpcResponseSpy = vi.spyOn(priv, 'sendRpcResponse')
+
+      priv.handlePermissionRequest(session, {
+        jsonrpc: '2.0',
+        id: 'req-2',
+        method: 'session/request_permission',
+        params: {
+          toolCall: {
+            rawInput: { reason: 'Run npm test' },
+            toolCallId: 'tool-2',
+            kind: 'shell'
+          },
+          options: [
+            { optionId: 'approved-for-session', name: 'Always', kind: 'allow_session' },
+            { optionId: 'approved', name: 'Yes', kind: 'allow_once' },
+            { optionId: 'abort', name: 'No', kind: 'deny' }
+          ]
+        }
+      })
+
+      expect(session.pendingApproval).toBeNull()
+      expect(sendRpcResponseSpy).toHaveBeenCalledWith(session, 'req-2', {
+        result: {
+          outcome: {
+            outcome: 'selected',
+            optionId: 'approved-for-session'
+          }
+        }
+      })
+    })
+  })
   describe('Time-based turn detection', () => {
     it('should use same turn ID for messages arriving within 2 seconds', async () => {
       const sessionId = 'test-session'

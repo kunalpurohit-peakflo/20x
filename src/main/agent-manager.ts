@@ -323,6 +323,7 @@ export class AgentManager extends EventEmitter {
       systemPrompt: agent.config?.system_prompt,
       mcpServers,
       authMethod: agent.config?.auth_method,
+      permissionMode: agent.config?.permission_mode,
       apiKeys: agent.config?.api_keys
     }
 
@@ -981,6 +982,7 @@ export class AgentManager extends EventEmitter {
       systemPrompt: agent.config?.system_prompt,
       mcpServers,
       authMethod: agent.config?.auth_method,
+      permissionMode: agent.config?.permission_mode,
       apiKeys: agent.config?.api_keys
     }
 
@@ -1532,6 +1534,7 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
       systemPrompt: baseSystemPrompt + taskContext,
       mcpServers,
       authMethod: agent.config?.auth_method,
+      permissionMode: agent.config?.permission_mode,
       apiKeys: agent.config?.api_keys
     }
 
