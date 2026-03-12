@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import React, { useEffect } from 'react'
 import { Pencil, Trash2, Calendar, User, Tag, Clock, Bot, Play, History, GitBranch, Plus, X, BookOpen, AlarmClockOff, BellRing, Folder, Repeat, Star, Sparkles, ListTree, ArrowLeft, ChevronRight } from 'lucide-react'
 import { CollapsibleDescription } from '@/components/ui/CollapsibleDescription'
 import { Button } from '@/components/ui/Button'
@@ -95,16 +95,42 @@ const subtaskStatusDotColor: Record<TaskStatus, string> = {
   [TaskStatus.Completed]: 'bg-emerald-400'
 }
 
-function SubtasksSection({ subtasks, onNavigateToTask }: { subtasks: WorkfloTask[]; onNavigateToTask?: (taskId: string) => void }) {
+function SubtasksSection({ subtasks, onNavigateToTask, onAddSubtask }: { subtasks: WorkfloTask[]; onNavigateToTask?: (taskId: string) => void; onAddSubtask?: (title: string) => void }) {
+  const [isAdding, setIsAdding] = React.useState(false)
+  const [newTitle, setNewTitle] = React.useState('')
+  const inputRef = React.useRef<HTMLInputElement>(null)
   const completedCount = subtasks.filter(s => s.status === TaskStatus.Completed).length
+
+  React.useEffect(() => {
+    if (isAdding) inputRef.current?.focus()
+  }, [isAdding])
+
+  const handleSubmit = () => {
+    const title = newTitle.trim()
+    if (title && onAddSubtask) {
+      onAddSubtask(title)
+      setNewTitle('')
+      setIsAdding(false)
+    }
+  }
 
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <ListTree className="h-3.5 w-3.5" /> Subtasks
-          <span className="text-xs tabular-nums">({completedCount}/{subtasks.length})</span>
+          {subtasks.length > 0 && (
+            <span className="text-xs tabular-nums">({completedCount}/{subtasks.length})</span>
+          )}
         </div>
+        {onAddSubtask && !isAdding && (
+          <button
+            onClick={() => setIsAdding(true)}
+            className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+          >
+            <Plus className="h-3 w-3" /> Add
+          </button>
+        )}
       </div>
       <div className="rounded-md border divide-y">
         {subtasks.map((subtask) => (
@@ -120,6 +146,28 @@ function SubtasksSection({ subtasks, onNavigateToTask }: { subtasks: WorkfloTask
             <ChevronRight className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
           </button>
         ))}
+        {isAdding && (
+          <div className="flex items-center gap-2 px-3 py-2">
+            <div className="h-2 w-2 rounded-full shrink-0 bg-muted-foreground" />
+            <input
+              ref={inputRef}
+              type="text"
+              value={newTitle}
+              onChange={(e) => setNewTitle(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleSubmit()
+                if (e.key === 'Escape') { setIsAdding(false); setNewTitle('') }
+              }}
+              onBlur={() => { if (!newTitle.trim()) { setIsAdding(false); setNewTitle('') } }}
+              placeholder="Subtask title..."
+              className="flex-1 text-sm bg-transparent outline-none placeholder:text-muted-foreground/50"
+            />
+            <button onClick={handleSubmit} className="text-xs text-primary hover:text-primary/80 cursor-pointer">Add</button>
+            <button onClick={() => { setIsAdding(false); setNewTitle('') }} className="text-xs text-muted-foreground hover:text-foreground cursor-pointer">
+              <X className="h-3 w-3" />
+            </button>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -152,9 +200,10 @@ interface TaskDetailViewProps {
   subtasks?: WorkfloTask[]
   parentTask?: WorkfloTask | null
   onNavigateToTask?: (taskId: string) => void
+  onAddSubtask?: (title: string) => void
 }
 
-export function TaskDetailView({ task, agents, onEdit, onDelete, onUpdateAttachments, onUpdateOutputFields, onCompleteTask, onAssignAgent, onUpdateRepos, onAddRepos, onUpdateSkillIds, onAddSkills, onStartAgent, canStartAgent, onResumeAgent, canResumeAgent, onRestartAgent, canRestartAgent, onSnooze, onUnsnooze, onReassign, onTriage, canTriage, subtasks, parentTask, onNavigateToTask }: TaskDetailViewProps) {
+export function TaskDetailView({ task, agents, onEdit, onDelete, onUpdateAttachments, onUpdateOutputFields, onCompleteTask, onAssignAgent, onUpdateRepos, onAddRepos, onUpdateSkillIds, onAddSkills, onStartAgent, canStartAgent, onResumeAgent, canResumeAgent, onRestartAgent, canRestartAgent, onSnooze, onUnsnooze, onReassign, onTriage, canTriage, subtasks, parentTask, onNavigateToTask, onAddSubtask }: TaskDetailViewProps) {
   const { skills, fetchSkills } = useSkillStore()
   const isActive = task.status !== TaskStatus.Completed
 
@@ -441,10 +490,11 @@ export function TaskDetailView({ task, agents, onEdit, onDelete, onUpdateAttachm
             </div>
           )}
 
-          {subtasks && subtasks.length > 0 && (
+          {!task.parent_task_id && (
             <SubtasksSection
-              subtasks={subtasks}
+              subtasks={subtasks || []}
               onNavigateToTask={onNavigateToTask}
+              onAddSubtask={onAddSubtask}
             />
           )}
 

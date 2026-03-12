@@ -85,6 +85,26 @@ export function TaskWorkspace({
     }
   }, [task?.id, task?.parent_task_id, task?.updated_at])
 
+  // Create a subtask under the current task
+  const handleAddSubtask = useCallback(async (title: string) => {
+    if (!task) return
+    try {
+      const newSubtask = await taskApi.create({
+        title,
+        parent_task_id: task.id,
+        type: task.type as 'general' | 'coding' | 'manual' | 'review' | 'approval',
+        priority: task.priority as 'critical' | 'high' | 'medium' | 'low',
+        repos: task.repos,
+      })
+      if (newSubtask) {
+        setSubtasks(prev => [...prev, newSubtask])
+        fetchTasks() // Refresh sidebar
+      }
+    } catch (err) {
+      console.error('[TaskWorkspace] Failed to create subtask:', err)
+    }
+  }, [task, fetchTasks])
+
   // Listen for incompatible session events
   useEffect(() => {
     if (!task?.id) return
@@ -593,6 +613,7 @@ Update existing skills that were helpful or create new ones for patterns worth r
             subtasks={subtasks}
             parentTask={parentTask}
             onNavigateToTask={onNavigateToTask}
+            onAddSubtask={handleAddSubtask}
           />
         </div>
 
