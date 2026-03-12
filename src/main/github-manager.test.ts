@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { execFileMock } = vi.hoisted(() => ({
+const { execFileMock } = vi.hoisted(() => {
   const execFileMock = vi.fn()
   const customPromisify = Symbol.for('nodejs.util.promisify.custom')
 
@@ -20,7 +20,7 @@ const { execFileMock } = vi.hoisted(() => ({
   }
 
   return { execFileMock }
-}))
+})
 
 vi.mock('child_process', () => ({
   execFile: execFileMock,
