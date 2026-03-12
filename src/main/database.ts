@@ -916,7 +916,6 @@ export class DatabaseManager {
       CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority);
       CREATE INDEX IF NOT EXISTS idx_tasks_source ON tasks(source);
       CREATE INDEX IF NOT EXISTS idx_tasks_next_occurrence ON tasks(next_occurrence_at) WHERE is_recurring = 1;
-      CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id) WHERE parent_task_id IS NOT NULL;
 
       CREATE TABLE IF NOT EXISTS agents (
         id TEXT PRIMARY KEY,
@@ -1417,8 +1416,9 @@ export class DatabaseManager {
     // Add parent_task_id column for subtask support
     if (!columnNames.has('parent_task_id')) {
       this.db.exec(`ALTER TABLE tasks ADD COLUMN parent_task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE`)
-      this.db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id) WHERE parent_task_id IS NOT NULL`)
     }
+    // Always ensure the index exists (covers both new DBs and migrated DBs)
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id) WHERE parent_task_id IS NOT NULL`)
 
     // Create heartbeat_logs table
     const heartbeatLogsTable = this.db.prepare(
