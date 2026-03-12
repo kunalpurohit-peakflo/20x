@@ -735,9 +735,6 @@ export function registerIpcHandlers(
       const session = await enterpriseAuth.getSession()
       const userId = session.userId || ''
 
-      // Wire enterprise connection into sync manager
-      syncManager.setEnterpriseConnection(apiClient, enterpriseSyncMgr, userId)
-
       // Start enterprise heartbeat (1-min interval)
       {
         const { EnterpriseHeartbeat: EHB } = await import('./enterprise-heartbeat')
@@ -763,6 +760,9 @@ export function registerIpcHandlers(
         enterpriseStateSync.setUserName(session.userEmail || 'Unknown')
         agentManager.setEnterpriseStateSync(enterpriseStateSync)
       }
+
+      // Wire enterprise connection into sync manager (after state sync is ready)
+      syncManager.setEnterpriseConnection(apiClient, enterpriseSyncMgr, userId, enterpriseStateSync)
 
       // Run initial sync (agents, skills, MCP servers)
       console.log('[enterprise] Running initial resource sync...')
@@ -827,8 +827,6 @@ export function registerIpcHandlers(
 
         const apiClient = new WorkfloApiClient(enterpriseAuth)
         const enterpriseSyncMgr = new EnterpriseSyncManager(db, apiClient)
-        syncManager.setEnterpriseConnection(apiClient, enterpriseSyncMgr, session.userId)
-
         // Restore enterprise heartbeat
         try {
           const { EnterpriseHeartbeat: EHB } = await import('./enterprise-heartbeat')
@@ -860,6 +858,9 @@ export function registerIpcHandlers(
         } catch (err) {
           console.error('[enterprise] Failed to restore state sync:', err)
         }
+
+        // Wire enterprise connection (after state sync is ready)
+        syncManager.setEnterpriseConnection(apiClient, enterpriseSyncMgr, session.userId, enterpriseStateSync)
       } catch (err) {
         console.error('[enterprise] Failed to restore connection:', err)
       }

@@ -87,8 +87,13 @@ export class EnterpriseStateSync {
 
   /**
    * Record a task completion event.
+   * Optionally includes action outputs so Workflo can propagate them
+   * to the task source (replaces the direct executeAction API call).
    */
-  recordTaskCompleted(task: TaskRecord): void {
+  recordTaskCompleted(
+    task: TaskRecord,
+    opts?: { action?: string; outputs?: Record<string, unknown> }
+  ): void {
     this.pendingEvents.push({
       eventType: 'task_completed',
       entityType: 'task',
@@ -97,7 +102,14 @@ export class EnterpriseStateSync {
       previousValue: task.status,
       newValue: TaskStatus.Completed,
       userName: this.userName || undefined,
-      occurredAt: new Date().toISOString()
+      occurredAt: new Date().toISOString(),
+      eventData: {
+        localTaskId: task.id,
+        externalId: task.external_id || null,
+        sourceId: task.source_id || null,
+        ...(opts?.action ? { action: opts.action } : {}),
+        ...(opts?.outputs ? { outputs: opts.outputs } : {})
+      }
     })
   }
 

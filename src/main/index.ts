@@ -368,8 +368,6 @@ app.whenReady().then(async () => {
 
         const apiClient = new WorkfloApiClient(enterpriseAuth)
         const enterpriseSyncMgr = new EnterpriseSyncManager(db, apiClient)
-        syncManager.setEnterpriseConnection(apiClient, enterpriseSyncMgr, session.userId)
-
         // Initialize and start enterprise heartbeat + state sync
         enterpriseHeartbeatInstance = new EnterpriseHeartbeat(apiClient)
         enterpriseHeartbeatInstance.start({
@@ -379,6 +377,8 @@ app.whenReady().then(async () => {
 
         enterpriseStateSyncInstance = new EnterpriseStateSync(apiClient)
         enterpriseStateSyncInstance.setUserName(session.userEmail || 'Unknown')
+
+        syncManager.setEnterpriseConnection(apiClient, enterpriseSyncMgr, session.userId, enterpriseStateSyncInstance)
 
         console.log('[Main] Enterprise connection restored on startup (with heartbeat)')
       } else {
