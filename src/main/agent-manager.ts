@@ -291,8 +291,11 @@ export class AgentManager extends EventEmitter {
         if (!apiPort) {
           console.warn('[AgentManager] buildMcpServersForAdapter - task API port is null! MCP server may fail to start')
         }
-        const scopeEnv = opts?.taskScope ? { TASK_SCOPE_PARENT_ID: opts.taskScope.parentTaskId, TASK_SCOPE_TASK_ID: opts.taskScope.taskId } : {}
-        const env = { ...tmServer.environment, ...(apiPort ? { TASK_API_URL: `http://127.0.0.1:${apiPort}` } : {}), ...scopeEnv }
+        const env: Record<string, string> = { ...tmServer.environment, ...(apiPort ? { TASK_API_URL: `http://127.0.0.1:${apiPort}` } : {}) }
+        if (opts?.taskScope) {
+          env.TASK_SCOPE_PARENT_ID = opts.taskScope.parentTaskId
+          env.TASK_SCOPE_TASK_ID = opts.taskScope.taskId
+        }
         result['task-management'] = {
           type: 'stdio',
           command: tmServer.command,
