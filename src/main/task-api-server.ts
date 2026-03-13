@@ -66,10 +66,14 @@ export function startTaskApiServer(db: DatabaseManager): Promise<number> {
             try { params = JSON.parse(body) as Record<string, unknown> } catch { /* ignore */ }
           }
 
+          console.log(`[TaskApiServer] → ${route}`, JSON.stringify(params).slice(0, 200))
           const result = await handleRoute(db, route, params)
+          const resultStr = JSON.stringify(result)
+          console.log(`[TaskApiServer] ← ${route} (${resultStr.length} bytes)`, resultStr.slice(0, 200))
           res.writeHead(200)
-          res.end(JSON.stringify(result))
+          res.end(resultStr)
         } catch (err: unknown) {
+          console.error(`[TaskApiServer] ERROR ${req.url}:`, (err as Error).message)
           res.writeHead(500)
           res.end(JSON.stringify({ error: (err as Error).message }))
         }
@@ -88,7 +92,10 @@ export function startTaskApiServer(db: DatabaseManager): Promise<number> {
       }
     })
 
-    server.on('error', reject)
+    server.on('error', (err) => {
+      console.error('[TaskApiServer] Server error:', err)
+      reject(err)
+    })
   })
 
   return startupPromise
