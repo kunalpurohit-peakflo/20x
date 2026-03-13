@@ -1,4 +1,4 @@
-import { execFile } from 'child_process'
+import { execFile, execSync } from 'child_process'
 import { readdirSync } from 'fs'
 import { app, BrowserWindow, net, protocol, shell, Tray, Menu, nativeImage } from 'electron'
 import { join } from 'path'
@@ -22,7 +22,7 @@ import { EnterpriseAuth } from './enterprise-auth'
 import { RecurrenceScheduler } from './recurrence-scheduler'
 import { HeartbeatScheduler } from './heartbeat-scheduler'
 import { ClaudePluginManager } from './claude-plugin-manager'
-import { setTaskApiNotifier, setTranscriptProvider } from './task-api-server'
+import { setTaskApiNotifier, setTranscriptProvider, stopTaskApiServer } from './task-api-server'
 import { startSecretBroker, stopSecretBroker, writeSecretShellWrapper } from './secret-broker'
 import { startMobileApiServer, stopMobileApiServer, broadcastToMobileClients, setMobileApiNotifier } from './mobile-api-server'
 
@@ -53,6 +53,15 @@ async function shutdownAppServices(): Promise<void> {
   oauthManager?.destroy()
   stopSecretBroker()
   stopMobileApiServer()
+  stopTaskApiServer()
+
+  // Kill orphaned task-management-mcp processes (spawned by opencode, not cleaned up on exit)
+  try {
+    execSync('pkill -f "task-management-mcp\\.js"', { stdio: 'ignore' })
+    console.log('[Shutdown] Killed orphaned task-management-mcp processes')
+  } catch {
+    // pkill exits 1 if no processes matched — that's fine
+  }
 
   db?.close()
 
