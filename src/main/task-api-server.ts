@@ -5,9 +5,6 @@
  * endpoints via fetch, avoiding the native module version mismatch.
  */
 import { createServer, type Server as HttpServer } from 'http'
-import { writeFileSync, unlinkSync } from 'fs'
-import { join } from 'path'
-import { app } from 'electron'
 import { CronExpressionParser } from 'cron-parser'
 import type { DatabaseManager } from './database'
 
@@ -16,11 +13,6 @@ let port: number | null = null
 let startupPromise: Promise<number> | null = null
 let notifyRenderer: ((channel: string, data: unknown) => void) | null = null
 let transcriptProvider: ((taskId: string) => Promise<Array<{ role: string; text: string }>>) | null = null
-
-/** Path to the port file so MCP servers can discover the current port dynamically */
-export function getTaskApiPortFilePath(): string {
-  return join(app.getPath('userData'), 'task-api-port')
-}
 
 export function getTaskApiPort(): number | null {
   return port
@@ -93,8 +85,6 @@ export function startTaskApiServer(db: DatabaseManager): Promise<number> {
       const addr = server!.address()
       if (typeof addr === 'object' && addr) {
         port = addr.port
-        // Write port file so MCP servers can discover the current port dynamically
-        try { writeFileSync(getTaskApiPortFilePath(), String(port), 'utf-8') } catch {}
         console.log(`[TaskApiServer] Started on port ${port}`)
         resolve(port)
       } else {
@@ -117,8 +107,6 @@ export function stopTaskApiServer(): void {
     server = null
     port = null
   }
-  // Clean up port file
-  try { unlinkSync(getTaskApiPortFilePath()) } catch {}
 }
 
 // ── Route handler ──────────────────────────────────────────────

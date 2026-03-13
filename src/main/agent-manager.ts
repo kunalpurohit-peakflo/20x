@@ -16,7 +16,7 @@ import { ClaudeCodeAdapter } from './adapters/claude-code-adapter'
 import { AcpAdapter } from './adapters/acp-adapter'
 import type { CodingAgentAdapter, SessionConfig, MessagePart, SessionMessage, McpServerConfig } from './adapters/coding-agent-adapter'
 import { SessionStatusType, MessagePartType, MessageRole } from './adapters/coding-agent-adapter'
-import { getTaskApiPort, getTaskApiPortFilePath, waitForTaskApiServer } from './task-api-server'
+import { getTaskApiPort, waitForTaskApiServer } from './task-api-server'
 import { randomUUID } from 'crypto'
 import { registerSecretSession, unregisterSecretSession, getSecretBrokerPort, writeSecretShellWrapper } from './secret-broker'
 
@@ -243,10 +243,9 @@ export class AgentManager extends EventEmitter {
       if (!mcpServer) continue
 
       if (mcpServer.type === 'local') {
-        // Inject TASK_API_PORT_FILE + TASK_API_URL for the task-management MCP server
+        // Inject TASK_API_URL for the task-management MCP server
         let env = { ...mcpServer.environment }
         if (mcpServer.name === 'task-management') {
-          env = { ...env, TASK_API_PORT_FILE: getTaskApiPortFilePath() }
           const apiPort = getTaskApiPort()
           if (apiPort) {
             env = { ...env, TASK_API_URL: `http://127.0.0.1:${apiPort}` }
@@ -292,7 +291,7 @@ export class AgentManager extends EventEmitter {
         if (!apiPort) {
           console.warn('[AgentManager] buildMcpServersForAdapter - task API port is null! MCP server may fail to start')
         }
-        const env: Record<string, string> = { ...tmServer.environment, TASK_API_PORT_FILE: getTaskApiPortFilePath(), ...(apiPort ? { TASK_API_URL: `http://127.0.0.1:${apiPort}` } : {}) }
+        const env: Record<string, string> = { ...tmServer.environment, ...(apiPort ? { TASK_API_URL: `http://127.0.0.1:${apiPort}` } : {}) }
         if (opts?.taskScope) {
           env.TASK_SCOPE_PARENT_ID = opts.taskScope.parentTaskId
           env.TASK_SCOPE_TASK_ID = opts.taskScope.taskId
@@ -2502,10 +2501,9 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
       const shellCmd = [serverData.command!, ...(serverData.args || [])].map((arg) =>
         /[\s"'\\$`!#&|;()<>]/.test(arg) ? `'${arg.replace(/'/g, "'\\''")}'` : arg
       ).join(' ')
-      // Inject TASK_API_PORT_FILE + TASK_API_URL for the built-in task-management server
+      // Inject TASK_API_URL for the built-in task-management server
       const extraEnv: Record<string, string> = {}
       if (serverData.name === 'task-management') {
-        extraEnv.TASK_API_PORT_FILE = getTaskApiPortFilePath()
         const apiPort = getTaskApiPort()
         if (apiPort) extraEnv.TASK_API_URL = `http://127.0.0.1:${apiPort}`
       }

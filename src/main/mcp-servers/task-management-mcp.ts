@@ -1,4 +1,3 @@
-import { readFileSync } from 'fs'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import {
@@ -6,13 +5,10 @@ import {
   ListToolsRequestSchema
 } from '@modelcontextprotocol/sdk/types.js'
 
-// Port file path — written by task-api-server on startup, read fresh on every call
-const portFilePath = process.env.TASK_API_PORT_FILE
-// Fallback: static URL from env (used if port file is not available)
-const fallbackApiUrl = process.env.TASK_API_URL
-
-if (!portFilePath && !fallbackApiUrl) {
-  throw new Error('TASK_API_PORT_FILE or TASK_API_URL environment variable is required')
+// Get API URL from environment (points to Electron main process HTTP server)
+const apiUrl = process.env.TASK_API_URL
+if (!apiUrl) {
+  throw new Error('TASK_API_URL environment variable is required')
 }
 
 // Scope: if set, this MCP server is running for a subtask agent
@@ -21,20 +17,7 @@ const scopeParentId = process.env.TASK_SCOPE_PARENT_ID || null
 const scopeTaskId = process.env.TASK_SCOPE_TASK_ID || null
 const isScoped = !!(scopeParentId && scopeTaskId)
 
-function getApiUrl(): string {
-  if (portFilePath) {
-    try {
-      const port = readFileSync(portFilePath, 'utf-8').trim()
-      if (port) return `http://127.0.0.1:${port}`
-    } catch {
-      // Port file not readable — fall through to fallback
-    }
-  }
-  return fallbackApiUrl || 'http://127.0.0.1:0'
-}
-
 async function callApi(route: string, params: Record<string, unknown> = {}): Promise<unknown> {
-  const apiUrl = getApiUrl()
   const url = `${apiUrl}${route}`
   try {
     const res = await fetch(url, {
@@ -46,7 +29,7 @@ async function callApi(route: string, params: Record<string, unknown> = {}): Pro
   } catch (err) {
     const cause = (err as Error).cause
     const causeMsg = cause instanceof Error ? cause.message : (cause ? String(cause) : '')
-    return { error: `fetch failed: ${(err as Error).message}${causeMsg ? ` (cause: ${causeMsg})` : ''} | url=${url} | portFile=${portFilePath || 'none'} | scope=${isScoped ? `task=${scopeTaskId} parent=${scopeParentId}` : 'full'}` }
+    return { error: `fetch failed: ${(err as Error).message}${causeMsg ? ` (cause: ${causeMsg})` : ''} | url=${url} | scope=${isScoped ? `task=${scopeTaskId} parent=${scopeParentId}` : 'full'}` }
   }
 }
 
