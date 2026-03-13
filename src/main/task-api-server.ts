@@ -12,6 +12,7 @@ let server: HttpServer | null = null
 let port: number | null = null
 let startupPromise: Promise<number> | null = null
 let notifyRenderer: ((channel: string, data: unknown) => void) | null = null
+let transcriptProvider: ((taskId: string) => Promise<Array<{ role: string; text: string }>>) | null = null
 
 export function getTaskApiPort(): number | null {
   return port
@@ -39,6 +40,10 @@ export function setTaskApiNotifier(fn: (channel: string, data: unknown) => void)
   notifyRenderer = fn
 }
 
+export function setTranscriptProvider(fn: (taskId: string) => Promise<Array<{ role: string; text: string }>>): void {
+  transcriptProvider = fn
+}
+
 export function startTaskApiServer(db: DatabaseManager): Promise<number> {
   if (server && port) return Promise.resolve(port)
   if (startupPromise) return startupPromise
@@ -50,7 +55,7 @@ export function startTaskApiServer(db: DatabaseManager): Promise<number> {
 
       let body = ''
       req.on('data', (chunk) => { body += chunk })
-      req.on('end', () => {
+      req.on('end', async () => {
         try {
           const url = new URL(req.url || '/', `http://localhost`)
           const route = url.pathname
@@ -61,7 +66,7 @@ export function startTaskApiServer(db: DatabaseManager): Promise<number> {
             try { params = JSON.parse(body) as Record<string, unknown> } catch { /* ignore */ }
           }
 
-          const result = handleRoute(db, route, params)
+          const result = await handleRoute(db, route, params)
           res.writeHead(200)
           res.end(JSON.stringify(result))
         } catch (err: unknown) {
@@ -99,7 +104,7 @@ export function stopTaskApiServer(): void {
 
 // ── Route handler ──────────────────────────────────────────────
 
-function handleRoute(db: DatabaseManager, route: string, params: Record<string, unknown>): unknown {
+async function handleRoute(db: DatabaseManager, route: string, params: Record<string, unknown>): Promise<unknown> {
   const rawDb = (db as unknown as { db: import('better-sqlite3').Database }).db // Access the underlying better-sqlite3 instance
 
   switch (route) {
@@ -221,6 +226,9 @@ function handleRoute(db: DatabaseManager, route: string, params: Record<string, 
         }
       }
 
+      if (params.description !== undefined) { updates.push('description = ?'); qParams.push(params.description) }
+      if (params.resolution !== undefined) { updates.push('resolution = ?'); qParams.push(params.resolution) }
+      if (params.attachments !== undefined) { updates.push('attachments = ?'); qParams.push(JSON.stringify(params.attachments)) }
       if (params.labels !== undefined) { updates.push('labels = ?'); qParams.push(JSON.stringify(params.labels)) }
       if (params.skill_ids !== undefined) { updates.push('skill_ids = ?'); qParams.push(JSON.stringify(params.skill_ids)) }
       if (params.agent_id !== undefined) { updates.push('agent_id = ?'); qParams.push(params.agent_id) }
@@ -494,6 +502,17 @@ function handleRoute(db: DatabaseManager, route: string, params: Record<string, 
       }
 
       return { success: true, task: parsedSubtask }
+    }
+
+    case '/get_session_transcript': {
+      if (!params.task_id) return { error: 'task_id is required' }
+      if (!transcriptProvider) return { error: 'Transcript provider not available' }
+      try {
+        const transcript = await transcriptProvider(params.task_id as string)
+        return { task_id: params.task_id, messages: transcript }
+      } catch (err) {
+        return { error: `Failed to retrieve transcript: ${(err as Error).message}` }
+      }
     }
 
     default:

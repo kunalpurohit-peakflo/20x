@@ -230,6 +230,95 @@ describe('/delete_skill', () => {
   })
 })
 
+describe('/create_subtask', () => {
+  it('creates a subtask under a parent task', () => {
+    const parentTask = db.createTask(makeTask({ title: 'Parent Task', repos: ['org/repo-1'], priority: 'high' }))!
+
+    const subtaskId = `task_${Date.now()}_subtask1`
+    const now = new Date().toISOString()
+
+    rawDb.prepare(`
+      INSERT INTO tasks (id, title, description, type, priority, status, assignee, due_date, labels, attachments, repos, output_fields, source, agent_id, skill_ids, parent_task_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, 'not_started', '', NULL, '[]', '[]', ?, '[]', 'local', NULL, NULL, ?, ?, ?)
+    `).run(
+      subtaskId, 'Subtask 1', 'A subtask', 'coding', 'high',
+      JSON.stringify(['org/repo-1']),
+      parentTask.id, now, now
+    )
+
+    const subtask = db.getTask(subtaskId)!
+    expect(subtask.title).toBe('Subtask 1')
+    expect(subtask.parent_task_id).toBe(parentTask.id)
+    expect(subtask.repos).toEqual(['org/repo-1'])
+    expect(subtask.priority).toBe('high')
+  })
+
+  it('inherits repos from parent when not specified', () => {
+    const parentTask = db.createTask(makeTask({ title: 'Parent', repos: ['org/repo-a', 'org/repo-b'] }))!
+
+    // Simulate /create_subtask - repos from parent
+    const subtaskId = `task_${Date.now()}_inherit`
+    const now = new Date().toISOString()
+    const parentRow = rawDb.prepare('SELECT repos FROM tasks WHERE id = ?').get(parentTask.id) as { repos: string }
+
+    rawDb.prepare(`
+      INSERT INTO tasks (id, title, description, type, priority, status, assignee, due_date, labels, attachments, repos, output_fields, source, parent_task_id, created_at, updated_at)
+      VALUES (?, ?, '', 'general', 'medium', 'not_started', '', NULL, '[]', '[]', ?, '[]', 'local', ?, ?, ?)
+    `).run(subtaskId, 'Inherited repos subtask', parentRow.repos, parentTask.id, now, now)
+
+    const subtask = db.getTask(subtaskId)!
+    expect(subtask.repos).toEqual(['org/repo-a', 'org/repo-b'])
+  })
+})
+
+describe('/list_subtasks', () => {
+  it('returns subtasks for a parent task', () => {
+    const parent = db.createTask(makeTask({ title: 'Parent' }))!
+    const now = new Date().toISOString()
+
+    // Create two subtasks
+    rawDb.prepare(`
+      INSERT INTO tasks (id, title, description, type, priority, status, assignee, labels, attachments, repos, output_fields, source, parent_task_id, created_at, updated_at)
+      VALUES (?, ?, '', 'general', 'medium', 'not_started', '', '[]', '[]', '[]', '[]', 'local', ?, ?, ?)
+    `).run('sub1', 'Sub 1', parent.id, now, now)
+
+    rawDb.prepare(`
+      INSERT INTO tasks (id, title, description, type, priority, status, assignee, labels, attachments, repos, output_fields, source, parent_task_id, created_at, updated_at)
+      VALUES (?, ?, '', 'general', 'medium', 'not_started', '', '[]', '[]', '[]', '[]', 'local', ?, ?, ?)
+    `).run('sub2', 'Sub 2', parent.id, now, now)
+
+    const subtasks = rawDb.prepare('SELECT * FROM tasks WHERE parent_task_id = ? ORDER BY created_at ASC').all(parent.id) as Record<string, unknown>[]
+    expect(subtasks).toHaveLength(2)
+    expect(subtasks[0].title).toBe('Sub 1')
+    expect(subtasks[1].title).toBe('Sub 2')
+  })
+
+  it('returns empty array when no subtasks exist', () => {
+    const parent = db.createTask(makeTask({ title: 'No subtasks parent' }))!
+    const subtasks = rawDb.prepare('SELECT * FROM tasks WHERE parent_task_id = ?').all(parent.id)
+    expect(subtasks).toHaveLength(0)
+  })
+})
+
+describe('subtask cascade delete', () => {
+  it('deletes subtasks when parent is deleted', () => {
+    const parent = db.createTask(makeTask({ title: 'Parent to delete' }))!
+    const now = new Date().toISOString()
+
+    rawDb.prepare(`
+      INSERT INTO tasks (id, title, description, type, priority, status, assignee, labels, attachments, repos, output_fields, source, parent_task_id, created_at, updated_at)
+      VALUES (?, ?, '', 'general', 'medium', 'not_started', '', '[]', '[]', '[]', '[]', 'local', ?, ?, ?)
+    `).run('cascade-sub', 'Subtask to cascade', parent.id, now, now)
+
+    expect(db.getTask('cascade-sub')).toBeDefined()
+
+    db.deleteTask(parent.id)
+
+    expect(db.getTask(parent.id)).toBeUndefined()
+    expect(db.getTask('cascade-sub')).toBeUndefined()
+  })
+})
+
 describe('Triage task status lifecycle', () => {
   it('supports the full triage lifecycle: not_started → triaging → not_started (with agent)', () => {
     const agent = db.createAgent(makeAgent({ name: 'Default Agent', is_default: true }))!

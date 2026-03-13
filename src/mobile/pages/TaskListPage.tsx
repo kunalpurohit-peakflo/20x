@@ -4,7 +4,7 @@ import { TaskStatus } from '@shared/constants'
 import { useTaskStore, type Task } from '../stores/task-store'
 import { useAgentStore, SessionStatus } from '../stores/agent-store'
 import { TaskListItem } from '../components/TaskListItem'
-import { isSnoozed } from '../lib/utils'
+import { isSnoozed, STATUS_DOT_COLORS, cn } from '../lib/utils'
 import type { Route } from '../App'
 
 const FILTER_OPTIONS = [
@@ -31,6 +31,29 @@ export function TaskListPage({ onNavigate }: { onNavigate: (route: Route) => voi
   const [filter, setFilter] = useState('all')
   const [search, setSearch] = useState('')
   const [showCompleted, setShowCompleted] = useState(false)
+  const [expandedParents, setExpandedParents] = useState<Set<string>>(new Set())
+
+  const toggleParentExpanded = (parentId: string) => {
+    setExpandedParents(prev => {
+      const next = new Set(prev)
+      if (next.has(parentId)) next.delete(parentId)
+      else next.add(parentId)
+      return next
+    })
+  }
+
+  // Build subtask lookup map
+  const subtasksByParent = useMemo(() => {
+    const map = new Map<string, Task[]>()
+    for (const task of tasks) {
+      if (task.parent_task_id) {
+        const existing = map.get(task.parent_task_id) || []
+        existing.push(task)
+        map.set(task.parent_task_id, existing)
+      }
+    }
+    return map
+  }, [tasks])
 
   const { active, completed } = useMemo(() => {
     let filtered = tasks
@@ -48,11 +71,14 @@ export function TaskListPage({ onNavigate }: { onNavigate: (route: Route) => voi
       filtered = filtered.filter((t) => t.status === filter)
     }
 
-    // Split into active vs completed (excluding snoozed and recurring templates)
+    // Split into active vs completed (excluding snoozed, recurring templates, and subtasks)
     const active: Task[] = []
     const completed: Task[] = []
 
     for (const t of filtered) {
+      // Skip subtasks from top-level grouping — they render under their parent
+      if (t.parent_task_id) continue
+
       if (t.status === TaskStatus.Completed) {
         completed.push(t)
       } else if (!isSnoozed(t.snoozed_until) && !(t.is_recurring && !t.recurrence_parent_id)) {
@@ -62,6 +88,58 @@ export function TaskListPage({ onNavigate }: { onNavigate: (route: Route) => voi
 
     return { active, completed }
   }, [tasks, filter, search])
+
+  const renderTaskWithSubtasks = (task: Task) => {
+    const subtasks = subtasksByParent.get(task.id)
+    const hasSubtasks = subtasks && subtasks.length > 0
+    const isExpanded = expandedParents.has(task.id)
+
+    return (
+      <div key={task.id}>
+        <div className="flex items-center">
+          {hasSubtasks && (
+            <button
+              onClick={(e) => { e.stopPropagation(); toggleParentExpanded(task.id) }}
+              className="flex items-center justify-center w-5 h-5 ml-1 mr-0 shrink-0 text-muted-foreground active:opacity-60"
+            >
+              <svg
+                className={cn('h-3 w-3 transition-transform', isExpanded && 'rotate-90')}
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="m9 18 6-6-6-6" />
+              </svg>
+            </button>
+          )}
+          <div className="flex-1 min-w-0">
+            <TaskListItem
+              task={task}
+              onSelect={() => onNavigate({ page: 'detail', taskId: task.id })}
+              sessionStatus={sessionStatuses[task.id]}
+              subtaskCount={subtasks?.length}
+            />
+          </div>
+        </div>
+        {hasSubtasks && isExpanded && (
+          <div className="ml-5 pl-2 border-l border-border/30">
+            {subtasks.map((subtask) => (
+              <TaskListItem
+                key={subtask.id}
+                task={subtask}
+                onSelect={() => onNavigate({ page: 'detail', taskId: subtask.id })}
+                sessionStatus={sessionStatuses[subtask.id]}
+                isSubtask
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    )
+  }
 
   return (
     <div className="flex flex-col h-full">
@@ -120,14 +198,7 @@ export function TaskListPage({ onNavigate }: { onNavigate: (route: Route) => voi
           </div>
         ) : (
           <>
-            {active.map((task) => (
-              <TaskListItem
-                key={task.id}
-                task={task}
-                onSelect={() => onNavigate({ page: 'detail', taskId: task.id })}
-                sessionStatus={sessionStatuses[task.id]}
-              />
-            ))}
+            {active.map(renderTaskWithSubtasks)}
 
             {completed.length > 0 && (
               <>
@@ -138,14 +209,7 @@ export function TaskListPage({ onNavigate }: { onNavigate: (route: Route) => voi
                   <span className="text-[10px]">{showCompleted ? '\u25BC' : '\u25B6'}</span>
                   <span>Completed ({completed.length})</span>
                 </button>
-                {showCompleted && completed.map((task) => (
-                  <TaskListItem
-                    key={task.id}
-                    task={task}
-                    onSelect={() => onNavigate({ page: 'detail', taskId: task.id })}
-                    sessionStatus={sessionStatuses[task.id]}
-                  />
-                ))}
+                {showCompleted && completed.map(renderTaskWithSubtasks)}
               </>
             )}
           </>

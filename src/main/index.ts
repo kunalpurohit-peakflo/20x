@@ -22,7 +22,7 @@ import { EnterpriseAuth } from './enterprise-auth'
 import { RecurrenceScheduler } from './recurrence-scheduler'
 import { HeartbeatScheduler } from './heartbeat-scheduler'
 import { ClaudePluginManager } from './claude-plugin-manager'
-import { setTaskApiNotifier } from './task-api-server'
+import { setTaskApiNotifier, setTranscriptProvider } from './task-api-server'
 import { startSecretBroker, stopSecretBroker, writeSecretShellWrapper } from './secret-broker'
 import { startMobileApiServer, stopMobileApiServer, broadcastToMobileClients, setMobileApiNotifier } from './mobile-api-server'
 
@@ -140,6 +140,11 @@ function createWindow(): void {
       mainWindow.webContents.send(channel, data)
     }
   })
+
+  // Wire up transcript provider for subtask MCP agents to access sibling transcripts
+  if (agentManager) {
+    setTranscriptProvider((taskId) => agentManager!.getTranscriptForTask(taskId))
+  }
 
   // Wire up mobile-api-server notifications to the renderer
   setMobileApiNotifier((channel, data) => {

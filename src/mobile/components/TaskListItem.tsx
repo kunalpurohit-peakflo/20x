@@ -9,9 +9,11 @@ interface TaskListItemProps {
   task: Task
   onSelect: () => void
   sessionStatus?: SessionStatus
+  isSubtask?: boolean
+  subtaskCount?: number
 }
 
-export function TaskListItem({ task, onSelect, sessionStatus }: TaskListItemProps) {
+export function TaskListItem({ task, onSelect, sessionStatus, isSubtask, subtaskCount }: TaskListItemProps) {
   const isActive = task.status !== TaskStatus.Completed
   const overdue = isActive && isOverdue(task.due_date)
   const dueSoon = isActive && !overdue && isDueSoon(task.due_date)
@@ -37,9 +39,13 @@ export function TaskListItem({ task, onSelect, sessionStatus }: TaskListItemProp
       className="w-full text-left px-3 py-2.5 rounded-md transition-colors cursor-pointer group hover:bg-accent/50 active:bg-accent"
     >
       <div className="flex items-start gap-3">
-        <div className={cn('mt-[7px] h-2 w-2 rounded-full shrink-0', statusDotColor)} />
+        <div className={cn(
+          'rounded-full shrink-0',
+          isSubtask ? 'mt-[8px] h-1.5 w-1.5' : 'mt-[7px] h-2 w-2',
+          statusDotColor
+        )} />
         <div className="min-w-0 flex-1">
-          <div className="text-sm font-medium truncate">{task.title}</div>
+          <div className={cn('truncate', isSubtask ? 'text-xs font-medium' : 'text-sm font-medium')}>{task.title}</div>
           <div className="flex items-center gap-2 mt-1">
             <TaskPriorityBadge priority={task.priority as TaskPriority} />
             {task.due_date && (
@@ -64,6 +70,14 @@ export function TaskListItem({ task, onSelect, sessionStatus }: TaskListItemProp
                   <path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z" />
                   <path d="M3.22 12H9.5l.5-1 2 4.5 2-7 1.5 3.5h5.27" />
                 </svg>
+              </span>
+            )}
+            {!isSubtask && subtaskCount && subtaskCount > 0 && (
+              <span className="flex items-center gap-1 text-[10px] text-muted-foreground">
+                <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 6h18"/><path d="M7 12h10"/><path d="M10 18h4"/>
+                </svg>
+                {subtaskCount}
               </span>
             )}
             {task.source !== 'local' && (
