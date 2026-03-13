@@ -285,6 +285,21 @@ const subtaskTools = [
     }
   },
   {
+    name: 'create_sibling_subtask',
+    description: 'Create a new sibling subtask under the same parent task. Useful for breaking down work further or spawning parallel tasks.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'Subtask title' },
+        description: { type: 'string', description: 'Subtask description with context and instructions' },
+        agent_id: { type: 'string', description: 'Agent ID to assign (use list_agents to find available agents)' },
+        skill_ids: { type: 'array', items: { type: 'string' }, description: 'Skill IDs to assign' },
+        labels: { type: 'array', items: { type: 'string' }, description: 'Labels for the subtask' }
+      },
+      required: ['title']
+    }
+  },
+  {
     name: 'get_sibling_transcript',
     description: 'Get the conversation transcript (agent dialog) of a sibling subtask. Only works for tasks under the same parent. Returns the role and text of each message in the session. Useful for understanding what a sibling agent discussed, decided, or proposed.',
     inputSchema: {
@@ -377,6 +392,9 @@ async function handleScopedCall(name: string, args: Record<string, unknown>): Pr
       }
       return callApi('/update_task', allowed)
     }
+
+    case 'create_sibling_subtask':
+      return callApi('/create_subtask', { ...args, parent_task_id: scopeParentId })
 
     case 'get_sibling_transcript': {
       // Verify the requested task is actually a sibling
