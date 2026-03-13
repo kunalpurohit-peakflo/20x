@@ -823,6 +823,7 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
    * the event loop with expensive JSON serialization on every streaming chunk.
    */
   private safeLogMessage(msg: SDKMessage): void {
+    if (!msg || typeof msg !== 'object') return
     const m = msg as unknown as Record<string, unknown>
     console.log(`[ClaudeCodeAdapter] msg: type=${m.type} subtype=${m.subtype || '-'}`)
   }
@@ -838,6 +839,13 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
     try {
       let messagesSinceYield = 0
       for await (const message of session.queryIterator) {
+        // Guard against undefined/null messages from the SDK (can happen during
+        // process crashes, lock acquisition failures, or SDK bugs)
+        if (!message || typeof message !== 'object') {
+          console.warn('[ClaudeCodeAdapter] Received invalid message from SDK, skipping:', typeof message)
+          continue
+        }
+
         const msg = message as unknown as Record<string, unknown>
 
         // ── Prevent microtask starvation ──
@@ -976,9 +984,10 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
       } else if (errMsg.includes('exited with code 1')) {
         // Claude Code process failed - could be rate limit, resume failure, or other error
         console.error('[ClaudeCodeAdapter] Claude Code process failed:', errMsg)
-        // Only treat as incompatible session if we don't already have a specific error
-        // from the result message (e.g., rate limit errors set lastError before process exits)
-        if (!session.lastError && (session.isResumed || session.config)) {
+        // Only treat as incompatible session if this was a resumed session AND we
+        // don't already have a specific error from the result message (e.g., rate limits).
+        // Note: session.config is always set, so only check session.isResumed here.
+        if (!session.lastError && session.isResumed) {
           console.warn('[ClaudeCodeAdapter] Resume failed - session may not exist on Claude servers')
           session.status = 'error'
           session.lastError = 'INCOMPATIBLE_SESSION_ID: Failed to resume session. The session may have expired or does not exist on Claude Code servers.'

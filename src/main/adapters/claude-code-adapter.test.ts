@@ -259,6 +259,72 @@ describe('ClaudeCodeAdapter error result handling', () => {
       // After thrown error, queryIterator should be null for recovery
       expect(session.queryIterator).toBeNull()
       expect(session.status).toBe('error')
+      // Non-resumed session should NOT get INCOMPATIBLE_SESSION_ID
+      expect(session.lastError).not.toContain('INCOMPATIBLE_SESSION_ID')
+    })
+
+    it('sets INCOMPATIBLE_SESSION_ID only for resumed sessions on exit code 1', async () => {
+      const adapter = new ClaudeCodeAdapter()
+
+      const fakeIterator = {
+        [Symbol.asyncIterator]() { return this },
+        async next() { throw new Error('Claude Code process exited with code 1') },
+      }
+
+      const session: any = {
+        sessionId: 's1',
+        queryIterator: fakeIterator,
+        abortController: null,
+        status: 'busy',
+        messageBuffer: [],
+        messageCursor: 0,
+        streamTask: null,
+        lastError: null,
+        config: {} as any,
+        isResumed: true, // This is a resumed session
+      }
+      ;(adapter as any).sessions.set('s1', session)
+
+      await (adapter as any).consumeStream('s1', session)
+
+      // Resumed session with exit code 1 SHOULD get INCOMPATIBLE_SESSION_ID
+      expect(session.lastError).toContain('INCOMPATIBLE_SESSION_ID')
+    })
+
+    it('skips undefined/null messages from SDK iterator without crashing', async () => {
+      const adapter = new ClaudeCodeAdapter()
+
+      let callCount = 0
+      const fakeIterator = {
+        [Symbol.asyncIterator]() { return this },
+        async next() {
+          callCount++
+          if (callCount === 1) return { done: false, value: undefined }
+          if (callCount === 2) return { done: false, value: null }
+          if (callCount === 3) return { done: false, value: { type: 'result', is_error: false, uuid: 'ok-1' } }
+          return { done: true, value: undefined }
+        },
+      }
+
+      const session = {
+        sessionId: 's1',
+        queryIterator: fakeIterator,
+        abortController: null,
+        status: 'busy' as const,
+        messageBuffer: [] as any[],
+        messageCursor: 0,
+        streamTask: null,
+        lastError: null,
+        config: {} as any,
+      }
+      ;(adapter as any).sessions.set('s1', session)
+
+      // Should not throw — undefined/null messages are skipped
+      await (adapter as any).consumeStream('s1', session)
+
+      expect(session.status).toBe('idle')
+      // Only the valid message should be buffered
+      expect(session.messageBuffer.length).toBe(1)
     })
   })
 
