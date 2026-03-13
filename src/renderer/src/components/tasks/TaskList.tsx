@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react'
-import { Inbox, ChevronRight, ChevronDown } from 'lucide-react'
+import { Inbox, ChevronRight } from 'lucide-react'
 import { TaskListItem } from './TaskListItem'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { isSnoozed } from '@/lib/utils'
@@ -70,31 +70,31 @@ export function TaskList({ tasks, selectedTaskId, onSelectTask }: TaskListProps)
   const renderTaskWithSubtasks = (task: WorkfloTask) => {
     const subtasks = subtasksByParent.get(task.id)
     const hasSubtasks = subtasks && subtasks.length > 0
+
+    if (!hasSubtasks) {
+      return (
+        <TaskListItem
+          key={task.id}
+          task={task}
+          isSelected={task.id === selectedTaskId}
+          onSelect={() => onSelectTask(task.id)}
+        />
+      )
+    }
+
     const isExpanded = expandedParents.has(task.id)
 
     return (
       <div key={task.id}>
-        <div className="flex items-center">
-          {hasSubtasks && (
-            <button
-              onClick={(e) => { e.stopPropagation(); toggleParentExpanded(task.id) }}
-              className="flex items-center justify-center w-5 h-5 ml-1 mr-0 shrink-0 text-muted-foreground hover:text-foreground cursor-pointer"
-            >
-              {isExpanded
-                ? <ChevronDown className="h-3 w-3" />
-                : <ChevronRight className="h-3 w-3" />}
-            </button>
-          )}
-          <div className="flex-1 min-w-0">
-            <TaskListItem
-              task={task}
-              isSelected={task.id === selectedTaskId}
-              onSelect={() => onSelectTask(task.id)}
-              subtaskCount={subtasks?.length}
-            />
-          </div>
-        </div>
-        {hasSubtasks && isExpanded && (
+        <TaskListItem
+          task={task}
+          isSelected={task.id === selectedTaskId}
+          onSelect={() => onSelectTask(task.id)}
+          subtaskCount={subtasks.length}
+          isExpanded={isExpanded}
+          onToggleExpand={() => toggleParentExpanded(task.id)}
+        />
+        {isExpanded && (
           <div className="ml-5 pl-2 border-l border-border/30">
             {subtasks.map((subtask) => (
               <TaskListItem
