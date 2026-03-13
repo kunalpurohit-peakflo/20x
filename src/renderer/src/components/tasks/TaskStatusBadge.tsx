@@ -15,6 +15,6 @@ interface TaskStatusBadgeProps {
 }
 
 export function TaskStatusBadge({ status }: TaskStatusBadgeProps) {
-  const config = statusConfig[status]
+  const config = statusConfig[status] ?? { label: status, variant: 'default' as BadgeVariant }
   return <Badge variant={config.variant}>{config.label}</Badge>
 }
