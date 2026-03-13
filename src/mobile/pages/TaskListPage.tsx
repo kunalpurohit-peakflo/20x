@@ -109,10 +109,11 @@ export function TaskListPage({ onNavigate }: { onNavigate: (route: Route) => voi
 
     return (
       <div key={task.id}>
-        <div className="flex items-center">
+        <div className="relative">
+          {/* Toggle overlaid on the left edge — doesn't affect layout */}
           <button
             onClick={(e) => { e.stopPropagation(); toggleParentExpanded(task.id) }}
-            className="flex items-center justify-center w-5 h-5 ml-1 mr-0 shrink-0 text-muted-foreground active:opacity-60"
+            className="absolute left-0 top-0 bottom-0 z-10 flex items-center justify-center w-7 text-muted-foreground active:opacity-60"
           >
             <svg
               className={cn('h-3 w-3 transition-transform', isExpanded && 'rotate-90')}
@@ -126,14 +127,12 @@ export function TaskListPage({ onNavigate }: { onNavigate: (route: Route) => voi
               <path d="m9 18 6-6-6-6" />
             </svg>
           </button>
-          <div className="flex-1 min-w-0">
-            <TaskListItem
-              task={task}
-              onSelect={() => onNavigate({ page: 'detail', taskId: task.id })}
-              sessionStatus={sessionStatuses[task.id]}
-              subtaskCount={subtasks.length}
-            />
-          </div>
+          <TaskListItem
+            task={task}
+            onSelect={() => onNavigate({ page: 'detail', taskId: task.id })}
+            sessionStatus={sessionStatuses[task.id]}
+            subtaskCount={subtasks.length}
+          />
         </div>
         {isExpanded && (
           <div className="ml-5 pl-2 border-l border-border/30">
