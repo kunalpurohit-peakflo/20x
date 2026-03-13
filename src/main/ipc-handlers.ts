@@ -131,6 +131,10 @@ export function registerIpcHandlers(
     return db.deleteTask(id)
   })
 
+  ipcMain.handle('db:getSubtasks', (_, parentId: string) => {
+    return db.getSubtasks(parentId)
+  })
+
   // Attachment handlers
   ipcMain.handle('attachments:pick', async () => {
     const result = await dialog.showOpenDialog({

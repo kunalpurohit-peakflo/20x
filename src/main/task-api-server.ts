@@ -12,6 +12,7 @@ let server: HttpServer | null = null
 let port: number | null = null
 let startupPromise: Promise<number> | null = null
 let notifyRenderer: ((channel: string, data: unknown) => void) | null = null
+let transcriptProvider: ((taskId: string) => Promise<Array<{ role: string; text: string }>>) | null = null
 
 export function getTaskApiPort(): number | null {
   return port
@@ -39,6 +40,10 @@ export function setTaskApiNotifier(fn: (channel: string, data: unknown) => void)
   notifyRenderer = fn
 }
 
+export function setTranscriptProvider(fn: (taskId: string) => Promise<Array<{ role: string; text: string }>>): void {
+  transcriptProvider = fn
+}
+
 export function startTaskApiServer(db: DatabaseManager): Promise<number> {
   if (server && port) return Promise.resolve(port)
   if (startupPromise) return startupPromise
@@ -50,7 +55,7 @@ export function startTaskApiServer(db: DatabaseManager): Promise<number> {
 
       let body = ''
       req.on('data', (chunk) => { body += chunk })
-      req.on('end', () => {
+      req.on('end', async () => {
         try {
           const url = new URL(req.url || '/', `http://localhost`)
           const route = url.pathname
@@ -61,10 +66,14 @@ export function startTaskApiServer(db: DatabaseManager): Promise<number> {
             try { params = JSON.parse(body) as Record<string, unknown> } catch { /* ignore */ }
           }
 
-          const result = handleRoute(db, route, params)
+          console.log(`[TaskApiServer] → ${route}`, JSON.stringify(params).slice(0, 200))
+          const result = await handleRoute(db, route, params)
+          const resultStr = JSON.stringify(result)
+          console.log(`[TaskApiServer] ← ${route} (${resultStr.length} bytes)`, resultStr.slice(0, 200))
           res.writeHead(200)
-          res.end(JSON.stringify(result))
+          res.end(resultStr)
         } catch (err: unknown) {
+          console.error(`[TaskApiServer] ERROR ${req.url}:`, (err as Error).message)
           res.writeHead(500)
           res.end(JSON.stringify({ error: (err as Error).message }))
         }
@@ -83,7 +92,10 @@ export function startTaskApiServer(db: DatabaseManager): Promise<number> {
       }
     })
 
-    server.on('error', reject)
+    server.on('error', (err) => {
+      console.error('[TaskApiServer] Server error:', err)
+      reject(err)
+    })
   })
 
   return startupPromise
@@ -99,7 +111,7 @@ export function stopTaskApiServer(): void {
 
 // ── Route handler ──────────────────────────────────────────────
 
-function handleRoute(db: DatabaseManager, route: string, params: Record<string, unknown>): unknown {
+async function handleRoute(db: DatabaseManager, route: string, params: Record<string, unknown>): Promise<unknown> {
   const rawDb = (db as unknown as { db: import('better-sqlite3').Database }).db // Access the underlying better-sqlite3 instance
 
   switch (route) {
@@ -165,8 +177,8 @@ function handleRoute(db: DatabaseManager, route: string, params: Record<string, 
       }
 
       rawDb.prepare(`
-        INSERT INTO tasks (id, title, description, type, priority, status, assignee, due_date, labels, attachments, repos, output_fields, source, agent_id, skill_ids, is_recurring, recurrence_pattern, next_occurrence_at, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', '[]', '[]', 'local', ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO tasks (id, title, description, type, priority, status, assignee, due_date, labels, attachments, repos, output_fields, source, agent_id, skill_ids, is_recurring, recurrence_pattern, next_occurrence_at, parent_task_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', '[]', '[]', 'local', ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id,
         params.title,
@@ -182,6 +194,7 @@ function handleRoute(db: DatabaseManager, route: string, params: Record<string, 
         isRecurring,
         recurrencePattern,
         nextOccurrenceAt,
+        params.parent_task_id || null,
         now,
         now
       )
@@ -220,6 +233,9 @@ function handleRoute(db: DatabaseManager, route: string, params: Record<string, 
         }
       }
 
+      if (params.description !== undefined) { updates.push('description = ?'); qParams.push(params.description) }
+      if (params.resolution !== undefined) { updates.push('resolution = ?'); qParams.push(params.resolution) }
+      if (params.attachments !== undefined) { updates.push('attachments = ?'); qParams.push(JSON.stringify(params.attachments)) }
       if (params.labels !== undefined) { updates.push('labels = ?'); qParams.push(JSON.stringify(params.labels)) }
       if (params.skill_ids !== undefined) { updates.push('skill_ids = ?'); qParams.push(JSON.stringify(params.skill_ids)) }
       if (params.agent_id !== undefined) { updates.push('agent_id = ?'); qParams.push(params.agent_id) }
@@ -438,6 +454,72 @@ function handleRoute(db: DatabaseManager, route: string, params: Record<string, 
       const githubOrg = orgRow?.value || null
 
       return { repos: Array.from(repoSet), github_org: githubOrg }
+    }
+
+    case '/list_subtasks': {
+      if (!params.parent_task_id) return { error: 'parent_task_id is required' }
+      const subtasks = rawDb.prepare(
+        'SELECT * FROM tasks WHERE parent_task_id = ? ORDER BY created_at ASC'
+      ).all(params.parent_task_id) as Record<string, unknown>[]
+      subtasks.forEach(parseTask)
+      return subtasks
+    }
+
+    case '/create_subtask': {
+      if (!params.parent_task_id) return { error: 'parent_task_id is required' }
+      if (!params.title) return { error: 'title is required' }
+
+      // Verify parent task exists
+      const parentTask = rawDb.prepare('SELECT id, repos, priority FROM tasks WHERE id = ?').get(params.parent_task_id) as Record<string, unknown> | undefined
+      if (!parentTask) return { error: 'Parent task not found' }
+
+      const subtaskId = `task_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`
+      const now = new Date().toISOString()
+
+      // Inherit repos from parent if not specified
+      const repos = params.repos ? JSON.stringify(params.repos) : (parentTask.repos as string) || '[]'
+
+      rawDb.prepare(`
+        INSERT INTO tasks (id, title, description, type, priority, status, assignee, due_date, labels, attachments, repos, output_fields, source, agent_id, skill_ids, parent_task_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'not_started', '', NULL, ?, '[]', ?, '[]', 'local', ?, ?, ?, ?, ?)
+      `).run(
+        subtaskId,
+        params.title,
+        params.description || '',
+        params.type || 'general',
+        params.priority || parentTask.priority || 'medium',
+        JSON.stringify(params.labels || []),
+        repos,
+        params.agent_id || null,
+        params.skill_ids ? JSON.stringify(params.skill_ids) : null,
+        params.parent_task_id,
+        now,
+        now
+      )
+
+      const subtask = rawDb.prepare('SELECT * FROM tasks WHERE id = ?').get(subtaskId) as Record<string, unknown>
+      const parsedSubtask = parseTask(subtask)
+
+      // Notify renderer
+      if (notifyRenderer) {
+        const properTask = db.getTask(subtaskId)
+        if (properTask) {
+          notifyRenderer('task:created', { task: properTask })
+        }
+      }
+
+      return { success: true, task: parsedSubtask }
+    }
+
+    case '/get_session_transcript': {
+      if (!params.task_id) return { error: 'task_id is required' }
+      if (!transcriptProvider) return { error: 'Transcript provider not available' }
+      try {
+        const transcript = await transcriptProvider(params.task_id as string)
+        return { task_id: params.task_id, messages: transcript }
+      } catch (err) {
+        return { error: `Failed to retrieve transcript: ${(err as Error).message}` }
+      }
     }
 
     default:
