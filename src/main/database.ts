@@ -489,6 +489,7 @@ export interface SkillRow {
   last_used: string | null
   tags: string
   is_deleted: number
+  enterprise_skill_id: string | null
   created_at: string
   updated_at: string
 }
@@ -503,6 +504,7 @@ export interface SkillRecord {
   uses: number
   last_used: string | null
   tags: string[]
+  enterprise_skill_id: string | null
   created_at: string
   updated_at: string
 }
@@ -515,6 +517,7 @@ export interface CreateSkillData {
   uses?: number
   last_used?: string | null
   tags?: string[]
+  enterprise_skill_id?: string | null
 }
 
 export interface UpdateSkillData {
@@ -525,6 +528,7 @@ export interface UpdateSkillData {
   uses?: number
   last_used?: string | null
   tags?: string[]
+  enterprise_skill_id?: string | null
 }
 
 // ── Secret types ─────────────────────────────────────────────
@@ -737,6 +741,7 @@ function deserializeSkill(row: SkillRow): SkillRecord {
     uses: row.uses,
     last_used: row.last_used,
     tags,
+    enterprise_skill_id: row.enterprise_skill_id ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at
   }
@@ -1443,6 +1448,14 @@ export class DatabaseManager {
         );
         CREATE UNIQUE INDEX IF NOT EXISTS idx_secrets_env_var ON secrets(env_var_name);
       `)
+    }
+
+    // Migrate skills table: add enterprise_skill_id for 2-way sync
+    const skillColumns = this.db.pragma('table_info(skills)') as { name: string }[]
+    const skillColumnNames = new Set(skillColumns.map((c) => c.name))
+
+    if (!skillColumnNames.has('enterprise_skill_id')) {
+      this.db.exec(`ALTER TABLE skills ADD COLUMN enterprise_skill_id TEXT DEFAULT NULL`)
     }
 
     // Seed default agent if none exist
@@ -2230,10 +2243,11 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
     const uses = data.uses ?? 0
     const lastUsed = data.last_used ?? null
     const tags = JSON.stringify(data.tags ?? [])
+    const enterpriseSkillId = data.enterprise_skill_id ?? null
     this.db.prepare(`
-      INSERT INTO skills (id, name, description, content, version, confidence, uses, last_used, tags, is_deleted, created_at, updated_at)
-      VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, 0, ?, ?)
-    `).run(id, data.name, data.description, data.content, confidence, uses, lastUsed, tags, now, now)
+      INSERT INTO skills (id, name, description, content, version, confidence, uses, last_used, tags, is_deleted, enterprise_skill_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, 0, ?, ?, ?)
+    `).run(id, data.name, data.description, data.content, confidence, uses, lastUsed, tags, enterpriseSkillId, now, now)
     return this.getSkill(id)
   }
 
@@ -2251,6 +2265,7 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
     if (data.uses !== undefined) { setClauses.push('uses = ?'); values.push(data.uses) }
     if (data.last_used !== undefined) { setClauses.push('last_used = ?'); values.push(data.last_used) }
     if (data.tags !== undefined) { setClauses.push('tags = ?'); values.push(JSON.stringify(data.tags)) }
+    if (data.enterprise_skill_id !== undefined) { setClauses.push('enterprise_skill_id = ?'); values.push(data.enterprise_skill_id) }
 
     if (setClauses.length === 0) return existing
 
@@ -2271,6 +2286,13 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
     const row = this.db.prepare(
       'SELECT * FROM skills WHERE name = ? AND is_deleted = 0'
     ).get(name) as SkillRow | undefined
+    return row ? deserializeSkill(row) : undefined
+  }
+
+  getSkillByEnterpriseId(enterpriseSkillId: string): SkillRecord | undefined {
+    const row = this.db.prepare(
+      'SELECT * FROM skills WHERE enterprise_skill_id = ? AND is_deleted = 0'
+    ).get(enterpriseSkillId) as SkillRow | undefined
     return row ? deserializeSkill(row) : undefined
   }
 

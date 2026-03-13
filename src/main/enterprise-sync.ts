@@ -1,27 +1,31 @@
 /**
- * EnterpriseSyncManager — Phase 2.3 / 2.4
+ * EnterpriseSyncManager — Phase 2.3 / 2.4 + Skills 2-Way Sync
  *
  * Syncs agents, skills, MCP servers from Workflo org nodes into the local
  * 20x SQLite database. Runs:
  *   1. On enterprise connect (selectTenant success)
  *   2. On every task re-sync (before fetching tasks)
  *
- * Flow:
+ * Skills 2-way sync flow:
+ *   1. Push local skills → server (create or update)
+ *   2. Assign all skill IDs to this user's org node
+ *   3. Pull server skills → local (from other nodes/users)
+ *
+ * Other resource flow:
  *   GET /api/org-nodes          → fetch all nodes
  *   For user's node(s):
  *     node.agents[]             → upsert into local agents table
- *     node.skillIds[]           → fetch GET /api/skills, upsert into local skills table
  *     node.mcpServers[]         → upsert into local mcp_servers table (remote type)
  *     node.taskSources[]        → auto-create matching local task_sources entries
  */
-import type { DatabaseManager } from './database'
+import type { DatabaseManager, SkillRecord } from './database'
 import type { WorkfloApiClient, WorkfloOrgNode, WorkfloMcpServer, WorkfloSkill, WorkfloAgent } from './workflo-api-client'
 
 // ── Types ───────────────────────────────────────────────────────────────
 
 export interface EnterpriseSyncResult {
   agents: { created: number; updated: number }
-  skills: { created: number; updated: number }
+  skills: { created: number; updated: number; pushed: number }
   mcpServers: { created: number; updated: number }
   taskSources: { created: number; updated: number }
   errors: string[]
@@ -29,6 +33,9 @@ export interface EnterpriseSyncResult {
 
 // Prefix for enterprise-synced resources to avoid conflicts
 const ENTERPRISE_PREFIX = 'wf_'
+
+// Skills with this prefix were originally pulled from the server
+const WORKFLO_SKILL_PREFIX = '[Workflo] '
 
 // ── Sync Manager ────────────────────────────────────────────────────────
 
@@ -44,7 +51,7 @@ export class EnterpriseSyncManager {
   async syncAll(userId: string): Promise<EnterpriseSyncResult> {
     const result: EnterpriseSyncResult = {
       agents: { created: 0, updated: 0 },
-      skills: { created: 0, updated: 0 },
+      skills: { created: 0, updated: 0, pushed: 0 },
       mcpServers: { created: 0, updated: 0 },
       taskSources: { created: 0, updated: 0 },
       errors: []
@@ -73,13 +80,23 @@ export class EnterpriseSyncManager {
         }
       }
 
-      // 3. Fetch and sync skills (global, not per-node)
+      // 3. Skills 2-way sync
       try {
-        const skills = await this.apiClient.listSkills()
-        await this.syncSkills(skills, result)
+        // Step A: Push local skills to server
+        const pushedSkillIds = await this.pushLocalSkills(result)
+
+        // Step B: Assign all skill IDs to user's node(s)
+        const targetNodes = userNodes.length > 0 ? userNodes : nodes
+        for (const node of targetNodes) {
+          await this.assignSkillsToNode(node.id, pushedSkillIds, result)
+        }
+
+        // Step C: Pull server skills back (picks up skills from other nodes)
+        const serverSkills = await this.apiClient.listSkills()
+        await this.pullServerSkills(serverSkills, result)
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
-        result.errors.push(`Skills sync failed: ${msg}`)
+        result.errors.push(`Skills 2-way sync failed: ${msg}`)
       }
 
       console.log(
@@ -174,49 +191,237 @@ export class EnterpriseSyncManager {
     }
   }
 
-  // ── Skill Sync ────────────────────────────────────────────────────────
+  // ── Skill 2-Way Sync ───────────────────────────────────────────────
 
-  private async syncSkills(
-    skills: WorkfloSkill[],
+  /**
+   * Push local skills to the server. Returns array of server skill IDs
+   * that should be assigned to this node.
+   *
+   * - Skills with enterprise_skill_id: update on server if locally newer
+   * - Skills without enterprise_skill_id (local-only): create on server
+   * - Skips built-in skills (e.g. Mastermind)
+   */
+  private async pushLocalSkills(
+    result: EnterpriseSyncResult
+  ): Promise<string[]> {
+    const localSkills = this.db.getSkills()
+    const serverSkillIds: string[] = []
+
+    for (const skill of localSkills) {
+      try {
+        // Skip built-in system skills
+        if (this.isBuiltInSkill(skill)) {
+          // If it already has an enterprise ID, keep it in the node assignment
+          if (skill.enterprise_skill_id) {
+            serverSkillIds.push(skill.enterprise_skill_id)
+          }
+          continue
+        }
+
+        if (skill.enterprise_skill_id) {
+          // Already linked to server — push update if locally newer
+          try {
+            const serverSkill = await this.apiClient.updateSkill(
+              skill.enterprise_skill_id,
+              {
+                name: this.stripWorkfloPrefix(skill.name),
+                description: skill.description,
+                content: skill.content,
+                confidence: skill.confidence,
+                tags: skill.tags
+              }
+            )
+            serverSkillIds.push(serverSkill.id)
+            result.skills.pushed++
+          } catch (updateErr) {
+            // If 404 (skill deleted on server), re-create it
+            const msg = updateErr instanceof Error ? updateErr.message : String(updateErr)
+            if (msg.includes('404') || msg.includes('not found') || msg.includes('Not Found')) {
+              console.log(`[EnterpriseSyncManager] Skill ${skill.name} deleted on server, re-creating...`)
+              const created = await this.apiClient.createSkill({
+                name: this.stripWorkfloPrefix(skill.name),
+                description: skill.description,
+                content: skill.content,
+                confidence: skill.confidence,
+                tags: skill.tags
+              })
+              this.db.updateSkill(skill.id, { enterprise_skill_id: created.id })
+              serverSkillIds.push(created.id)
+              result.skills.pushed++
+            } else {
+              throw updateErr
+            }
+          }
+        } else {
+          // New local skill — create on server
+          const created = await this.apiClient.createSkill({
+            name: this.stripWorkfloPrefix(skill.name),
+            description: skill.description,
+            content: skill.content,
+            confidence: skill.confidence,
+            tags: skill.tags
+          })
+
+          // Store the server ID locally for future syncs
+          this.db.updateSkill(skill.id, { enterprise_skill_id: created.id })
+          serverSkillIds.push(created.id)
+          result.skills.pushed++
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        result.errors.push(`Push skill ${skill.name}: ${msg}`)
+        // Still include the enterprise_skill_id if we have one
+        if (skill.enterprise_skill_id) {
+          serverSkillIds.push(skill.enterprise_skill_id)
+        }
+      }
+    }
+
+    return serverSkillIds
+  }
+
+  /**
+   * Assign skill IDs to an org node on the server.
+   * Merges the pushed skill IDs with any existing node skill IDs.
+   */
+  private async assignSkillsToNode(
+    nodeId: string,
+    pushedSkillIds: string[],
     result: EnterpriseSyncResult
   ): Promise<void> {
-    const localSkills = this.db.getSkills()
+    try {
+      // Get current node to merge with existing skillIds
+      const detail = await this.apiClient.getOrgNode(nodeId)
+      const existingSkillIds = detail.node.skillIds || []
 
-    for (const skill of skills) {
+      // Merge: keep existing IDs that aren't from our push, add our pushed IDs
+      const mergedIds = [...new Set([...existingSkillIds, ...pushedSkillIds])]
+
+      await this.apiClient.updateOrgNode(nodeId, {
+        skillIds: mergedIds
+      })
+
+      console.log(
+        `[EnterpriseSyncManager] Assigned ${mergedIds.length} skills to node ${nodeId}`
+      )
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      result.errors.push(`Assign skills to node ${nodeId}: ${msg}`)
+    }
+  }
+
+  /**
+   * Pull skills from the server into the local database.
+   * - Skills already linked via enterprise_skill_id: update if server is newer
+   * - Skills not linked: match by name (with [Workflo] prefix) or create new
+   */
+  private async pullServerSkills(
+    serverSkills: WorkfloSkill[],
+    result: EnterpriseSyncResult
+  ): Promise<void> {
+    for (const skill of serverSkills) {
       try {
-        const enterpriseName = `[Workflo] ${skill.name}`
-        const existing = localSkills.find(
-          (s) => s.name === enterpriseName
-        )
+        // First, check if we already have this skill linked by enterprise_skill_id
+        const linkedSkill = this.db.getSkillByEnterpriseId(skill.id)
 
-        if (existing) {
-          // Only update if remote is newer
+        if (linkedSkill) {
+          // Already linked — update if server is newer
           const remoteUpdated = new Date(skill.updatedAt).getTime()
-          const localUpdated = new Date(existing.updated_at).getTime()
+          const localUpdated = new Date(linkedSkill.updated_at).getTime()
 
           if (remoteUpdated > localUpdated) {
-            this.db.updateSkill(existing.id, {
-              name: enterpriseName,
+            this.db.updateSkill(linkedSkill.id, {
               description: skill.description,
               content: skill.content,
+              confidence: skill.confidence,
               tags: skill.tags
             })
             result.skills.updated++
           }
-        } else {
-          this.db.createSkill({
-            name: enterpriseName,
-            description: skill.description,
-            content: skill.content,
-            tags: skill.tags
-          })
-          result.skills.created++
+          continue
         }
+
+        // Check by [Workflo] prefixed name (backward compatibility)
+        const enterpriseName = `${WORKFLO_SKILL_PREFIX}${skill.name}`
+        const existingByName = this.db.getSkillByName(enterpriseName)
+
+        if (existingByName) {
+          // Link it and update if server is newer
+          this.db.updateSkill(existingByName.id, {
+            enterprise_skill_id: skill.id
+          })
+
+          const remoteUpdated = new Date(skill.updatedAt).getTime()
+          const localUpdated = new Date(existingByName.updated_at).getTime()
+
+          if (remoteUpdated > localUpdated) {
+            this.db.updateSkill(existingByName.id, {
+              description: skill.description,
+              content: skill.content,
+              confidence: skill.confidence,
+              tags: skill.tags
+            })
+            result.skills.updated++
+          }
+          continue
+        }
+
+        // Also check by exact name (no prefix)
+        const existingByExactName = this.db.getSkillByName(skill.name)
+        if (existingByExactName) {
+          // Link it and update if server is newer
+          this.db.updateSkill(existingByExactName.id, {
+            enterprise_skill_id: skill.id
+          })
+
+          const remoteUpdated = new Date(skill.updatedAt).getTime()
+          const localUpdated = new Date(existingByExactName.updated_at).getTime()
+
+          if (remoteUpdated > localUpdated) {
+            this.db.updateSkill(existingByExactName.id, {
+              description: skill.description,
+              content: skill.content,
+              confidence: skill.confidence,
+              tags: skill.tags
+            })
+            result.skills.updated++
+          }
+          continue
+        }
+
+        // New skill from server — create locally with [Workflo] prefix
+        this.db.createSkill({
+          name: enterpriseName,
+          description: skill.description,
+          content: skill.content,
+          confidence: skill.confidence,
+          tags: skill.tags,
+          enterprise_skill_id: skill.id
+        })
+        result.skills.created++
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
-        result.errors.push(`Skill ${skill.name}: ${msg}`)
+        result.errors.push(`Pull skill ${skill.name}: ${msg}`)
       }
     }
+  }
+
+  /**
+   * Check if a skill is a built-in system skill that shouldn't be synced
+   */
+  private isBuiltInSkill(skill: SkillRecord): boolean {
+    const builtInNames = ['Mastermind', 'mastermind']
+    return builtInNames.includes(skill.name)
+  }
+
+  /**
+   * Strip the [Workflo] prefix from a skill name if present
+   */
+  private stripWorkfloPrefix(name: string): string {
+    if (name.startsWith(WORKFLO_SKILL_PREFIX)) {
+      return name.slice(WORKFLO_SKILL_PREFIX.length)
+    }
+    return name
   }
 
   // ── MCP Server Sync ───────────────────────────────────────────────────

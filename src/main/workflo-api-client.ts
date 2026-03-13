@@ -120,6 +120,10 @@ export interface WorkfloSkill {
   name: string
   description: string
   content: string
+  confidence?: number
+  version?: number
+  uses?: number
+  lastUsed?: string | null
   tags: string[]
   createdAt: string
   updatedAt: string
@@ -253,6 +257,65 @@ export class WorkfloApiClient {
       '/api/skills'
     )) as { skills: WorkfloSkill[] }
     return result.skills
+  }
+
+  /**
+   * Create a new skill on the server
+   */
+  async createSkill(data: {
+    name: string
+    description: string
+    content: string
+    confidence?: number
+    tags?: string[]
+  }): Promise<WorkfloSkill> {
+    const result = (await this.auth.apiRequest(
+      'POST',
+      '/api/skills',
+      data
+    )) as WorkfloSkill
+    return result
+  }
+
+  /**
+   * Update an existing skill on the server
+   */
+  async updateSkill(
+    skillId: string,
+    data: {
+      name?: string
+      description?: string
+      content?: string
+      confidence?: number
+      tags?: string[]
+    }
+  ): Promise<WorkfloSkill> {
+    const result = (await this.auth.apiRequest(
+      'PATCH',
+      `/api/skills/${skillId}`,
+      data
+    )) as WorkfloSkill
+    return result
+  }
+
+  // ── Org Nodes (update) ──────────────────────────────────────────────
+
+  /**
+   * Update an org node (e.g. to assign skillIds)
+   */
+  async updateOrgNode(
+    nodeId: string,
+    data: {
+      skillIds?: string[]
+      agents?: WorkfloAgent[]
+    }
+  ): Promise<WorkfloOrgNode> {
+    const result = (await this.auth.apiRequest(
+      'PUT',
+      `/api/org-nodes/${nodeId}`,
+      data
+    )) as { node: WorkfloOrgNode }
+    return result.node
   }
 
   // ── File download ───────────────────────────────────────────────────
