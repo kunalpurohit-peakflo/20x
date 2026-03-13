@@ -260,7 +260,7 @@ const subtaskTools = [
         resolution: { type: 'string', description: 'Set resolution/output summary (read by sibling subtasks for coordination)' },
         attachments: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, path: { type: 'string' }, type: { type: 'string' } } }, description: 'Set attachments (e.g. files, screenshots)' },
         labels: { type: 'array', items: { type: 'string' }, description: 'Set labels' },
-        status: { type: 'string', enum: ['not_started', 'in_progress', 'completed', 'cancelled'] }
+        status: { type: 'string', enum: ['not_started', 'in_progress', 'ready_for_review'], description: 'Subtasks cannot self-complete; set ready_for_review when done so the parent task owner can verify.' }
       }
     }
   },
@@ -327,8 +327,25 @@ async function handleScopedCall(name: string, args: Record<string, unknown>): Pr
       return callApi('/get_task', { task_id: args.task_id })
     }
 
-    case 'update_own_task':
+    case 'update_own_task': {
+      // Subtasks cannot self-complete or self-cancel — enforce ready_for_review ceiling
+      const blockedStatuses = ['completed', 'cancelled']
+      if (args.status && blockedStatuses.includes(args.status as string)) {
+        return { error: `Subtasks cannot set status to "${args.status}". Use "ready_for_review" when done.` }
+      }
+      // Normalize MCP-style attachments ({name, path, type}) to FileAttachmentRecord format
+      if (Array.isArray(args.attachments)) {
+        args.attachments = (args.attachments as Record<string, unknown>[]).map((a) => ({
+          id: a.id || crypto.randomUUID(),
+          filename: a.name || a.filename || 'unknown',
+          size: typeof a.size === 'number' ? a.size : 0,
+          mime_type: a.type || a.mime_type || 'application/octet-stream',
+          added_at: a.added_at || new Date().toISOString(),
+          ...(a.path ? { workflo_path: a.path } : {})
+        }))
+      }
       return callApi('/update_task', { ...args, task_id: scopeTaskId })
+    }
 
     case 'update_sibling_task': {
       // Verify the target is a sibling, and only allow description + attachments
@@ -340,7 +357,17 @@ async function handleScopedCall(name: string, args: Record<string, unknown>): Pr
       // Only allow description and attachments updates on siblings
       const allowed: Record<string, unknown> = { task_id: args.task_id }
       if (args.description !== undefined) allowed.description = args.description
-      if (args.attachments !== undefined) allowed.attachments = args.attachments
+      if (args.attachments !== undefined) {
+        // Normalize MCP-style attachments to FileAttachmentRecord format
+        allowed.attachments = (args.attachments as Record<string, unknown>[]).map((a) => ({
+          id: a.id || crypto.randomUUID(),
+          filename: a.name || a.filename || 'unknown',
+          size: typeof a.size === 'number' ? a.size : 0,
+          mime_type: a.type || a.mime_type || 'application/octet-stream',
+          added_at: a.added_at || new Date().toISOString(),
+          ...(a.path ? { workflo_path: a.path } : {})
+        }))
+      }
       return callApi('/update_task', allowed)
     }
 

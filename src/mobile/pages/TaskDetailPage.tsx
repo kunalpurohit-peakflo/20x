@@ -14,7 +14,6 @@ import type { Route } from '../App'
 
 export function TaskDetailPage({ taskId, onNavigate }: { taskId: string; onNavigate: (route: Route) => void }) {
   const task = useTaskStore((s) => s.tasks.find((t) => t.id === taskId))
-  const tasks = useTaskStore((s) => s.tasks)
   const updateTask = useTaskStore((s) => s.updateTask)
   const agents = useAgentStore((s) => s.agents)
   const skills = useAgentStore((s) => s.skills)
@@ -158,16 +157,13 @@ export function TaskDetailPage({ taskId, onNavigate }: { taskId: string; onNavig
     return skills.filter((s) => !s.agent_id || s.agent_id === task.agent_id)
   }, [skills, task.agent_id])
 
-  // Subtasks and parent task
-  const subtasks = useMemo(() => {
-    if (!task) return []
-    return tasks.filter((t) => t.parent_task_id === task.id)
-  }, [tasks, task])
+  // Subtasks and parent task — use targeted selectors to avoid re-renders on unrelated task changes
+  const subtasks = useTaskStore((s) => task ? s.tasks.filter((t) => t.parent_task_id === task.id) : [])
 
-  const parentTask = useMemo(() => {
+  const parentTask = useTaskStore((s) => {
     if (!task?.parent_task_id) return null
-    return tasks.find((t) => t.id === task.parent_task_id) || null
-  }, [tasks, task?.parent_task_id])
+    return s.tasks.find((t) => t.id === task.parent_task_id) || null
+  })
 
   return (
     <div className="flex flex-col h-full">
