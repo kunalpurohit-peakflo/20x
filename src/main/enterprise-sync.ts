@@ -40,10 +40,33 @@ const WORKFLO_SKILL_PREFIX = '[Workflo] '
 // ── Sync Manager ────────────────────────────────────────────────────────
 
 export class EnterpriseSyncManager {
+  private migrationChecked = false
+
   constructor(
     private db: DatabaseManager,
     private apiClient: WorkfloApiClient
   ) {}
+
+  /**
+   * Ensure the enterprise_skill_id column exists before syncing.
+   * This is a safety net in case the database migration didn't run.
+   */
+  private ensureSkillColumn(): void {
+    if (this.migrationChecked) return
+    try {
+      const columns = this.db.db.pragma('table_info(skills)') as { name: string }[]
+      const hasColumn = columns.some((c) => c.name === 'enterprise_skill_id')
+      if (!hasColumn) {
+        console.log('[EnterpriseSyncManager] Adding missing enterprise_skill_id column to skills table')
+        this.db.db.exec(
+          'ALTER TABLE skills ADD COLUMN enterprise_skill_id TEXT DEFAULT NULL'
+        )
+      }
+      this.migrationChecked = true
+    } catch (err) {
+      console.error('[EnterpriseSyncManager] Failed to ensure skill column:', err)
+    }
+  }
 
   /**
    * Full sync: fetch org nodes, find user's nodes, sync all resources
@@ -58,6 +81,9 @@ export class EnterpriseSyncManager {
     }
 
     try {
+      // 0. Ensure enterprise_skill_id column exists (safety net for missed migration)
+      this.ensureSkillColumn()
+
       // 1. Fetch all org nodes
       const nodes = await this.apiClient.listOrgNodes()
 
@@ -82,6 +108,19 @@ export class EnterpriseSyncManager {
 
       // 3. Skills 2-way sync
       try {
+        // Step 0: Clean up server-side duplicates (one-time fix for prior sync bugs)
+        try {
+          const cleanup = await this.apiClient.cleanupDuplicateSkills()
+          if (cleanup.deleted > 0) {
+            console.log(
+              `[EnterpriseSyncManager] Cleaned up ${cleanup.deleted} duplicate server skills, kept ${cleanup.kept}`
+            )
+          }
+        } catch (cleanupErr) {
+          // Non-fatal — endpoint may not exist yet on older servers
+          console.log('[EnterpriseSyncManager] Cleanup endpoint not available, skipping')
+        }
+
         // Step A: Push local skills to server
         const pushedSkillIds = await this.pushLocalSkills(result)
 

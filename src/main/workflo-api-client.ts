@@ -300,6 +300,17 @@ export class WorkfloApiClient {
     return result
   }
 
+  /**
+   * Clean up duplicate skills on the server (keeps oldest per name)
+   */
+  async cleanupDuplicateSkills(): Promise<{ deleted: number; kept: number }> {
+    const result = (await this.auth.apiRequest(
+      'POST',
+      '/api/skills/cleanup-duplicates'
+    )) as { deleted: number; kept: number }
+    return result
+  }
+
   // ── Org Nodes (update) ──────────────────────────────────────────────
 
   /**
