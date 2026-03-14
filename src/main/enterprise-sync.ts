@@ -94,6 +94,10 @@ export class EnterpriseSyncManager {
         // Step C: Pull server skills back (picks up skills from other nodes)
         // Re-fetch to include any skills we just created
         const freshServerSkills = await this.apiClient.listSkills() ?? []
+        console.log(
+          `[EnterpriseSyncManager] pullServerSkills: ${freshServerSkills.length} server skills fetched`,
+          freshServerSkills.map((s) => ({ id: s.id, name: s.name }))
+        )
         if (freshServerSkills.length > 0) {
           await this.pullServerSkills(freshServerSkills, result)
         } else {
@@ -211,6 +215,11 @@ export class EnterpriseSyncManager {
   ): Promise<string[]> {
     const localSkills = this.db.getSkills()
     const serverSkillIds: string[] = []
+
+    console.log(
+      `[EnterpriseSyncManager] pushLocalSkills: ${localSkills.length} local skills found`,
+      localSkills.map((s) => ({ name: s.name, enterprise_skill_id: s.enterprise_skill_id }))
+    )
 
     for (const skill of localSkills) {
       try {
