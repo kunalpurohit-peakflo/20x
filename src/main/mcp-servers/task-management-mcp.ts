@@ -217,6 +217,17 @@ const mastermindTools = [
       },
       required: ['parent_task_id']
     }
+  },
+  {
+    name: 'get_subtask_transcript',
+    description: 'Get the conversation transcript (agent dialog) of a subtask. Returns the role and text of each message in the agent session. Use this to review what a subtask agent discussed, decided, or produced before completing the parent task.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'Subtask ID whose transcript to retrieve' }
+      },
+      required: ['task_id']
+    }
   }
 ]
 
@@ -418,9 +429,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params as { name: string; arguments?: Record<string, unknown> }
 
   try {
-    const result = isScoped
-      ? await handleScopedCall(name, args || {}) as Record<string, unknown> | null
-      : await callApi(`/${name}`, args || {}) as Record<string, unknown> | null
+    let result: Record<string, unknown> | null
+    if (isScoped) {
+      result = await handleScopedCall(name, args || {}) as Record<string, unknown> | null
+    } else if (name === 'get_subtask_transcript') {
+      // Map mastermind tool name to the API route
+      result = await callApi('/get_session_transcript', args || {}) as Record<string, unknown> | null
+    } else {
+      result = await callApi(`/${name}`, args || {}) as Record<string, unknown> | null
+    }
 
     if (result?.error) {
       return {
