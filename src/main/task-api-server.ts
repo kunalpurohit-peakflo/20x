@@ -241,6 +241,7 @@ async function handleRoute(db: DatabaseManager, route: string, params: Record<st
       if (params.agent_id !== undefined) { updates.push('agent_id = ?'); qParams.push(params.agent_id) }
       if (params.repos !== undefined) { updates.push('repos = ?'); qParams.push(JSON.stringify(params.repos)) }
       if (params.priority) { updates.push('priority = ?'); qParams.push(params.priority) }
+      if (params.output_fields !== undefined) { updates.push('output_fields = ?'); qParams.push(JSON.stringify(params.output_fields)) }
 
       if (updates.length === 0) return { error: 'No updates provided' }
 
@@ -485,9 +486,11 @@ async function handleRoute(db: DatabaseManager, route: string, params: Record<st
       ).get(params.parent_task_id) as { max_order: number }
       const nextSortOrder = maxOrderRow.max_order + 1
 
+      const outputFields = params.output_fields ? JSON.stringify(params.output_fields) : '[]'
+
       rawDb.prepare(`
         INSERT INTO tasks (id, title, description, type, priority, status, assignee, due_date, labels, attachments, repos, output_fields, source, agent_id, skill_ids, parent_task_id, sort_order, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, 'not_started', '', NULL, ?, '[]', ?, '[]', 'local', ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, 'not_started', '', NULL, ?, '[]', ?, ?, 'local', ?, ?, ?, ?, ?, ?)
       `).run(
         subtaskId,
         params.title,
@@ -496,6 +499,7 @@ async function handleRoute(db: DatabaseManager, route: string, params: Record<st
         params.priority || parentTask.priority || 'medium',
         JSON.stringify(params.labels || []),
         repos,
+        outputFields,
         params.agent_id || null,
         params.skill_ids ? JSON.stringify(params.skill_ids) : null,
         params.parent_task_id,
