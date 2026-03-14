@@ -306,10 +306,19 @@ export class EnterpriseSyncManager {
     try {
       // Get current node to merge with existing skillIds
       const detail = await this.apiClient.getOrgNode(nodeId)
-      const existingSkillIds = detail.node.skillIds || []
+      const existingSkillIds = detail.node?.skillIds || []
+
+      console.log(
+        `[EnterpriseSyncManager] assignSkillsToNode: node=${nodeId}, existing=${JSON.stringify(existingSkillIds)}, pushed=${JSON.stringify(pushedSkillIds)}`
+      )
 
       // Merge: keep existing IDs that aren't from our push, add our pushed IDs
       const mergedIds = [...new Set([...existingSkillIds, ...pushedSkillIds])]
+
+      if (mergedIds.length === 0) {
+        console.log('[EnterpriseSyncManager] No skills to assign — skipping updateOrgNode')
+        return
+      }
 
       await this.apiClient.updateOrgNode(nodeId, {
         skillIds: mergedIds
