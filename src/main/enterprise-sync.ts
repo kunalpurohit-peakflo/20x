@@ -41,6 +41,10 @@ const WORKFLO_SKILL_PREFIX = '[Workflo] '
 
 export class EnterpriseSyncManager {
   private migrationChecked = false
+  private syncInProgress: Promise<EnterpriseSyncResult> | null = null
+  private lastSyncTime = 0
+  // Minimum interval between full syncs (30 seconds)
+  private static readonly SYNC_COOLDOWN_MS = 30_000
 
   constructor(
     private db: DatabaseManager,
@@ -79,6 +83,35 @@ export class EnterpriseSyncManager {
    * Full sync: fetch org nodes, find user's nodes, sync all resources
    */
   async syncAll(userId: string): Promise<EnterpriseSyncResult> {
+    // Deduplicate concurrent/rapid calls — return existing promise if sync is in progress
+    if (this.syncInProgress) {
+      console.log('[EnterpriseSyncManager] Sync already in progress, reusing existing run')
+      return this.syncInProgress
+    }
+
+    // Cooldown — skip if we just synced recently
+    const now = Date.now()
+    if (now - this.lastSyncTime < EnterpriseSyncManager.SYNC_COOLDOWN_MS) {
+      console.log('[EnterpriseSyncManager] Skipping sync — cooldown active (last sync was', Math.round((now - this.lastSyncTime) / 1000), 's ago)')
+      return {
+        agents: { created: 0, updated: 0 },
+        skills: { created: 0, updated: 0, pushed: 0 },
+        mcpServers: { created: 0, updated: 0 },
+        taskSources: { created: 0, updated: 0 },
+        errors: []
+      }
+    }
+
+    this.syncInProgress = this._doSync(userId)
+    try {
+      return await this.syncInProgress
+    } finally {
+      this.syncInProgress = null
+      this.lastSyncTime = Date.now()
+    }
+  }
+
+  private async _doSync(userId: string): Promise<EnterpriseSyncResult> {
     const result: EnterpriseSyncResult = {
       agents: { created: 0, updated: 0 },
       skills: { created: 0, updated: 0, pushed: 0 },
