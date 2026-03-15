@@ -378,7 +378,7 @@ export class EnterpriseSyncManager {
           }
           if (usesDelta > 0) {
             updatePayload.usesDelta = usesDelta
-            updatePayload.lastUsed = skill.last_used
+            updatePayload.lastUsed = this.normalizeDateTime(skill.last_used)
           }
 
           const serverSkill = await this.apiClient.updateSkill(
@@ -426,7 +426,7 @@ export class EnterpriseSyncManager {
               }
               if (usesDelta > 0) {
                 updatePayload.usesDelta = usesDelta
-                updatePayload.lastUsed = skill.last_used
+                updatePayload.lastUsed = this.normalizeDateTime(skill.last_used)
               }
               await this.apiClient.updateSkill(
                 existingServer.id,
@@ -443,7 +443,7 @@ export class EnterpriseSyncManager {
               confidence: skill.confidence,
               tags: skill.tags,
               uses: skill.uses,
-              lastUsed: skill.last_used
+              lastUsed: this.normalizeDateTime(skill.last_used)
             })
 
             // Store the server ID and sync baseline locally
@@ -616,6 +616,23 @@ export class EnterpriseSyncManager {
   private isBuiltInSkill(skill: SkillRecord): boolean {
     const builtInNames = ['Mastermind', 'mastermind']
     return builtInNames.includes(skill.name)
+  }
+
+  /**
+   * Normalize a date string to ISO 8601 datetime format.
+   * SQLite may store dates as "2026-03-14" without time — the server
+   * schema requires full datetime format like "2026-03-14T00:00:00.000Z".
+   */
+  private normalizeDateTime(value: string | null): string | null {
+    if (!value) return null
+    // Already has time component
+    if (value.includes('T')) return value
+    // Date-only (e.g. "2026-03-14") → append midnight UTC
+    try {
+      return new Date(value).toISOString()
+    } catch {
+      return null
+    }
   }
 
   /**
