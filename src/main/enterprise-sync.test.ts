@@ -56,7 +56,8 @@ function makeOrgNode(overrides: Partial<WorkfloOrgNode> = {}): WorkfloOrgNode {
 // ── Test Suite ────────────────────────────────────────────────────────────
 
 describe('EnterpriseSyncManager — Skills 2-Way Sync', () => {
-  let mockDb: Record<string, ReturnType<typeof vi.fn>>
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let mockDb: any
   let mockApiClient: Record<string, ReturnType<typeof vi.fn>>
   let syncManager: EnterpriseSyncManager
 
