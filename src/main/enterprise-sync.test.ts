@@ -118,7 +118,9 @@ describe('EnterpriseSyncManager — Skills 2-Way Sync', () => {
         description: 'A test skill',
         content: '# Test',
         confidence: 0.8,
-        tags: ['test']
+        tags: ['test'],
+        uses: 5,
+        lastUsed: '2026-03-10T00:00:00Z'
       })
 
       // Should store the server ID locally

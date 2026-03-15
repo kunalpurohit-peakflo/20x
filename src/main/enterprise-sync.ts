@@ -349,7 +349,9 @@ export class EnterpriseSyncManager {
                 description: skill.description,
                 content: skill.content,
                 confidence: skill.confidence,
-                tags: skill.tags
+                tags: skill.tags,
+                uses: skill.uses,
+                lastUsed: skill.last_used
               })
               this.db.updateSkill(skill.id, { enterprise_skill_id: created.id })
               serverSkillIds.push(created.id)
@@ -365,7 +367,9 @@ export class EnterpriseSyncManager {
             description: skill.description,
             content: skill.content,
             confidence: skill.confidence,
-            tags: skill.tags
+            tags: skill.tags,
+            uses: skill.uses,
+            lastUsed: skill.last_used
           })
 
           // Store the server ID locally for future syncs
