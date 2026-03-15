@@ -121,16 +121,16 @@ export class EnterpriseSyncManager {
           console.log('[EnterpriseSyncManager] Cleanup endpoint not available, skipping')
         }
 
-        // Step A0: Delete skills on server that were deleted locally
-        await this.deleteLocallyRemovedSkills(result)
+        // Step A0: Collect locally-deleted skill IDs (to exclude from node assignment)
+        const removedSkillIds = this.getLocallyRemovedSkillIds()
 
         // Step A: Push local skills to server
         const pushedSkillIds = await this.pushLocalSkills(result)
 
-        // Step B: Assign all skill IDs to user's node(s)
+        // Step B: Assign all skill IDs to user's node(s), excluding locally-deleted ones
         const targetNodes = userNodes.length > 0 ? userNodes : nodes
         for (const node of targetNodes) {
-          await this.assignSkillsToNode(node.id, pushedSkillIds, result)
+          await this.assignSkillsToNode(node.id, pushedSkillIds, removedSkillIds, result)
         }
 
         // Step C: Pull server skills back (picks up skills from other nodes)
@@ -245,34 +245,29 @@ export class EnterpriseSyncManager {
   // ── Skill 2-Way Sync ───────────────────────────────────────────────
 
   /**
-   * Delete skills on the server that were soft-deleted locally.
-   * After successful server deletion, hard-delete the local row.
+   * Collect enterprise skill IDs that were soft-deleted locally.
+   * These should be unassigned from the node (but NOT deleted from server).
+   * Hard-deletes the local rows after collecting.
    */
-  private async deleteLocallyRemovedSkills(
-    result: EnterpriseSyncResult
-  ): Promise<void> {
+  private getLocallyRemovedSkillIds(): Set<string> {
     const deletedSkills = this.db.getDeletedEnterpriseSkills()
-    if (deletedSkills.length === 0) return
-
-    console.log(
-      `[EnterpriseSyncManager] Deleting ${deletedSkills.length} locally-removed skills from server`
-    )
+    const removedIds = new Set<string>()
 
     for (const skill of deletedSkills) {
-      try {
-        await this.apiClient.deleteSkill(skill.enterprise_skill_id!)
-        // Hard-delete locally now that server is cleaned up
-        this.db.hardDeleteSkill(skill.id)
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        // 404 means already gone on server — still clean up locally
-        if (msg.includes('404') || msg.includes('not found') || msg.includes('Not Found')) {
-          this.db.hardDeleteSkill(skill.id)
-        } else {
-          result.errors.push(`Delete skill ${skill.name} from server: ${msg}`)
-        }
+      if (skill.enterprise_skill_id) {
+        removedIds.add(skill.enterprise_skill_id)
       }
+      // Hard-delete locally — the skill stays on server but won't be assigned to this node
+      this.db.hardDeleteSkill(skill.id)
     }
+
+    if (removedIds.size > 0) {
+      console.log(
+        `[EnterpriseSyncManager] ${removedIds.size} locally-deleted skills will be unassigned from node`
+      )
+    }
+
+    return removedIds
   }
 
   /**
@@ -337,7 +332,9 @@ export class EnterpriseSyncManager {
                 description: skill.description,
                 content: skill.content,
                 confidence: skill.confidence,
-                tags: skill.tags
+                tags: skill.tags,
+                uses: skill.uses,
+                lastUsed: skill.last_used
               }
             )
             serverSkillIds.push(serverSkill.id)
@@ -396,6 +393,7 @@ export class EnterpriseSyncManager {
   private async assignSkillsToNode(
     nodeId: string,
     pushedSkillIds: string[],
+    removedSkillIds: Set<string>,
     result: EnterpriseSyncResult
   ): Promise<void> {
     try {
@@ -406,14 +404,16 @@ export class EnterpriseSyncManager {
       // Get current node and filter existing IDs to only valid ones
       const detail = await this.apiClient.getOrgNode(nodeId)
       const existingSkillIds = (detail.node?.skillIds || []).filter(
-        (id) => validSkillIds.has(id)
+        (id) => validSkillIds.has(id) && !removedSkillIds.has(id)
       )
 
       // Merge: existing valid IDs + newly pushed IDs, deduplicated
-      const mergedIds = [...new Set([...existingSkillIds, ...pushedSkillIds])]
+      // Also exclude removed IDs from pushed (shouldn't happen but be safe)
+      const filteredPushed = pushedSkillIds.filter((id) => !removedSkillIds.has(id))
+      const mergedIds = [...new Set([...existingSkillIds, ...filteredPushed])]
 
       console.log(
-        `[EnterpriseSyncManager] assignSkillsToNode: node=${nodeId}, validExisting=${existingSkillIds.length}, pushed=${pushedSkillIds.length}, merged=${mergedIds.length}`
+        `[EnterpriseSyncManager] assignSkillsToNode: node=${nodeId}, validExisting=${existingSkillIds.length}, pushed=${filteredPushed.length}, removed=${removedSkillIds.size}, merged=${mergedIds.length}`
       )
 
       // Always update to clean up stale references even if pushedSkillIds is empty

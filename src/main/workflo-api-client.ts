@@ -290,6 +290,8 @@ export class WorkfloApiClient {
       content?: string
       confidence?: number
       tags?: string[]
+      uses?: number
+      lastUsed?: string | null
     }
   ): Promise<WorkfloSkill> {
     const result = (await this.auth.apiRequest(
