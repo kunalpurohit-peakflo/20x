@@ -2301,6 +2301,27 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
     return row ? deserializeSkill(row) : undefined
   }
 
+  /**
+   * Get skills that were deleted locally but had an enterprise link.
+   * Used to propagate deletions to the server during sync.
+   */
+  getDeletedEnterpriseSkills(): SkillRecord[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM skills WHERE is_deleted = 1 AND enterprise_skill_id IS NOT NULL'
+    ).all() as SkillRow[]
+    return rows.map(deserializeSkill)
+  }
+
+  /**
+   * Hard-delete a skill row (permanent removal after server sync).
+   */
+  hardDeleteSkill(id: string): boolean {
+    const result = this.db.prepare(
+      'DELETE FROM skills WHERE id = ?'
+    ).run(id)
+    return result.changes > 0
+  }
+
   deleteSkill(id: string): boolean {
     const result = this.db.prepare(
       'UPDATE skills SET is_deleted = 1, updated_at = ? WHERE id = ? AND is_deleted = 0'

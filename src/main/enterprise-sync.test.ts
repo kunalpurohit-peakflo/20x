@@ -62,13 +62,19 @@ describe('EnterpriseSyncManager — Skills 2-Way Sync', () => {
 
   beforeEach(() => {
     mockDb = {
+      db: {
+        pragma: vi.fn().mockReturnValue([{ name: 'enterprise_skill_id' }]),
+        exec: vi.fn()
+      },
       getSkills: vi.fn().mockReturnValue([]),
       getSkill: vi.fn(),
       getSkillByName: vi.fn().mockReturnValue(undefined),
       getSkillByEnterpriseId: vi.fn().mockReturnValue(undefined),
+      getDeletedEnterpriseSkills: vi.fn().mockReturnValue([]),
       createSkill: vi.fn().mockImplementation((data) => ({ id: 'new-local-id', ...data })),
       updateSkill: vi.fn().mockImplementation((id, data) => ({ id, ...data })),
       deleteSkill: vi.fn(),
+      hardDeleteSkill: vi.fn().mockReturnValue(true),
       getAgents: vi.fn().mockReturnValue([]),
       createAgent: vi.fn(),
       updateAgent: vi.fn(),
@@ -89,7 +95,9 @@ describe('EnterpriseSyncManager — Skills 2-Way Sync', () => {
       listSkills: vi.fn().mockResolvedValue([]),
       createSkill: vi.fn().mockResolvedValue(makeServerSkill()),
       updateSkill: vi.fn().mockResolvedValue(makeServerSkill()),
-      updateOrgNode: vi.fn().mockResolvedValue(makeOrgNode())
+      deleteSkill: vi.fn().mockResolvedValue(undefined),
+      updateOrgNode: vi.fn().mockResolvedValue(makeOrgNode()),
+      cleanupDuplicateSkills: vi.fn().mockResolvedValue({ deleted: 0, kept: 0 })
     }
 
     syncManager = new EnterpriseSyncManager(mockDb as never, mockApiClient as never)

@@ -301,6 +301,13 @@ export class WorkfloApiClient {
   }
 
   /**
+   * Delete a skill from the server
+   */
+  async deleteSkill(skillId: string): Promise<void> {
+    await this.auth.apiRequest('DELETE', `/api/skills/${skillId}`)
+  }
+
+  /**
    * Clean up duplicate skills on the server (keeps oldest per name)
    */
   async cleanupDuplicateSkills(): Promise<{ deleted: number; kept: number }> {

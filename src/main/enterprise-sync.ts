@@ -121,6 +121,9 @@ export class EnterpriseSyncManager {
           console.log('[EnterpriseSyncManager] Cleanup endpoint not available, skipping')
         }
 
+        // Step A0: Delete skills on server that were deleted locally
+        await this.deleteLocallyRemovedSkills(result)
+
         // Step A: Push local skills to server
         const pushedSkillIds = await this.pushLocalSkills(result)
 
@@ -240,6 +243,37 @@ export class EnterpriseSyncManager {
   }
 
   // ── Skill 2-Way Sync ───────────────────────────────────────────────
+
+  /**
+   * Delete skills on the server that were soft-deleted locally.
+   * After successful server deletion, hard-delete the local row.
+   */
+  private async deleteLocallyRemovedSkills(
+    result: EnterpriseSyncResult
+  ): Promise<void> {
+    const deletedSkills = this.db.getDeletedEnterpriseSkills()
+    if (deletedSkills.length === 0) return
+
+    console.log(
+      `[EnterpriseSyncManager] Deleting ${deletedSkills.length} locally-removed skills from server`
+    )
+
+    for (const skill of deletedSkills) {
+      try {
+        await this.apiClient.deleteSkill(skill.enterprise_skill_id!)
+        // Hard-delete locally now that server is cleaned up
+        this.db.hardDeleteSkill(skill.id)
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        // 404 means already gone on server — still clean up locally
+        if (msg.includes('404') || msg.includes('not found') || msg.includes('Not Found')) {
+          this.db.hardDeleteSkill(skill.id)
+        } else {
+          result.errors.push(`Delete skill ${skill.name} from server: ${msg}`)
+        }
+      }
+    }
+  }
 
   /**
    * Push local skills to the server. Returns array of server skill IDs
