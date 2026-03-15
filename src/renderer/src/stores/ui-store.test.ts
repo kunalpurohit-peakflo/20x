@@ -13,6 +13,7 @@ describe('useUIStore', () => {
       sortField: 'created_at',
       sortDirection: 'desc',
       searchQuery: '',
+      skillSearchQuery: '',
       activeModal: null,
       editingTaskId: null,
       deletingTaskId: null,
@@ -29,6 +30,7 @@ describe('useUIStore', () => {
     expect(state.sortField).toBe('created_at')
     expect(state.sortDirection).toBe('desc')
     expect(state.searchQuery).toBe('')
+    expect(state.skillSearchQuery).toBe('')
     expect(state.activeModal).toBeNull()
     expect(state.editingTaskId).toBeNull()
     expect(state.deletingTaskId).toBeNull()
@@ -59,6 +61,40 @@ describe('useUIStore', () => {
     expect(useUIStore.getState().sortField).toBe('priority')
   })
 
+  it('setSortField auto-sets desc direction for priority', () => {
+    useUIStore.getState().setSortDirection('asc') // start with asc
+    useUIStore.getState().setSortField('priority')
+    expect(useUIStore.getState().sortDirection).toBe('desc')
+  })
+
+  it('setSortField auto-sets desc direction for status', () => {
+    useUIStore.getState().setSortField('title') // asc
+    useUIStore.getState().setSortField('status')
+    expect(useUIStore.getState().sortDirection).toBe('desc')
+  })
+
+  it('setSortField auto-sets asc direction for title', () => {
+    useUIStore.getState().setSortField('title')
+    expect(useUIStore.getState().sortDirection).toBe('asc')
+  })
+
+  it('setSortField auto-sets asc direction for due_date', () => {
+    useUIStore.getState().setSortField('due_date')
+    expect(useUIStore.getState().sortDirection).toBe('asc')
+  })
+
+  it('setSortField auto-sets desc direction for created_at', () => {
+    useUIStore.getState().setSortDirection('asc')
+    useUIStore.getState().setSortField('created_at')
+    expect(useUIStore.getState().sortDirection).toBe('desc')
+  })
+
+  it('setSortField auto-sets desc direction for updated_at', () => {
+    useUIStore.getState().setSortDirection('asc')
+    useUIStore.getState().setSortField('updated_at')
+    expect(useUIStore.getState().sortDirection).toBe('desc')
+  })
+
   it('setSortDirection updates direction', () => {
     useUIStore.getState().setSortDirection('asc')
     expect(useUIStore.getState().sortDirection).toBe('asc')
@@ -67,6 +103,11 @@ describe('useUIStore', () => {
   it('setSearchQuery updates query', () => {
     useUIStore.getState().setSearchQuery('bug fix')
     expect(useUIStore.getState().searchQuery).toBe('bug fix')
+  })
+
+  it('setSkillSearchQuery updates skill search query', () => {
+    useUIStore.getState().setSkillSearchQuery('testing')
+    expect(useUIStore.getState().skillSearchQuery).toBe('testing')
   })
 
   describe('modals', () => {

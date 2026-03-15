@@ -1,7 +1,7 @@
 import { useMemo, useCallback, useState } from 'react'
 import { TaskStatus } from '@shared/constants'
 import { CollapsibleDescription } from '../components/CollapsibleDescription'
-import { useTaskStore } from '../stores/task-store'
+import { useTaskStore, type Task } from '../stores/task-store'
 import { useAgentStore, SessionStatus } from '../stores/agent-store'
 import { api } from '../api/client'
 import { useSessionControls } from '../hooks/useSessionControls'
@@ -9,7 +9,7 @@ import { Badge } from '../components/Badge'
 import { PriorityBadge } from '../components/PriorityBadge'
 import { TaskStatusDot } from '../components/TaskStatusDot'
 import { MessageBubble } from '../components/MessageBubble'
-import { cn, formatDate, isOverdue, formatRelativeDate, formatRelativeFuture, STATUS_VARIANT } from '../lib/utils'
+import { cn, formatDate, isOverdue, formatRelativeDate, formatRelativeFuture, STATUS_VARIANT, STATUS_DOT_COLORS } from '../lib/utils'
 import type { Route } from '../App'
 
 export function TaskDetailPage({ taskId, onNavigate }: { taskId: string; onNavigate: (route: Route) => void }) {
@@ -157,10 +157,18 @@ export function TaskDetailPage({ taskId, onNavigate }: { taskId: string; onNavig
     return skills.filter((s) => !s.agent_id || s.agent_id === task.agent_id)
   }, [skills, task.agent_id])
 
+  // Subtasks and parent task — use targeted selectors to avoid re-renders on unrelated task changes
+  const subtasks = useTaskStore((s) => task ? s.tasks.filter((t) => t.parent_task_id === task.id) : [])
+
+  const parentTask = useTaskStore((s) => {
+    if (!task?.parent_task_id) return null
+    return s.tasks.find((t) => t.id === task.parent_task_id) || null
+  })
+
   return (
     <div className="flex flex-col h-full">
       <Header
-        onBack={() => onNavigate({ page: 'list' })}
+        onBack={() => parentTask ? onNavigate({ page: 'detail', taskId: parentTask.id }) : onNavigate({ page: 'list' })}
         title={task.title}
         rightAction={
           <button
@@ -176,6 +184,19 @@ export function TaskDetailPage({ taskId, onNavigate }: { taskId: string; onNavig
       />
 
       <div className="flex-1 overflow-y-auto">
+        {/* Parent task breadcrumb */}
+        {parentTask && (
+          <button
+            onClick={() => onNavigate({ page: 'detail', taskId: parentTask.id })}
+            className="flex items-center gap-1.5 px-4 py-2 text-xs text-muted-foreground active:opacity-60 border-b border-border/30"
+          >
+            <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="m15 18-6-6 6-6" />
+            </svg>
+            {parentTask.title}
+          </button>
+        )}
+
         {/* Badges bar — matches desktop TaskDetailView header */}
         <div className="flex items-center gap-2.5 px-4 py-3 border-b border-border flex-wrap">
           <TaskStatusDot status={task.status} />
@@ -426,6 +447,14 @@ export function TaskDetailPage({ taskId, onNavigate }: { taskId: string; onNavig
           </div>
         </div>
 
+        {/* Subtasks — shown for parent tasks (not subtasks themselves) */}
+        {!task.parent_task_id && subtasks.length > 0 && (
+          <SubtasksSection
+            subtasks={subtasks}
+            onNavigateToTask={(id) => onNavigate({ page: 'detail', taskId: id })}
+          />
+        )}
+
         {/* Transcript — always show link when agent is assigned */}
         {task.agent_id && (
           <div className="px-4 py-3">
@@ -469,6 +498,41 @@ export function TaskDetailPage({ taskId, onNavigate }: { taskId: string; onNavig
           onSkip={handleFeedbackSkip}
         />
       )}
+    </div>
+  )
+}
+
+function SubtasksSection({ subtasks, onNavigateToTask }: { subtasks: Task[]; onNavigateToTask: (taskId: string) => void }) {
+  const completedCount = subtasks.filter(s => s.status === TaskStatus.Completed).length
+
+  return (
+    <div className="px-4 py-3 border-b border-border">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
+          <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M3 6h18"/><path d="M7 12h10"/><path d="M10 18h4"/>
+          </svg>
+          Subtasks
+          <span className="text-[10px] tabular-nums">({completedCount}/{subtasks.length})</span>
+        </span>
+      </div>
+      <div className="rounded-md border border-border divide-y divide-border">
+        {subtasks.map((subtask) => (
+          <button
+            key={subtask.id}
+            onClick={() => onNavigateToTask(subtask.id)}
+            className="w-full flex items-center gap-3 px-3 py-2.5 text-left active:bg-accent/50 transition-colors"
+          >
+            <div className={cn('h-1.5 w-1.5 rounded-full shrink-0', STATUS_DOT_COLORS[subtask.status] || 'bg-muted-foreground')} />
+            <div className="min-w-0 flex-1">
+              <div className="text-sm truncate">{subtask.title}</div>
+            </div>
+            <svg className="h-3.5 w-3.5 text-muted-foreground shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="m9 18 6-6-6-6" />
+            </svg>
+          </button>
+        ))}
+      </div>
     </div>
   )
 }

@@ -15,6 +15,7 @@ interface UIState {
   sortField: SortField
   sortDirection: SortDirection
   searchQuery: string
+  skillSearchQuery: string
   activeModal: ActiveModal
   editingTaskId: string | null
   deletingTaskId: string | null
@@ -27,6 +28,7 @@ interface UIState {
   setSortField: (field: SortField) => void
   setSortDirection: (dir: SortDirection) => void
   setSearchQuery: (query: string) => void
+  setSkillSearchQuery: (query: string) => void
   setSettingsTab: (tab: SettingsTab) => void
   openCreateModal: () => void
   openEditModal: (taskId: string) => void
@@ -43,6 +45,7 @@ export const useUIStore = create<UIState>((set) => ({
   sortField: 'created_at',
   sortDirection: 'desc',
   searchQuery: '',
+  skillSearchQuery: '',
   activeModal: null,
   editingTaskId: null,
   deletingTaskId: null,
@@ -52,9 +55,21 @@ export const useUIStore = create<UIState>((set) => ({
   setStatusFilter: (statusFilter) => set({ statusFilter }),
   setPriorityFilter: (priorityFilter) => set({ priorityFilter }),
   setSourceFilter: (sourceFilter) => set({ sourceFilter }),
-  setSortField: (sortField) => set({ sortField }),
+  setSortField: (sortField) => {
+    // Auto-set the most intuitive sort direction for each field
+    const FIELD_DEFAULT_DIRECTION: Record<SortField, SortDirection> = {
+      priority: 'desc',     // critical first
+      status: 'desc',       // active/working first
+      created_at: 'desc',   // newest first
+      updated_at: 'desc',   // recently updated first
+      due_date: 'asc',      // soonest deadline first
+      title: 'asc'          // A-Z
+    }
+    set({ sortField, sortDirection: FIELD_DEFAULT_DIRECTION[sortField] })
+  },
   setSortDirection: (sortDirection) => set({ sortDirection }),
   setSearchQuery: (searchQuery) => set({ searchQuery }),
+  setSkillSearchQuery: (skillSearchQuery) => set({ skillSearchQuery }),
   setSettingsTab: (settingsTab) => set({ settingsTab }),
 
   openCreateModal: () => set({ activeModal: 'create', editingTaskId: null }),

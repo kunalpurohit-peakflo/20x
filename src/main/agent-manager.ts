@@ -243,7 +243,7 @@ export class AgentManager extends EventEmitter {
    * Builds MCP servers config for adapters (Claude Code, etc.)
    * Converts from database format to adapter format
    */
-  private async buildMcpServersForAdapter(agentId: string, opts?: { ensureTaskManagement?: boolean }): Promise<Record<string, McpServerConfig>> {
+  private async buildMcpServersForAdapter(agentId: string, opts?: { ensureTaskManagement?: boolean; taskScope?: { taskId: string; parentTaskId: string } }): Promise<Record<string, McpServerConfig>> {
     const agent = this.db.getAgent(agentId)
     const mcpEntries = agent?.config?.mcp_servers || []
     const result: Record<string, McpServerConfig> = {}
@@ -269,6 +269,10 @@ export class AgentManager extends EventEmitter {
             env = { ...env, TASK_API_URL: `http://127.0.0.1:${apiPort}` }
           } else {
             console.warn(`[AgentManager] buildMcpServersForAdapter - task API port is null for task-management server`)
+          }
+          // Inject task scope for subtask agents (restricts access to parent + siblings only)
+          if (opts?.taskScope) {
+            env = { ...env, TASK_SCOPE_PARENT_ID: opts.taskScope.parentTaskId, TASK_SCOPE_TASK_ID: opts.taskScope.taskId }
           }
         }
 
@@ -305,7 +309,11 @@ export class AgentManager extends EventEmitter {
         if (!apiPort) {
           console.warn('[AgentManager] buildMcpServersForAdapter - task API port is null! MCP server may fail to start')
         }
-        const env = { ...tmServer.environment, ...(apiPort ? { TASK_API_URL: `http://127.0.0.1:${apiPort}` } : {}) }
+        const env: Record<string, string> = { ...tmServer.environment, ...(apiPort ? { TASK_API_URL: `http://127.0.0.1:${apiPort}` } : {}) }
+        if (opts?.taskScope) {
+          env.TASK_SCOPE_PARENT_ID = opts.taskScope.parentTaskId
+          env.TASK_SCOPE_TASK_ID = opts.taskScope.taskId
+        }
         result['task-management'] = {
           type: 'stdio',
           command: tmServer.command,
@@ -331,7 +339,9 @@ export class AgentManager extends EventEmitter {
     const isMastermind = taskId === 'mastermind-session'
     const task = this.db.getTask(taskId)
     const isTriageSession = task?.status === TaskStatus.Triaging
-    const mcpServers = await this.buildMcpServersForAdapter(agentId, { ensureTaskManagement: isMastermind || isTriageSession })
+    const isSubtask = !!task?.parent_task_id
+    const taskScope = isSubtask && task?.parent_task_id ? { taskId, parentTaskId: task.parent_task_id } : undefined
+    const mcpServers = await this.buildMcpServersForAdapter(agentId, { ensureTaskManagement: isMastermind || isTriageSession || isSubtask, taskScope })
 
     const config: SessionConfig = {
       agentId,
@@ -981,15 +991,17 @@ export class AgentManager extends EventEmitter {
     // Write SKILL.md files to workspace (async to avoid blocking the event loop)
     await this.writeSkillFiles(taskId, agentId, workspaceDir)
 
-    // Check if this is a triage session
+    // Check if this is a triage session or subtask
     const task = this.db.getTask(taskId)
     const isTriageSession = task?.status === TaskStatus.Triaging
+    const isSubtask = !!task?.parent_task_id
+    const taskScope = isSubtask && task?.parent_task_id ? { taskId, parentTaskId: task.parent_task_id } : undefined
     await yieldEL()
 
     // Build MCP servers config for adapter
-    // Mastermind and triage sessions always get task-management access
+    // Mastermind, triage, and subtask sessions always get task-management access
     const isMastermind = taskId === 'mastermind-session'
-    const mcpServers = await this.buildMcpServersForAdapter(agentId, { ensureTaskManagement: isMastermind || isTriageSession })
+    const mcpServers = await this.buildMcpServersForAdapter(agentId, { ensureTaskManagement: isMastermind || isTriageSession || isSubtask, taskScope })
 
     // Build session config
     const sessionConfig: SessionConfig = {
@@ -1098,6 +1110,53 @@ export class AgentManager extends EventEmitter {
         promptText = currentTask
           ? `Work on task: "${currentTask.title}"\n\n${currentTask.description || ''}`
           : `Work on task: ${taskId}`
+
+        // Add subtask context: if this is a subtask, include parent and sibling info
+        if (currentTask?.parent_task_id) {
+          const parentTask = this.db.getTask(currentTask.parent_task_id)
+          if (parentTask) {
+            promptText += `\n\n## Parent Task Context\nThis is a subtask of: "${parentTask.title}" (id: ${parentTask.id})\nParent description: ${parentTask.description || '(none)'}\nParent status: ${parentTask.status}`
+            if (parentTask.output_fields && parentTask.output_fields.length > 0) {
+              promptText += '\nParent output fields:'
+              for (const field of parentTask.output_fields) {
+                const val = (field as unknown as { value?: string }).value ?? '(not set)'
+                promptText += `\n  - ${field.name}: ${val}`
+              }
+            }
+
+            // Include sibling subtasks for coordination
+            const siblings = this.db.getSubtasks(currentTask.parent_task_id)
+            const otherSubtasks = siblings.filter(s => s.id !== currentTask.id)
+            if (otherSubtasks.length > 0) {
+              promptText += '\n\n## Sibling Subtasks'
+              for (const sibling of otherSubtasks) {
+                const resolution = sibling.resolution ? ` | Resolution: ${sibling.resolution}` : ''
+                const outputSummary = sibling.output_fields && sibling.output_fields.length > 0
+                  ? ` | Outputs: ${sibling.output_fields.length} field(s)`
+                  : ''
+                promptText += `\n- "${sibling.title}" (id: ${sibling.id}, status: ${sibling.status}${resolution}${outputSummary})`
+              }
+              promptText += '\n\nCoordinate with sibling subtasks — avoid duplicating work and ensure compatibility.'
+              promptText += '\nUse `get_task` with a sibling ID to read its full output fields and resolution.'
+            }
+          }
+          promptText += '\n\nYou can call `list_subtasks` or `get_task` via the `task-management` MCP server at any time for live data on parent and sibling tasks.'
+          promptText += '\nIMPORTANT: For all task operations (update_task, get_task, list_subtasks), use ONLY the `task-management` MCP server tools. Do NOT use integration tools like `pf-workflo-integrations` — those are for external system sync only.'
+        }
+
+        // If this task has subtasks, mention them
+        if (currentTask) {
+          const subtasks = this.db.getSubtasks(currentTask.id)
+          if (subtasks.length > 0) {
+            promptText += '\n\n## Subtasks'
+            for (const sub of subtasks) {
+              const subResolution = sub.resolution ? ` | Resolution: ${sub.resolution}` : ''
+              promptText += `\n- "${sub.title}" (id: ${sub.id}, status: ${sub.status}, agent: ${sub.agent_id || 'unassigned'}${subResolution})`
+            }
+            promptText += '\n\nThis task has subtasks. Each subtask has its own agent. Focus on coordination and any work not covered by subtasks.'
+            promptText += '\nUse `list_subtasks` or `get_task` via MCP tools to check live subtask status and outputs.'
+          }
+        }
 
         // Append output field instructions
         if (currentTask?.output_fields && currentTask.output_fields.length > 0) {
@@ -1539,9 +1598,11 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
     const isMastermind = taskId === 'mastermind-session'
     const task = this.db.getTask(taskId)
     const isTriageSession = task?.status === TaskStatus.Triaging
+    const isSubtask = !!task?.parent_task_id
+    const taskScope = isSubtask && task?.parent_task_id ? { taskId, parentTaskId: task.parent_task_id } : undefined
     await yieldEL()
 
-    const mcpServers = await this.buildMcpServersForAdapter(agentId, { ensureTaskManagement: isMastermind || isTriageSession })
+    const mcpServers = await this.buildMcpServersForAdapter(agentId, { ensureTaskManagement: isMastermind || isTriageSession || isSubtask, taskScope })
 
     // Build system prompt with task context (survives context compaction)
     const baseSystemPrompt = agent.config?.system_prompt || ''
@@ -1611,6 +1672,17 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
         errorMessage.includes('Session no longer exists on server')
       ) {
         console.warn(`[AgentManager] Session not found or incompatible: ${adapterSessionId}`)
+
+        // For completed/review tasks, the session may have ended normally.
+        // Don't show the alarming "incompatible" dialog — just clear the session_id
+        // so the UI shows "Start" instead. This commonly happens with subtask sessions.
+        const currentTask = this.db.getTask(taskId)
+        if (currentTask && (currentTask.status === TaskStatus.ReadyForReview || currentTask.status === TaskStatus.Completed)) {
+          console.log(`[AgentManager] Session ended normally for ${currentTask.status} task ${taskId} — clearing session_id`)
+          this.db.updateTask(taskId, { session_id: null })
+          this.sendToRenderer('task:updated', { taskId, updates: { session_id: null } })
+          throw new Error('SESSION_ENDED')
+        }
 
         // Clear the old session_id in the database
         this.db.updateTask(taskId, { session_id: null })
@@ -1814,6 +1886,49 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
     // We use the polling entry's seenPartIds to reconstruct content
     // For simplicity, we store the last assistant text during polling
     return session.lastAssistantText ?? null
+  }
+
+  /**
+   * Get a summary transcript for a task's session.
+   * Returns assistant text messages suitable for sibling subtask coordination.
+   * Used by the task-api-server to serve transcript data to subtask MCP agents.
+   */
+  async getTranscriptForTask(taskId: string): Promise<Array<{ role: string; text: string }>> {
+    // Find the active session for this task
+    let session: AgentSession | undefined
+    for (const s of this.sessions.values()) {
+      if (s.taskId === taskId) {
+        session = s
+        break
+      }
+    }
+
+    if (!session?.adapter?.getAllMessages) {
+      return []
+    }
+
+    try {
+      const config: SessionConfig = {
+        agentId: session.agentId,
+        taskId: session.taskId,
+        workspaceDir: session.workspaceDir || this.db.getWorkspaceDir(taskId)
+      }
+      const messages = await session.adapter.getAllMessages(session.id, config)
+      // Return a simplified transcript with role + text content only
+      return messages
+        .filter(m => m.parts && m.parts.length > 0)
+        .map(m => ({
+          role: m.role,
+          text: m.parts
+            .filter(p => p.type === 'text')
+            .map(p => p.content || '')
+            .join('\n')
+        }))
+        .filter(m => m.text.length > 0)
+    } catch (err) {
+      console.error(`[AgentManager] Failed to get transcript for task ${taskId}:`, err)
+      return []
+    }
   }
 
   /**
@@ -2698,6 +2813,10 @@ Description: ${task.description || '(none)'}
 Type: ${task.type || 'general'}
 Current Priority: ${task.priority || 'medium'}
 Current Labels: ${JSON.stringify(task.labels || [])}
+Current Output Fields: ${JSON.stringify(task.output_fields || [])}
+Parent Task: ${task.parent_task_id ? `This is a subtask of task ${task.parent_task_id}` : 'None (top-level task)'}
+
+IMPORTANT: For ALL task operations below, use ONLY the \`task-management\` MCP server tools (e.g. \`mcp__task-management__update_task\`, \`mcp__task-management__create_subtask\`). Do NOT use integration/sync tools like \`pf-workflo-integrations\` for updating tasks — those are for external system sync only.
 
 Follow these steps:
 
@@ -2711,14 +2830,35 @@ Follow these steps:
    - Appropriate repos (if the task relates to specific repositories)
    - Priority (critical/high/medium/low) — adjust if the current priority seems wrong
    - Labels — suggest relevant labels based on similar tasks
-6. Call \`update_task\` ONCE with task_id "${task.id}" and all the values you determined. You MUST include agent_id.
+   - output_fields — define the expected structured outputs for this task. Think about what concrete deliverables or data the agent should produce. Each output field needs an id (snake_case), name (human-readable), and type (text, number, url, file, boolean, textarea, list, date, email, country, currency). Mark fields as required if they are essential. Examples:
+     - A coding task might have: { id: "pr_url", name: "Pull Request URL", type: "url", required: true }
+     - A research task might have: { id: "summary", name: "Summary", type: "textarea", required: true }
+     - A review task might have: { id: "approved", name: "Approved", type: "boolean", required: true }
+6. If the task is complex and clearly involves multiple distinct steps that would benefit from separate agents or sequential human review, create subtasks using \`create_subtask\` from the \`task-management\` MCP server. Each subtask should:
+   - Have a clear, specific title describing one step
+   - Be assigned to the most appropriate agent_id (REQUIRED for each subtask)
+   - Have relevant skill_ids assigned based on what skills match that subtask's work
+   - Have repos set to the repositories relevant to that subtask (inherits from parent if not specified)
+   - Include a description explaining the subtask's scope, expected output, and how it relates to other subtasks
+   - Have output_fields defined to specify what structured data the subtask agent should produce
+   - NOT overlap with other subtasks — each subtask should be a distinct, self-contained piece of work
+   Only create subtasks when clearly needed — simple tasks should remain as single tasks.
+   When creating subtasks, consider the order of execution and dependencies between them.
+   Each subtask will run as a separate agent session with access to the parent task and sibling subtask outputs for coordination.
+7. Call \`update_task\` ONCE with task_id "${task.id}" and all the values you determined. You MUST include agent_id and output_fields.
+   If you created subtasks, the parent task's agent will coordinate the overall work.
 
 Important:
-- You MUST assign an agent_id. If only one agent exists, assign that one.
+- You MUST assign an agent_id to the parent task. If only one agent exists, assign that one.
+- You MUST also assign an agent_id to each subtask you create.
 - Do NOT change the task status — it will be handled automatically.
 - Do NOT attempt to work on or solve the task. Only triage it.
 - If no similar tasks exist, use your best judgment based on the title, description, and type.
-- Be efficient — make your tool calls and finish quickly.`
+- Be efficient — make your tool calls and finish quickly.
+- If the task already has output_fields defined (from an external source), preserve them and only add additional fields if needed. Do not remove existing output fields.
+- When creating subtasks, the parent task's agent will coordinate — subtask agents handle individual pieces.
+- Subtask agents can see the parent task, all sibling subtasks' status/resolution/outputs, and sibling transcripts for coordination.
+- NEVER use external integration MCP tools (like pf-workflo-integrations) for local task updates — always use task-management tools.`
   }
 
   /**

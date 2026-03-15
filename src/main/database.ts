@@ -244,6 +244,8 @@ export interface TaskRow {
   heartbeat_interval_minutes: number | null
   heartbeat_last_check_at: string | null
   heartbeat_next_check_at: string | null
+  parent_task_id: string | null
+  sort_order: number
   created_at: string
   updated_at: string
 }
@@ -302,6 +304,8 @@ export interface TaskRecord {
   heartbeat_interval_minutes: number | null
   heartbeat_last_check_at: string | null
   heartbeat_next_check_at: string | null
+  parent_task_id: string | null
+  sort_order: number
   created_at: string
   updated_at: string
 }
@@ -337,6 +341,7 @@ export interface CreateTaskData {
   is_recurring?: boolean
   recurrence_pattern?: RecurrencePatternRecord | null
   recurrence_parent_id?: string | null
+  parent_task_id?: string | null
   /** Cron expression — if provided, sets is_recurring=true and stores as recurrence_pattern */
   cron?: string
 }
@@ -367,6 +372,8 @@ export interface UpdateTaskData {
   heartbeat_interval_minutes?: number | null
   heartbeat_last_check_at?: string | null
   heartbeat_next_check_at?: string | null
+  parent_task_id?: string | null
+  sort_order?: number
 }
 
 /** Columns that can be dynamically updated via updateTask. */
@@ -395,7 +402,9 @@ const UPDATABLE_COLUMNS = new Set([
   'heartbeat_enabled',
   'heartbeat_interval_minutes',
   'heartbeat_last_check_at',
-  'heartbeat_next_check_at'
+  'heartbeat_next_check_at',
+  'parent_task_id',
+  'sort_order'
 ])
 
 const JSON_COLUMNS = new Set(['labels', 'attachments', 'repos', 'output_fields', 'skill_ids'])
@@ -907,6 +916,8 @@ export class DatabaseManager {
         heartbeat_interval_minutes INTEGER DEFAULT 30,
         heartbeat_last_check_at TEXT DEFAULT NULL,
         heartbeat_next_check_at TEXT DEFAULT NULL,
+        parent_task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+        sort_order INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -1413,6 +1424,18 @@ export class DatabaseManager {
       this.db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_heartbeat_next ON tasks(heartbeat_next_check_at) WHERE heartbeat_enabled = 1`)
     }
 
+    // Add parent_task_id column for subtask support
+    if (!columnNames.has('parent_task_id')) {
+      this.db.exec(`ALTER TABLE tasks ADD COLUMN parent_task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE`)
+    }
+    // Always ensure the index exists (covers both new DBs and migrated DBs)
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id) WHERE parent_task_id IS NOT NULL`)
+
+    // Add sort_order column for explicit subtask ordering (supports drag-and-drop)
+    if (!columnNames.has('sort_order')) {
+      this.db.exec(`ALTER TABLE tasks ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0`)
+    }
+
     // Create heartbeat_logs table
     const heartbeatLogsTable = this.db.prepare(
       "SELECT name FROM sqlite_master WHERE type='table' AND name='heartbeat_logs'"
@@ -1825,6 +1848,16 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
     return row ? deserializeTask(row) : undefined
   }
 
+  getSubtasks(parentId: string): TaskRecord[] {
+    if (!this.ensureDbOpen()) return []
+
+    const rows = this.db.prepare(
+      'SELECT * FROM tasks WHERE parent_task_id = ? ORDER BY sort_order ASC, created_at ASC'
+    ).all(parentId) as TaskRow[]
+
+    return rows.map(deserializeTask)
+  }
+
   createTask(data: CreateTaskData): TaskRecord | undefined {
     const id = createId()
     const now = new Date().toISOString()
@@ -1842,9 +1875,10 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
         id, title, description, type, priority, status, assignee, due_date,
         labels, attachments, repos, output_fields, external_id, source_id, source,
         is_recurring, recurrence_pattern, recurrence_parent_id,
+        parent_task_id,
         created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       data.title,
@@ -1864,6 +1898,7 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
       isRecurring ? 1 : 0,
       recurrencePattern,
       data.recurrence_parent_id ?? null,
+      data.parent_task_id ?? null,
       now,
       now
     )
