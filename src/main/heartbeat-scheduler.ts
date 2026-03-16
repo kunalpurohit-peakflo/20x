@@ -399,28 +399,43 @@ export class HeartbeatScheduler {
    * Wait for a heartbeat session to complete and extract the result text.
    * Polls the agent session status until it transitions to idle.
    */
-  private waitForSessionResult(sessionId: string, _taskId: string): Promise<string> {
+  private waitForSessionResult(sessionId: string, taskId: string): Promise<string> {
     return new Promise<string>((resolve, reject) => {
       const TIMEOUT_MS = 5 * 60_000 // 5 minute timeout for heartbeat sessions
       const POLL_MS = 3_000 // check every 3s
 
       let elapsed = 0
+      // Track the current session ID — may change if the adapter re-keys it
+      let currentSessionId = sessionId
+      const heartbeatTaskId = `heartbeat-${taskId}`
 
       const timer = setInterval(() => {
         elapsed += POLL_MS
 
         if (elapsed >= TIMEOUT_MS) {
           clearInterval(timer)
-          reject(new Error(`Heartbeat session ${sessionId} timed out after 5 minutes`))
+          reject(new Error(`Heartbeat session ${currentSessionId} timed out after 5 minutes`))
           return
         }
 
-        // Check if the session is still running
-        const session = this.agentManager.getSession(sessionId)
+        // Try to find the session by ID first
+        let session = this.agentManager.getSession(currentSessionId)
+
+        // If not found, the session ID may have been re-keyed by pollSingleSession
+        // (adapter provides real ID, old temp ID is deleted from sessions map).
+        // Fall back to finding the session by its stable heartbeatTaskId.
+        if (!session) {
+          const found = this.agentManager.findSessionByTaskId(heartbeatTaskId)
+          if (found) {
+            console.log(`[HeartbeatScheduler] Session ID re-keyed: ${currentSessionId} → ${found.sessionId}`)
+            currentSessionId = found.sessionId
+            session = found.session
+          }
+        }
 
         if (session?.status === 'error') {
           clearInterval(timer)
-          reject(new Error(`Heartbeat session ${sessionId} ended with error`))
+          reject(new Error(`Heartbeat session ${currentSessionId} ended with error`))
           return
         }
 
@@ -429,7 +444,7 @@ export class HeartbeatScheduler {
           // as fire-and-forget, so the adapter may report IDLE before the prompt
           // is even sent. Only treat idle as "done" if the session has actually
           // produced an assistant response (lastAssistantText is set during polling).
-          const lastMessage = this.agentManager.getLastAssistantMessage(sessionId)
+          const lastMessage = this.agentManager.getLastAssistantMessage(currentSessionId)
           if (lastMessage) {
             clearInterval(timer)
             resolve(lastMessage)
@@ -438,7 +453,7 @@ export class HeartbeatScheduler {
             // waiting the full 5-minute timeout. The session likely hit
             // the premature-idle race condition and never recovered.
             clearInterval(timer)
-            reject(new Error(`Heartbeat session ${sessionId} completed without producing a result`))
+            reject(new Error(`Heartbeat session ${currentSessionId} completed without producing a result`))
           }
           // Otherwise keep waiting — agent may not have processed the prompt yet
         }

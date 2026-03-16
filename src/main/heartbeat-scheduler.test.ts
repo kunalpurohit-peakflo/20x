@@ -688,6 +688,50 @@ describe('HeartbeatScheduler', () => {
       expect(result).toBe('CI is failing on the PR')
     })
 
+    it('recovers from session ID re-keying by falling back to taskId lookup', { timeout: 15_000 }, async () => {
+      vi.useRealTimers()
+
+      const oldSessionId = 'temp-session-abc'
+      const newSessionId = 'real-session-xyz'
+      let pollCount = 0
+
+      const agentWithRekey = mockAgentManager({
+        getSession: vi.fn().mockImplementation((id: string) => {
+          pollCount++
+          if (id === oldSessionId) {
+            // Old session ID no longer exists after re-keying
+            return undefined
+          }
+          if (id === newSessionId) {
+            return { status: 'idle' }
+          }
+          return undefined
+        }),
+        getLastAssistantMessage: vi.fn().mockImplementation((id: string) => {
+          if (id === newSessionId) {
+            return 'CI checks are all green'
+          }
+          return null
+        }),
+        findSessionByTaskId: vi.fn().mockImplementation((taskId: string) => {
+          if (taskId === 'heartbeat-task-1') {
+            return { sessionId: newSessionId, session: { status: 'idle' } }
+          }
+          return undefined
+        }),
+      })
+      const s = new HeartbeatScheduler(db as unknown as DatabaseManager, agentWithRekey as unknown as AgentManager)
+
+      const waitForSessionResult = (s as unknown as {
+        waitForSessionResult: (sessionId: string, taskId: string) => Promise<string>
+      }).waitForSessionResult
+
+      const result = await waitForSessionResult.call(s, oldSessionId, 'task-1')
+      expect(result).toBe('CI checks are all green')
+      // Verify it used findSessionByTaskId as fallback
+      expect(agentWithRekey.findSessionByTaskId).toHaveBeenCalledWith('heartbeat-task-1')
+    })
+
     it('keeps waiting when session is idle but has no message yet (race condition guard)', { timeout: 15_000 }, async () => {
       vi.useRealTimers()
 
