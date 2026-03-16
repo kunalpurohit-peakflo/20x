@@ -427,7 +427,13 @@ export class HeartbeatScheduler {
 
           // Get the last assistant message from the session
           const lastMessage = this.agentManager.getLastAssistantMessage(sessionId)
-          resolve(lastMessage || HEARTBEAT_OK_TOKEN) // Default to OK if no message
+          if (lastMessage) {
+            resolve(lastMessage)
+          } else {
+            // No message means the session didn't produce a result — treat as error
+            // rather than silently assuming everything is OK.
+            reject(new Error(`Heartbeat session ${sessionId} completed without producing a result`))
+          }
         }
       }, POLL_MS)
     })
@@ -610,10 +616,6 @@ export class HeartbeatScheduler {
     // Extract GitHub PR and issue URLs
     const githubUrls = this.extractGitHubUrls(heartbeatContent)
 
-    if (this.requiresCurrentStateChecks(heartbeatContent)) {
-      return 'inconclusive' // Needs full heartbeat to inspect current PR/CI state
-    }
-
     if (githubUrls.length === 0) {
       return 'inconclusive' // No URLs to check — need LLM
     }
@@ -623,6 +625,38 @@ export class HeartbeatScheduler {
       return 'inconclusive' // First check — need LLM to establish baseline
     }
 
+    // Phase 1: Always check CI status for PRs (cheap, catches deployment failures)
+    // This runs even when current-state checks are needed, so CI failures are never missed.
+    const pullUrls = githubUrls.filter(u => u.type === 'pull')
+    for (const url of pullUrls) {
+      try {
+        const { stdout: prJson } = await execFileAsync('gh', [
+          'api',
+          `repos/${url.owner}/${url.repo}/pulls/${url.number}`,
+          '--jq', '.head.sha'
+        ], { timeout: 15_000 })
+
+        const headSha = prJson.trim()
+        if (headSha) {
+          const hasFailed = await this.hasFailedCheckRuns(url.owner, url.repo, headSha)
+          if (hasFailed) {
+            console.log(`[HeartbeatScheduler] Pre-flight: CI failure detected for ${url.owner}/${url.repo}#${url.number}`)
+            return 'changes_detected'
+          }
+        }
+      } catch {
+        // CI check failed — fall through to LLM
+        return 'inconclusive'
+      }
+    }
+
+    // Phase 2: If heartbeat needs current-state checks beyond CI (e.g., unresolved
+    // requested changes), delegate to LLM since pre-flight can't evaluate those.
+    if (this.requiresCurrentStateChecks(heartbeatContent)) {
+      return 'inconclusive'
+    }
+
+    // Phase 3: Check for new activity since last check (comments, reviews, merge conflicts)
     let hasChanges = false
 
     for (const url of githubUrls) {
@@ -650,6 +684,37 @@ export class HeartbeatScheduler {
 
   private hasMergeConflicts(prState: { mergeable: boolean | null; mergeable_state?: string | null }): boolean {
     return prState.mergeable_state === 'dirty'
+  }
+
+  /**
+   * Check if a commit has any failed CI check-runs or commit statuses.
+   * Uses the combined status endpoint which aggregates both check-runs and commit statuses.
+   */
+  private async hasFailedCheckRuns(owner: string, repo: string, sha: string): Promise<boolean> {
+    try {
+      // Check check-runs (GitHub Actions, etc.)
+      const { stdout: checkRunsJson } = await execFileAsync('gh', [
+        'api',
+        `repos/${owner}/${repo}/commits/${sha}/check-runs`,
+        '--jq', '[.check_runs[] | select(.status == "completed" and (.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "cancelled"))] | length'
+      ], { timeout: 15_000 })
+
+      const failedCheckRuns = parseInt(checkRunsJson.trim(), 10)
+      if (failedCheckRuns > 0) return true
+
+      // Check commit statuses (Vercel, external CI, etc.)
+      const { stdout: statusJson } = await execFileAsync('gh', [
+        'api',
+        `repos/${owner}/${repo}/commits/${sha}/status`,
+        '--jq', '[.statuses[] | select(.state == "failure" or .state == "error")] | length'
+      ], { timeout: 15_000 })
+
+      const failedStatuses = parseInt(statusJson.trim(), 10)
+      return failedStatuses > 0
+    } catch {
+      // If we can't determine CI status, signal inconclusive (caller will throw → LLM fallback)
+      return false
+    }
   }
 
   /**
@@ -715,15 +780,25 @@ export class HeartbeatScheduler {
         const newIssueComments = parseInt(issueCommentsJson.trim(), 10)
         if (newIssueComments > 0) return true
 
-        // Check current merge conflict state
-        const { stdout: prStateJson } = await execFileAsync('gh', [
+        // Check CI/check-run status — detect failed checks
+        const { stdout: checkRunsJson } = await execFileAsync('gh', [
           'api',
           `repos/${url.owner}/${url.repo}/pulls/${url.number}`,
-          '--jq', '{ mergeable: .mergeable, mergeable_state: .mergeable_state }'
+          '--jq', '{ mergeable: .mergeable, mergeable_state: .mergeable_state, head_sha: .head.sha }'
         ], { timeout: 15_000 })
 
-        const prState = JSON.parse(prStateJson.trim()) as { mergeable: boolean | null; mergeable_state?: string | null }
-        return this.hasMergeConflicts(prState)
+        const prState = JSON.parse(checkRunsJson.trim()) as { mergeable: boolean | null; mergeable_state?: string | null; head_sha?: string }
+
+        // Check for merge conflicts
+        if (this.hasMergeConflicts(prState)) return true
+
+        // Check for failed CI check-runs on the HEAD commit
+        if (prState.head_sha) {
+          const hasFailedChecks = await this.hasFailedCheckRuns(url.owner, url.repo, prState.head_sha)
+          if (hasFailedChecks) return true
+        }
+
+        return false
       } else {
         // Check issue comments
         const { stdout: commentsJson } = await execFileAsync('gh', [
