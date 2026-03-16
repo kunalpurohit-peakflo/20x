@@ -178,11 +178,27 @@ export class HeartbeatScheduler {
   writeHeartbeatFile(taskId: string, content: string): void {
     const filePath = this.getHeartbeatFilePath(taskId)
     const dir = dirname(filePath)
+    const previousContent = this.readHeartbeatFile(taskId)
+    const normalizedContent = content.trim()
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true })
     }
     writeFileSync(filePath, content, 'utf-8')
     console.log(`[HeartbeatScheduler] Wrote heartbeat.md for task ${taskId} (${content.length} chars)`)
+
+    if ((previousContent ?? '') !== normalizedContent) {
+      const task = this.dbManager.getTask(taskId)
+      const updates: Partial<TaskRecord> = {
+        heartbeat_last_check_at: null
+      }
+
+      if (task?.heartbeat_enabled) {
+        updates.heartbeat_next_check_at = new Date().toISOString()
+      }
+
+      this.dbManager.updateTask(taskId, updates)
+      console.log(`[HeartbeatScheduler] Reset heartbeat baseline for task ${taskId} after instructions changed`)
+    }
   }
 
   // ── Core Logic ──────────────────────────────────────────────
@@ -283,11 +299,11 @@ export class HeartbeatScheduler {
 
       if (classification === 'ok') {
         console.log(`[HeartbeatScheduler] ${HEARTBEAT_OK_TOKEN} for task "${task.title}" (mastermind check)`)
-        this.logResult(task.id, HeartbeatStatus.Ok, 'All checks passed', mastermindSessionId)
+        this.logResult(task.id, HeartbeatStatus.Ok, this.extractSummary(mastermindResult, HeartbeatStatus.Ok), mastermindSessionId)
         this.advanceNextCheck(task, true)
       } else if (classification === 'info') {
         console.log(`[HeartbeatScheduler] Info for task "${task.title}": ${mastermindResult.substring(0, 100)}`)
-        this.logResult(task.id, HeartbeatStatus.Info, mastermindResult.substring(0, 500), mastermindSessionId)
+        this.logResult(task.id, HeartbeatStatus.Info, this.extractSummary(mastermindResult, HeartbeatStatus.Info), mastermindSessionId)
         this.advanceNextCheck(task, true) // no action needed, treat like OK for interval
       } else {
         console.log(`[HeartbeatScheduler] Action needed for task "${task.title}", forwarding to task agent`)
@@ -322,9 +338,9 @@ export class HeartbeatScheduler {
         const actionPrompt = this.buildActionPrompt(task, mastermindResult)
         await this.agentManager.startHeartbeatSession(agentId, task.id, actionPrompt)
       } else {
+        const logStatus = classification === 'ok' ? HeartbeatStatus.Ok : HeartbeatStatus.Info
         console.log(`[HeartbeatScheduler] runNow: ${classification} for task "${task.title}"`)
-        this.logResult(task.id, classification === 'ok' ? HeartbeatStatus.Ok : HeartbeatStatus.Info,
-          classification === 'ok' ? 'All checks passed' : mastermindResult.substring(0, 500), mastermindSessionId)
+        this.logResult(task.id, logStatus, this.extractSummary(mastermindResult, logStatus), mastermindSessionId)
       }
     } finally {
       this.agentManager.cleanupHeartbeatSession(task.id)
@@ -343,6 +359,10 @@ export class HeartbeatScheduler {
 
     if (lastCheck) {
       prompt += `IMPORTANT: Only consider events after ${lastCheck}. Ignore anything older — it has already been handled.\n\n`
+    }
+
+    if (this.requiresCurrentStateChecks(heartbeatContent)) {
+      prompt += 'For checks about current state (for example merge conflicts, unresolved requested changes, or the latest CI status), inspect the current state even if the problem started before the last check.\n\n'
     }
 
     if (globalInstructions.trim()) {
@@ -421,14 +441,41 @@ export class HeartbeatScheduler {
 
     if (isOk) {
       console.log(`[HeartbeatScheduler] ${HEARTBEAT_OK_TOKEN} for task "${task.title}"`)
-      this.logResult(task.id, HeartbeatStatus.Ok, 'All checks passed', sessionId)
+      this.logResult(task.id, HeartbeatStatus.Ok, this.extractSummary(result, HeartbeatStatus.Ok), sessionId)
       this.advanceNextCheck(task, true) // adaptive: may increase interval
     } else {
       console.log(`[HeartbeatScheduler] Attention needed for task "${task.title}": ${result.substring(0, 100)}`)
-      this.logResult(task.id, HeartbeatStatus.AttentionNeeded, result.substring(0, 500), sessionId)
+      this.logResult(task.id, HeartbeatStatus.AttentionNeeded, this.extractSummary(result, HeartbeatStatus.AttentionNeeded), sessionId)
       this.notifyAttentionNeeded(task, result)
       this.advanceNextCheck(task, false) // reset to base interval
     }
+  }
+
+  /**
+   * Build a compact check summary for heartbeat logs.
+   * Strips control tokens so UI can show meaningful check context.
+   */
+  private extractSummary(result: string, status: HeartbeatStatus): string {
+    const infoTokenPattern = new RegExp(`^${HEARTBEAT_INFO_TOKEN}\\s*:\\s*`, 'i')
+    const normalized = result
+      .replace(HEARTBEAT_OK_TOKEN, '')
+      .replace(infoTokenPattern, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+
+    if (normalized.length > 0) {
+      return normalized.substring(0, 500)
+    }
+
+    if (status === HeartbeatStatus.Ok) {
+      return 'All checks passed (no new updates)'
+    }
+
+    if (status === HeartbeatStatus.Info) {
+      return 'Checked: update found, but no action needed'
+    }
+
+    return 'Checked: action needed'
   }
 
   /**
@@ -563,6 +610,10 @@ export class HeartbeatScheduler {
     // Extract GitHub PR and issue URLs
     const githubUrls = this.extractGitHubUrls(heartbeatContent)
 
+    if (this.requiresCurrentStateChecks(heartbeatContent)) {
+      return 'inconclusive' // Needs full heartbeat to inspect current PR/CI state
+    }
+
     if (githubUrls.length === 0) {
       return 'inconclusive' // No URLs to check — need LLM
     }
@@ -587,6 +638,18 @@ export class HeartbeatScheduler {
     }
 
     return hasChanges ? 'changes_detected' : 'no_changes'
+  }
+
+  /**
+   * Detect whether the heartbeat instructions require checking the current state,
+   * not just new activity since the last run.
+   */
+  private requiresCurrentStateChecks(heartbeatContent: string): boolean {
+    return /(requested changes|request changes|ci\b|pipeline|status check|check run)/i.test(heartbeatContent)
+  }
+
+  private hasMergeConflicts(prState: { mergeable: boolean | null; mergeable_state?: string | null }): boolean {
+    return prState.mergeable_state === 'dirty'
   }
 
   /**
@@ -650,7 +713,17 @@ export class HeartbeatScheduler {
         ], { timeout: 15_000 })
 
         const newIssueComments = parseInt(issueCommentsJson.trim(), 10)
-        return newIssueComments > 0
+        if (newIssueComments > 0) return true
+
+        // Check current merge conflict state
+        const { stdout: prStateJson } = await execFileAsync('gh', [
+          'api',
+          `repos/${url.owner}/${url.repo}/pulls/${url.number}`,
+          '--jq', '{ mergeable: .mergeable, mergeable_state: .mergeable_state }'
+        ], { timeout: 15_000 })
+
+        const prState = JSON.parse(prStateJson.trim()) as { mergeable: boolean | null; mergeable_state?: string | null }
+        return this.hasMergeConflicts(prState)
       } else {
         // Check issue comments
         const { stdout: commentsJson } = await execFileAsync('gh', [

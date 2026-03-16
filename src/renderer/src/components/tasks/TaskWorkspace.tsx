@@ -31,6 +31,7 @@ interface TaskWorkspaceProps {
   onCompleteTask: () => void
   onAssignAgent: (taskId: string, agentId: string | null) => void
   onUpdateTask?: (taskId: string, data: Partial<WorkfloTask>) => Promise<void>
+  onNavigateToTask?: (taskId: string) => void
 }
 
 export function TaskWorkspace({
@@ -42,7 +43,8 @@ export function TaskWorkspace({
   onUpdateOutputFields,
   onCompleteTask,
   onAssignAgent,
-  onUpdateTask
+  onUpdateTask,
+  onNavigateToTask
 }: TaskWorkspaceProps) {
   const { session, start, resume, abort, stop, sendMessage, approve } = useAgentSession(task?.id)
   const { removeSession } = useAgentStore()
@@ -57,12 +59,51 @@ export function TaskWorkspace({
   const [showSnooze, setShowSnooze] = useState(false)
   const [showIncompatibleSession, setShowIncompatibleSession] = useState(false)
   const [incompatibleSessionError, setIncompatibleSessionError] = useState<string>()
+  const [subtasks, setSubtasks] = useState<WorkfloTask[]>([])
+  const [parentTask, setParentTask] = useState<WorkfloTask | null>(null)
   const startingRef = useRef(false)
 
   const { fetchTasks, updateTask: updateTaskInStore } = useTaskStore()
 
   // Fetch settings on mount
   useEffect(() => { fetchSettings() }, [])
+
+  // Fetch subtasks and parent task when task changes
+  useEffect(() => {
+    if (!task) {
+      setSubtasks([])
+      setParentTask(null)
+      return
+    }
+    // Fetch subtasks
+    taskApi.getSubtasks(task.id).then(setSubtasks).catch(() => setSubtasks([]))
+    // Fetch parent task
+    if (task.parent_task_id) {
+      taskApi.getById(task.parent_task_id).then(p => setParentTask(p ?? null)).catch(() => setParentTask(null))
+    } else {
+      setParentTask(null)
+    }
+  }, [task?.id, task?.parent_task_id, task?.updated_at])
+
+  // Create a subtask under the current task
+  const handleAddSubtask = useCallback(async (title: string) => {
+    if (!task) return
+    try {
+      const newSubtask = await taskApi.create({
+        title,
+        parent_task_id: task.id,
+        type: task.type as 'general' | 'coding' | 'manual' | 'review' | 'approval',
+        priority: task.priority as 'critical' | 'high' | 'medium' | 'low',
+        repos: task.repos,
+      })
+      if (newSubtask) {
+        setSubtasks(prev => [...prev, newSubtask])
+        fetchTasks() // Refresh sidebar
+      }
+    } catch (err) {
+      console.error('[TaskWorkspace] Failed to create subtask:', err)
+    }
+  }, [task, fetchTasks])
 
   // Listen for incompatible session events
   useEffect(() => {
@@ -203,21 +244,26 @@ export function TaskWorkspace({
     setShowRepoSelector(true)
   }, [githubOrg, checkGhCli])
 
-  const handleReposConfirmed = useCallback(async (selectedRepos: GitHubRepo[]) => {
+  const handleReposConfirmed = useCallback(async (selectedRepos: GitHubRepo[], selectedOrg: string) => {
     if (!task) return
     setShowRepoSelector(false)
+
+    if (selectedOrg && selectedOrg !== githubOrg) {
+      await setGithubOrg(selectedOrg)
+    }
+
     const repoNames = selectedRepos.map((r) => r.fullName)
     const merged = [...new Set([...task.repos, ...repoNames])]
 
     // If session is running and there are new repos, setup worktrees immediately
     const newRepos = selectedRepos.filter((r) => !task.repos.includes(r.fullName))
-    if (session.sessionId && newRepos.length > 0 && githubOrg) {
+    if (session.sessionId && newRepos.length > 0 && selectedOrg) {
       try {
         setIsSettingUpWorktree(true)
         await worktreeApi.setup(
           task.id,
           newRepos.map((r) => ({ fullName: r.fullName, defaultBranch: r.defaultBranch })),
-          githubOrg
+          selectedOrg
         )
       } catch (err) {
         console.error('Failed to setup worktrees for new repos:', err)
@@ -232,7 +278,7 @@ export function TaskWorkspace({
       await taskApi.update(task.id, { repos: merged })
     }
     fetchTasks()
-  }, [task, onUpdateTask, fetchTasks, session.sessionId, githubOrg])
+  }, [task, onUpdateTask, fetchTasks, session.sessionId, githubOrg, setGithubOrg])
 
   const handleUpdateRepos = useCallback(async (repos: string[]) => {
     if (!task) return
@@ -310,7 +356,10 @@ export function TaskWorkspace({
       // Check if this is a question answer (for permission requests)
       // Question answers should use approve() instead of sendMessage()
       const lastMessage = session.messages[session.messages.length - 1]
-      if (lastMessage?.partType === 'question' && lastMessage?.tool?.questions) {
+      const hasActiveQuestion = session.status === SessionStatus.WAITING_APPROVAL
+        && lastMessage?.partType === 'question'
+        && !!lastMessage?.tool?.questions
+      if (hasActiveQuestion) {
         // This is an answer to a question - use approve
         approve(true, message).catch(console.error)
       } else {
@@ -318,7 +367,7 @@ export function TaskWorkspace({
         sendMessage(message).catch(console.error)
       }
     },
-    [sendMessage, approve, session.messages]
+    [sendMessage, approve, session.messages, session.status]
   )
 
   // ── Feedback orchestration ──────────────────────────────────
@@ -442,13 +491,11 @@ Update existing skills that were helpful or create new ones for patterns worth r
   const handleFeedbackSkip = useCallback(async () => {
     if (!task?.id) return
     setShowFeedback(false)
-    // Mark task as completed when skipping feedback (updates local state without refetch)
-    if (onUpdateTask) {
-      await onUpdateTask(task.id, { status: TaskStatus.Completed })
-    } else {
-      await updateTaskInStore(task.id, { status: TaskStatus.Completed })
-    }
-  }, [task?.id, onUpdateTask, updateTaskInStore])
+    // Use the main completion path which calls executeAction for
+    // enterprise tasks (notifying the Workflo backend) before setting
+    // the local status to Completed.
+    await onCompleteTask()
+  }, [task?.id, onCompleteTask])
 
   const handleSnooze = useCallback(async (isoString: string) => {
     if (!task) return
@@ -561,6 +608,10 @@ Update existing skills that were helpful or create new ones for patterns worth r
             onReassign={handleReassign}
             onTriage={handleTriage}
             canTriage={!!canTriage}
+            subtasks={subtasks}
+            parentTask={parentTask}
+            onNavigateToTask={onNavigateToTask}
+            onAddSubtask={handleAddSubtask}
           />
         </div>
 

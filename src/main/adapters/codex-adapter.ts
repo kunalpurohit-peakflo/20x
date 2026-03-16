@@ -20,6 +20,8 @@ import type {
 } from './coding-agent-adapter'
 import { SessionStatusType, MessagePartType, MessageRole } from './coding-agent-adapter'
 
+export const DEFAULT_CODEX_MODEL = 'gpt-5.4-codex'
+
 interface JsonRpcRequest {
   jsonrpc: '2.0'
   id?: number | string
@@ -61,6 +63,7 @@ interface CodexMessage {
 }
 
 interface CodexSession {
+  sessionId: string // Our internal session ID (map key)
   threadId: string // Codex thread ID
   process: ChildProcess
   workspaceDir: string
@@ -77,6 +80,9 @@ interface CodexSession {
 export class CodexAdapter implements CodingAgentAdapter {
   private sessions = new Map<string, CodexSession>()
   private codexExecutablePath: string | null = null
+
+  /** Callback set by agent-manager to trigger an immediate poll cycle */
+  onDataAvailable?: (sessionId: string) => void
 
   async initialize(): Promise<void> {
     // Find codex CLI executable
@@ -151,7 +157,7 @@ export class CodexAdapter implements CodingAgentAdapter {
       this.codexExecutablePath,
       [
         '--model',
-        config.model || 'gpt-5.3-codex',
+        config.model || DEFAULT_CODEX_MODEL,
         '--json-rpc', // Enable JSON-RPC mode
       ],
       {
@@ -163,6 +169,7 @@ export class CodexAdapter implements CodingAgentAdapter {
 
     // Create session state
     const session: CodexSession = {
+      sessionId: '', // Will be set to threadId after thread.create
       threadId: '', // Will be set after thread.create
       process: codexProcess,
       workspaceDir: config.workspaceDir,
@@ -198,7 +205,7 @@ export class CodexAdapter implements CodingAgentAdapter {
       const apiKey = process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY
       await this.sendRpcRequest(session, 'initialize', {
         api_key: apiKey,
-        model: config.model || 'gpt-5.3-codex',
+        model: config.model || DEFAULT_CODEX_MODEL,
       })
 
       // Create thread (Codex's session concept)
@@ -207,6 +214,7 @@ export class CodexAdapter implements CodingAgentAdapter {
       }
 
       session.threadId = threadResponse.thread_id
+      session.sessionId = session.threadId
       console.log(`[CodexAdapter] Created Codex thread: ${session.threadId}`)
 
       // Store session
@@ -239,7 +247,7 @@ export class CodexAdapter implements CodingAgentAdapter {
       this.codexExecutablePath,
       [
         '--model',
-        config.model || 'gpt-5.3-codex',
+        config.model || DEFAULT_CODEX_MODEL,
         '--json-rpc',
       ],
       {
@@ -251,6 +259,7 @@ export class CodexAdapter implements CodingAgentAdapter {
 
     // Create session state
     const session: CodexSession = {
+      sessionId,
       threadId: sessionId,
       process: codexProcess,
       workspaceDir: config.workspaceDir,
@@ -286,7 +295,7 @@ export class CodexAdapter implements CodingAgentAdapter {
       const apiKey = process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY
       await this.sendRpcRequest(session, 'initialize', {
         api_key: apiKey,
-        model: config.model || 'gpt-5.3-codex',
+        model: config.model || DEFAULT_CODEX_MODEL,
       })
 
       // Fetch thread history
@@ -635,6 +644,9 @@ export class CodexAdapter implements CodingAgentAdapter {
       default:
         console.log(`[CodexAdapter] Unknown notification: ${notification.method}`)
     }
+
+    // Notify the polling coordinator that new data is available
+    this.onDataAvailable?.(session.sessionId)
   }
 
   /**

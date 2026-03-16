@@ -1,4 +1,4 @@
-import { Calendar, AlarmClockOff, Repeat, HeartPulse } from 'lucide-react'
+import { Calendar, AlarmClockOff, Repeat, HeartPulse, ListTree, ChevronRight } from 'lucide-react'
 import { cn, formatDate, isOverdue, isDueSoon, isSnoozed } from '@/lib/utils'
 import { TaskPriorityBadge } from './TaskPriorityBadge'
 import { useAgentStore, SessionStatus } from '@/stores/agent-store'
@@ -74,9 +74,13 @@ interface TaskListItemProps {
   task: WorkfloTask
   isSelected: boolean
   onSelect: () => void
+  subtaskCount?: number
+  isSubtask?: boolean
+  isExpanded?: boolean
+  onToggleExpand?: () => void
 }
 
-export function TaskListItem({ task, isSelected, onSelect }: TaskListItemProps) {
+export function TaskListItem({ task, isSelected, onSelect, subtaskCount, isSubtask, isExpanded, onToggleExpand }: TaskListItemProps) {
   const isActive = task.status !== TaskStatus.Completed
   const overdue = isActive && isOverdue(task.due_date)
   const dueSoon = isActive && !overdue && isDueSoon(task.due_date)
@@ -112,16 +116,30 @@ export function TaskListItem({ task, isSelected, onSelect }: TaskListItemProps) 
       aria-current={isSelected ? 'true' : undefined}
       className={cn(
         'w-full text-left px-3 py-2.5 rounded-md transition-colors cursor-pointer group',
-        isSelected ? 'bg-accent' : 'hover:bg-accent/50'
+        isSelected ? 'bg-accent' : 'hover:bg-accent/50',
+        isSubtask && 'py-2'
       )}
     >
       <div className="flex items-start gap-3">
         <div className={cn(
           'mt-[7px] h-2 w-2 rounded-full shrink-0',
+          isSubtask && 'mt-[5px] h-1.5 w-1.5',
           getStatusColor()
         )} />
         <div className="min-w-0 flex-1">
-          <div className="text-sm font-medium truncate">{task.title}</div>
+          <div className="flex items-center gap-2">
+            <div className={cn('text-sm font-medium truncate flex-1', isSubtask && 'text-xs')}>{task.title}</div>
+            {onToggleExpand && subtaskCount != null && subtaskCount > 0 && (
+              <span
+                role="button"
+                onClick={(e) => { e.stopPropagation(); onToggleExpand() }}
+                className="shrink-0 flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground cursor-pointer"
+              >
+                {subtaskCount}
+                <ChevronRight className={cn('h-3 w-3 transition-transform', isExpanded && 'rotate-90')} />
+              </span>
+            )}
+          </div>
           <div className="flex items-center gap-2 mt-1">
             <TaskPriorityBadge priority={task.priority} />
             {task.due_date && (
@@ -150,6 +168,12 @@ export function TaskListItem({ task, isSelected, onSelect }: TaskListItemProps) 
             {task.heartbeat_enabled && (
               <span title="Heartbeat monitoring active">
                 <HeartPulse className="h-3 w-3 text-rose-400" />
+              </span>
+            )}
+            {subtaskCount != null && subtaskCount > 0 && !onToggleExpand && (
+              <span className="flex items-center gap-1 text-xs text-muted-foreground" title={`${subtaskCount} subtask${subtaskCount !== 1 ? 's' : ''}`}>
+                <ListTree className="h-3 w-3" />
+                {subtaskCount}
               </span>
             )}
             {task.source !== 'local' && (

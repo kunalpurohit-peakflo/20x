@@ -35,6 +35,7 @@ export interface AgentConfigRecord {
   coding_agent?: 'opencode' | 'claude-code' | 'codex'
   model?: string
   auth_method?: 'subscription' | 'api_key'
+  permission_mode?: 'ask' | 'allow'
   system_prompt?: string
   mcp_servers?: Array<string | AgentMcpServerEntry>
   skill_ids?: string[]
@@ -243,6 +244,8 @@ export interface TaskRow {
   heartbeat_interval_minutes: number | null
   heartbeat_last_check_at: string | null
   heartbeat_next_check_at: string | null
+  parent_task_id: string | null
+  sort_order: number
   created_at: string
   updated_at: string
 }
@@ -301,6 +304,8 @@ export interface TaskRecord {
   heartbeat_interval_minutes: number | null
   heartbeat_last_check_at: string | null
   heartbeat_next_check_at: string | null
+  parent_task_id: string | null
+  sort_order: number
   created_at: string
   updated_at: string
 }
@@ -336,6 +341,7 @@ export interface CreateTaskData {
   is_recurring?: boolean
   recurrence_pattern?: RecurrencePatternRecord | null
   recurrence_parent_id?: string | null
+  parent_task_id?: string | null
   /** Cron expression — if provided, sets is_recurring=true and stores as recurrence_pattern */
   cron?: string
 }
@@ -366,6 +372,8 @@ export interface UpdateTaskData {
   heartbeat_interval_minutes?: number | null
   heartbeat_last_check_at?: string | null
   heartbeat_next_check_at?: string | null
+  parent_task_id?: string | null
+  sort_order?: number
 }
 
 /** Columns that can be dynamically updated via updateTask. */
@@ -394,7 +402,9 @@ const UPDATABLE_COLUMNS = new Set([
   'heartbeat_enabled',
   'heartbeat_interval_minutes',
   'heartbeat_last_check_at',
-  'heartbeat_next_check_at'
+  'heartbeat_next_check_at',
+  'parent_task_id',
+  'sort_order'
 ])
 
 const JSON_COLUMNS = new Set(['labels', 'attachments', 'repos', 'output_fields', 'skill_ids'])
@@ -488,6 +498,8 @@ export interface SkillRow {
   last_used: string | null
   tags: string
   is_deleted: number
+  enterprise_skill_id: string | null
+  uses_at_last_sync: number
   created_at: string
   updated_at: string
 }
@@ -502,6 +514,8 @@ export interface SkillRecord {
   uses: number
   last_used: string | null
   tags: string[]
+  enterprise_skill_id: string | null
+  uses_at_last_sync: number
   created_at: string
   updated_at: string
 }
@@ -514,6 +528,7 @@ export interface CreateSkillData {
   uses?: number
   last_used?: string | null
   tags?: string[]
+  enterprise_skill_id?: string | null
 }
 
 export interface UpdateSkillData {
@@ -524,6 +539,8 @@ export interface UpdateSkillData {
   uses?: number
   last_used?: string | null
   tags?: string[]
+  enterprise_skill_id?: string | null
+  uses_at_last_sync?: number
 }
 
 // ── Secret types ─────────────────────────────────────────────
@@ -736,6 +753,8 @@ function deserializeSkill(row: SkillRow): SkillRecord {
     uses: row.uses,
     last_used: row.last_used,
     tags,
+    enterprise_skill_id: row.enterprise_skill_id ?? null,
+    uses_at_last_sync: row.uses_at_last_sync ?? 0,
     created_at: row.created_at,
     updated_at: row.updated_at
   }
@@ -823,13 +842,17 @@ function deserializeInstalledPlugin(row: InstalledPluginRow): InstalledPluginRec
 
 // Bump this whenever new migrations are added so returning users skip
 // the full migration check on startup.
-const SCHEMA_VERSION = 4
+const SCHEMA_VERSION = 6
 
 export class DatabaseManager {
   public db!: Database.Database
 
+  private ensureDbOpen(): boolean {
+    return !!this.db?.open
+  }
+
   close(): void {
-    if (this.db?.open) {
+    if (this.ensureDbOpen()) {
       this.db.pragma('wal_checkpoint(TRUNCATE)')
       this.db.close()
     }
@@ -897,6 +920,8 @@ export class DatabaseManager {
         heartbeat_interval_minutes INTEGER DEFAULT 30,
         heartbeat_last_check_at TEXT DEFAULT NULL,
         heartbeat_next_check_at TEXT DEFAULT NULL,
+        parent_task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+        sort_order INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -961,6 +986,8 @@ export class DatabaseManager {
         last_used TEXT,
         tags TEXT NOT NULL DEFAULT '[]',
         is_deleted INTEGER NOT NULL DEFAULT 0,
+        enterprise_skill_id TEXT DEFAULT NULL,
+        uses_at_last_sync INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -1402,6 +1429,18 @@ export class DatabaseManager {
       this.db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_heartbeat_next ON tasks(heartbeat_next_check_at) WHERE heartbeat_enabled = 1`)
     }
 
+    // Add parent_task_id column for subtask support
+    if (!columnNames.has('parent_task_id')) {
+      this.db.exec(`ALTER TABLE tasks ADD COLUMN parent_task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE`)
+    }
+    // Always ensure the index exists (covers both new DBs and migrated DBs)
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id) WHERE parent_task_id IS NOT NULL`)
+
+    // Add sort_order column for explicit subtask ordering (supports drag-and-drop)
+    if (!columnNames.has('sort_order')) {
+      this.db.exec(`ALTER TABLE tasks ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0`)
+    }
+
     // Create heartbeat_logs table
     const heartbeatLogsTable = this.db.prepare(
       "SELECT name FROM sqlite_master WHERE type='table' AND name='heartbeat_logs'"
@@ -1438,6 +1477,18 @@ export class DatabaseManager {
         );
         CREATE UNIQUE INDEX IF NOT EXISTS idx_secrets_env_var ON secrets(env_var_name);
       `)
+    }
+
+    // Migrate skills table: add enterprise_skill_id for 2-way sync
+    const skillColumns = this.db.pragma('table_info(skills)') as { name: string }[]
+    const skillColumnNames = new Set(skillColumns.map((c) => c.name))
+
+    if (!skillColumnNames.has('enterprise_skill_id')) {
+      this.db.exec(`ALTER TABLE skills ADD COLUMN enterprise_skill_id TEXT DEFAULT NULL`)
+    }
+
+    if (!skillColumnNames.has('uses_at_last_sync')) {
+      this.db.exec(`ALTER TABLE skills ADD COLUMN uses_at_last_sync INTEGER NOT NULL DEFAULT 0`)
     }
 
     // Seed default agent if none exist
@@ -1787,6 +1838,8 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
   }
 
   getTasks(): TaskRecord[] {
+    if (!this.ensureDbOpen()) return []
+
     const rows = this.db.prepare(
       'SELECT * FROM tasks ORDER BY created_at DESC'
     ).all() as TaskRow[]
@@ -1795,11 +1848,23 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
   }
 
   getTask(id: string): TaskRecord | undefined {
+    if (!this.ensureDbOpen()) return undefined
+
     const row = this.db.prepare(
       'SELECT * FROM tasks WHERE id = ?'
     ).get(id) as TaskRow | undefined
 
     return row ? deserializeTask(row) : undefined
+  }
+
+  getSubtasks(parentId: string): TaskRecord[] {
+    if (!this.ensureDbOpen()) return []
+
+    const rows = this.db.prepare(
+      'SELECT * FROM tasks WHERE parent_task_id = ? ORDER BY sort_order ASC, created_at ASC'
+    ).all(parentId) as TaskRow[]
+
+    return rows.map(deserializeTask)
   }
 
   createTask(data: CreateTaskData): TaskRecord | undefined {
@@ -1819,9 +1884,10 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
         id, title, description, type, priority, status, assignee, due_date,
         labels, attachments, repos, output_fields, external_id, source_id, source,
         is_recurring, recurrence_pattern, recurrence_parent_id,
+        parent_task_id,
         created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       data.title,
@@ -1841,6 +1907,7 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
       isRecurring ? 1 : 0,
       recurrencePattern,
       data.recurrence_parent_id ?? null,
+      data.parent_task_id ?? null,
       now,
       now
     )
@@ -2043,6 +2110,8 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
   }
 
   getMcpServer(id: string): McpServerRecord | undefined {
+    if (!this.ensureDbOpen()) return undefined
+
     const row = this.db.prepare('SELECT * FROM mcp_servers WHERE id = ?').get(id) as McpServerRow | undefined
     return row ? deserializeMcpServer(row) : undefined
   }
@@ -2219,10 +2288,11 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
     const uses = data.uses ?? 0
     const lastUsed = data.last_used ?? null
     const tags = JSON.stringify(data.tags ?? [])
+    const enterpriseSkillId = data.enterprise_skill_id ?? null
     this.db.prepare(`
-      INSERT INTO skills (id, name, description, content, version, confidence, uses, last_used, tags, is_deleted, created_at, updated_at)
-      VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, 0, ?, ?)
-    `).run(id, data.name, data.description, data.content, confidence, uses, lastUsed, tags, now, now)
+      INSERT INTO skills (id, name, description, content, version, confidence, uses, last_used, tags, is_deleted, enterprise_skill_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, 0, ?, ?, ?)
+    `).run(id, data.name, data.description, data.content, confidence, uses, lastUsed, tags, enterpriseSkillId, now, now)
     return this.getSkill(id)
   }
 
@@ -2240,11 +2310,17 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
     if (data.uses !== undefined) { setClauses.push('uses = ?'); values.push(data.uses) }
     if (data.last_used !== undefined) { setClauses.push('last_used = ?'); values.push(data.last_used) }
     if (data.tags !== undefined) { setClauses.push('tags = ?'); values.push(JSON.stringify(data.tags)) }
+    if (data.enterprise_skill_id !== undefined) { setClauses.push('enterprise_skill_id = ?'); values.push(data.enterprise_skill_id) }
+    if (data.uses_at_last_sync !== undefined) { setClauses.push('uses_at_last_sync = ?'); values.push(data.uses_at_last_sync) }
 
     if (setClauses.length === 0) return existing
 
-    // Increment version on any update
-    setClauses.push('version = version + 1')
+    // Only increment version for content changes, not metadata-only updates (like enterprise_skill_id linking)
+    const isContentChange = data.name !== undefined || data.description !== undefined ||
+      data.content !== undefined || data.confidence !== undefined || data.tags !== undefined
+    if (isContentChange) {
+      setClauses.push('version = version + 1')
+    }
     setClauses.push('updated_at = ?')
     values.push(new Date().toISOString())
     values.push(id)
@@ -2261,6 +2337,34 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
       'SELECT * FROM skills WHERE name = ? AND is_deleted = 0'
     ).get(name) as SkillRow | undefined
     return row ? deserializeSkill(row) : undefined
+  }
+
+  getSkillByEnterpriseId(enterpriseSkillId: string): SkillRecord | undefined {
+    const row = this.db.prepare(
+      'SELECT * FROM skills WHERE enterprise_skill_id = ? AND is_deleted = 0'
+    ).get(enterpriseSkillId) as SkillRow | undefined
+    return row ? deserializeSkill(row) : undefined
+  }
+
+  /**
+   * Get skills that were deleted locally but had an enterprise link.
+   * Used to propagate deletions to the server during sync.
+   */
+  getDeletedEnterpriseSkills(): SkillRecord[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM skills WHERE is_deleted = 1 AND enterprise_skill_id IS NOT NULL'
+    ).all() as SkillRow[]
+    return rows.map(deserializeSkill)
+  }
+
+  /**
+   * Hard-delete a skill row (permanent removal after server sync).
+   */
+  hardDeleteSkill(id: string): boolean {
+    const result = this.db.prepare(
+      'DELETE FROM skills WHERE id = ?'
+    ).run(id)
+    return result.changes > 0
   }
 
   deleteSkill(id: string): boolean {

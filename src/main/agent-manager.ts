@@ -2,7 +2,8 @@ import { EventEmitter } from 'events'
 import { spawn } from 'child_process'
 import { homedir } from 'os'
 import { join, delimiter } from 'path'
-import { existsSync, copyFileSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync } from 'fs'
+import { existsSync, copyFileSync, mkdirSync, readFileSync, readdirSync, statSync } from 'fs'
+import { mkdir, writeFile } from 'fs/promises'
 import { Agent as UndiciAgent } from 'undici'
 import { Notification } from 'electron'
 import type { BrowserWindow } from 'electron'
@@ -77,6 +78,8 @@ export class AgentManager extends EventEmitter {
   private githubManager: GitHubManager | null = null
   private oauthManager: import('./oauth/oauth-manager').OAuthManager | null = null
   private externalListeners: Array<(channel: string, data: unknown) => void> = []
+  private enterpriseStateSync: import('./enterprise-state-sync').EnterpriseStateSync | null = null
+  private syncManager: import('./sync-manager').SyncManager | null = null
 
   // ── Centralized Polling Coordinator ──
   // Instead of N independent setTimeout loops (one per session),
@@ -86,12 +89,37 @@ export class AgentManager extends EventEmitter {
   private pollingTimer: ReturnType<typeof setTimeout> | null = null
   private static readonly POLL_INTERVAL_MS = 2000
 
+  // ── Event-driven nudge ──
+  // When an adapter buffers new stream data it calls onDataAvailable().
+  // We debounce that into a short nudge timer so the coordinator delivers
+  // the data to the UI within ~50ms instead of waiting up to 2 seconds.
+  private nudgeTimer: ReturnType<typeof setTimeout> | null = null
+  private static readonly NUDGE_DELAY_MS = 50
+  private pollingInProgress = false  // Prevents overlapping tick() calls
+  private pollTickFn: (() => Promise<void>) | null = null  // Reference to the tick function
+
   // Track last sent status per session to detect transitions for OS notifications
   private lastSentStatus: Map<string, string> = new Map()
 
   constructor(db: DatabaseManager) {
     super()
     this.db = db
+  }
+
+  /**
+   * Set the enterprise state sync manager for recording agent events.
+   * Called when enterprise auth succeeds.
+   */
+  setEnterpriseStateSync(stateSync: import('./enterprise-state-sync').EnterpriseStateSync | null): void {
+    this.enterpriseStateSync = stateSync
+  }
+
+  /**
+   * Set the sync manager for executing enterprise actions (e.g. completing tasks on Workflo).
+   * Called after both AgentManager and SyncManager are created.
+   */
+  setSyncManager(syncManager: import('./sync-manager').SyncManager): void {
+    this.syncManager = syncManager
   }
 
   private async loadSDK(): Promise<void> {
@@ -215,13 +243,17 @@ export class AgentManager extends EventEmitter {
    * Builds MCP servers config for adapters (Claude Code, etc.)
    * Converts from database format to adapter format
    */
-  private async buildMcpServersForAdapter(agentId: string, opts?: { ensureTaskManagement?: boolean }): Promise<Record<string, McpServerConfig>> {
+  private async buildMcpServersForAdapter(agentId: string, opts?: { ensureTaskManagement?: boolean; taskScope?: { taskId: string; parentTaskId: string } }): Promise<Record<string, McpServerConfig>> {
     const agent = this.db.getAgent(agentId)
     const mcpEntries = agent?.config?.mcp_servers || []
     const result: Record<string, McpServerConfig> = {}
     // Ensure the task API server is ready before building MCP configs
     // (startTaskApiServer is fire-and-forget during DB init, may not be done yet)
     await waitForTaskApiServer()
+
+    // Yield after waitForTaskApiServer + db.getAgent (sync) so the event
+    // loop can process rendering before we enter the MCP server loop.
+    await new Promise<void>((r) => setImmediate(r))
 
     for (const entry of mcpEntries) {
       const serverId = typeof entry === 'string' ? entry : (entry as AgentMcpServerEntry).serverId
@@ -237,6 +269,10 @@ export class AgentManager extends EventEmitter {
             env = { ...env, TASK_API_URL: `http://127.0.0.1:${apiPort}` }
           } else {
             console.warn(`[AgentManager] buildMcpServersForAdapter - task API port is null for task-management server`)
+          }
+          // Inject task scope for subtask agents (restricts access to parent + siblings only)
+          if (opts?.taskScope) {
+            env = { ...env, TASK_SCOPE_PARENT_ID: opts.taskScope.parentTaskId, TASK_SCOPE_TASK_ID: opts.taskScope.taskId }
           }
         }
 
@@ -273,7 +309,11 @@ export class AgentManager extends EventEmitter {
         if (!apiPort) {
           console.warn('[AgentManager] buildMcpServersForAdapter - task API port is null! MCP server may fail to start')
         }
-        const env = { ...tmServer.environment, ...(apiPort ? { TASK_API_URL: `http://127.0.0.1:${apiPort}` } : {}) }
+        const env: Record<string, string> = { ...tmServer.environment, ...(apiPort ? { TASK_API_URL: `http://127.0.0.1:${apiPort}` } : {}) }
+        if (opts?.taskScope) {
+          env.TASK_SCOPE_PARENT_ID = opts.taskScope.parentTaskId
+          env.TASK_SCOPE_TASK_ID = opts.taskScope.taskId
+        }
         result['task-management'] = {
           type: 'stdio',
           command: tmServer.command,
@@ -299,7 +339,9 @@ export class AgentManager extends EventEmitter {
     const isMastermind = taskId === 'mastermind-session'
     const task = this.db.getTask(taskId)
     const isTriageSession = task?.status === TaskStatus.Triaging
-    const mcpServers = await this.buildMcpServersForAdapter(agentId, { ensureTaskManagement: isMastermind || isTriageSession })
+    const isSubtask = !!task?.parent_task_id
+    const taskScope = isSubtask && task?.parent_task_id ? { taskId, parentTaskId: task.parent_task_id } : undefined
+    const mcpServers = await this.buildMcpServersForAdapter(agentId, { ensureTaskManagement: isMastermind || isTriageSession || isSubtask, taskScope })
 
     const config: SessionConfig = {
       agentId,
@@ -309,6 +351,7 @@ export class AgentManager extends EventEmitter {
       systemPrompt: agent.config?.system_prompt,
       mcpServers,
       authMethod: agent.config?.auth_method,
+      permissionMode: agent.config?.permission_mode,
       apiKeys: agent.config?.api_keys
     }
 
@@ -409,7 +452,7 @@ export class AgentManager extends EventEmitter {
    * Priority: task.skill_ids > agent.config.skill_ids > all skills.
    * Also generates AGENTS.md and CLAUDE.md with skill directory.
    */
-  private writeSkillFiles(taskId: string, agentId: string, workspaceDir: string): void {
+  private async writeSkillFiles(taskId: string, agentId: string, workspaceDir: string): Promise<void> {
     try {
       const task = this.db.getTask(taskId)
       const agent = this.db.getAgent(agentId)
@@ -428,7 +471,8 @@ export class AgentManager extends EventEmitter {
         ? this.db.getSkills()
         : this.db.getSkillsByIds(skillIds)
 
-      // Write individual SKILL.md files
+      // Write individual SKILL.md files using async I/O so the event loop
+      // can process IPC/rendering between writes (avoids startup UI freeze).
       // Claude Code agent: .claude/skills/<name>/SKILL.md
       // Other agents: .agents/skills/<name>/SKILL.md
       if (skills.length > 0) {
@@ -439,16 +483,16 @@ export class AgentManager extends EventEmitter {
           : join(workspaceDir, '.agents', 'skills')
         for (const skill of skills) {
           const dir = join(skillsDir, skill.name)
-          mkdirSync(dir, { recursive: true })
+          await mkdir(dir, { recursive: true })
           const desc = skill.description || skill.name
           const content = `---\nname: ${skill.name}\ndescription: ${desc}\n---\n\n${skill.content}`
-          writeFileSync(join(dir, 'SKILL.md'), content, 'utf-8')
+          await writeFile(join(dir, 'SKILL.md'), content, 'utf-8')
         }
         console.log(`[AgentManager] Wrote ${skills.length} SKILL.md file(s) to ${skillsDir}`)
       }
 
       // Generate AGENTS.md and CLAUDE.md with skill directory
-      this.writeAgentsDocumentation(workspaceDir, skills, task?.repos || [], agentId)
+      await this.writeAgentsDocumentation(workspaceDir, skills, task?.repos || [], agentId)
     } catch (error) {
       console.error('[AgentManager] Error writing skill files:', error)
     }
@@ -458,23 +502,23 @@ export class AgentManager extends EventEmitter {
    * Generates AGENTS.md and CLAUDE.md with skill directory and metadata.
    * Both files are written to the workspace root directory.
    */
-  private writeAgentsDocumentation(
+  private async writeAgentsDocumentation(
     workspaceDir: string,
     skills: SkillRecord[],
     repos: string[],
     agentId?: string
-  ): void {
+  ): Promise<void> {
     try {
       // Sort skills by confidence (high to low)
       const sortedSkills = [...skills].sort((a, b) => b.confidence - a.confidence)
 
-      // Generate AGENTS.md — write to workspace root
+      // Generate AGENTS.md — write to workspace root (async to avoid blocking)
       const agentsMd = this.generateAgentsMd(sortedSkills, repos, workspaceDir, agentId)
-      writeFileSync(join(workspaceDir, 'AGENTS.md'), agentsMd, 'utf-8')
+      await writeFile(join(workspaceDir, 'AGENTS.md'), agentsMd, 'utf-8')
 
       // Generate CLAUDE.md — write to workspace root
       const claudeMd = this.generateClaudeMd(sortedSkills, repos, workspaceDir, agentId)
-      writeFileSync(join(workspaceDir, 'CLAUDE.md'), claudeMd, 'utf-8')
+      await writeFile(join(workspaceDir, 'CLAUDE.md'), claudeMd, 'utf-8')
 
       console.log('[AgentManager] Generated AGENTS.md and CLAUDE.md in workspace root')
     } catch (error) {
@@ -933,6 +977,10 @@ export class AgentManager extends EventEmitter {
     workspaceDir?: string,
     skipInitialPrompt?: boolean
   ): Promise<string> {
+    // Helper: yield event loop between bursts of synchronous DB / FS calls
+    // so the renderer can process IPC and paint frames during session setup.
+    const yieldEL = (): Promise<void> => new Promise((r) => setImmediate(r))
+
     const agent = this.db.getAgent(agentId)!
 
     // Always use a dedicated workspace directory
@@ -940,17 +988,20 @@ export class AgentManager extends EventEmitter {
       workspaceDir = this.db.getWorkspaceDir(taskId)
     }
 
-    // Write SKILL.md files to workspace
-    this.writeSkillFiles(taskId, agentId, workspaceDir)
+    // Write SKILL.md files to workspace (async to avoid blocking the event loop)
+    await this.writeSkillFiles(taskId, agentId, workspaceDir)
 
-    // Check if this is a triage session
+    // Check if this is a triage session or subtask
     const task = this.db.getTask(taskId)
     const isTriageSession = task?.status === TaskStatus.Triaging
+    const isSubtask = !!task?.parent_task_id
+    const taskScope = isSubtask && task?.parent_task_id ? { taskId, parentTaskId: task.parent_task_id } : undefined
+    await yieldEL()
 
     // Build MCP servers config for adapter
-    // Mastermind and triage sessions always get task-management access
+    // Mastermind, triage, and subtask sessions always get task-management access
     const isMastermind = taskId === 'mastermind-session'
-    const mcpServers = await this.buildMcpServersForAdapter(agentId, { ensureTaskManagement: isMastermind || isTriageSession })
+    const mcpServers = await this.buildMcpServersForAdapter(agentId, { ensureTaskManagement: isMastermind || isTriageSession || isSubtask, taskScope })
 
     // Build session config
     const sessionConfig: SessionConfig = {
@@ -961,6 +1012,7 @@ export class AgentManager extends EventEmitter {
       systemPrompt: agent.config?.system_prompt,
       mcpServers,
       authMethod: agent.config?.auth_method,
+      permissionMode: agent.config?.permission_mode,
       apiKeys: agent.config?.api_keys
     }
 
@@ -990,6 +1042,7 @@ export class AgentManager extends EventEmitter {
         sessionConfig.systemPrompt = (sessionConfig.systemPrompt || '') + this.buildSecretsSystemPrompt(secretRecords)
       }
     }
+    await yieldEL()
 
     // Initialize adapter
     await adapter.initialize()
@@ -1026,6 +1079,7 @@ export class AgentManager extends EventEmitter {
         updates: { status: TaskStatus.AgentWorking }
       })
     }
+    await yieldEL()
 
     // Notify renderer
     this.sendToRenderer('agent:status', {
@@ -1034,6 +1088,11 @@ export class AgentManager extends EventEmitter {
       taskId,
       status: 'working'
     })
+
+    // Record enterprise sync event: agent run started
+    if (this.enterpriseStateSync && task && !isTriageSession && taskId !== 'mastermind-session' && !taskId.startsWith('heartbeat-')) {
+      this.enterpriseStateSync.recordAgentRunStarted(task, agent.name)
+    }
 
     // Start polling adapter for messages
     this.startAdapterPolling(adapterSessionId, adapter, sessionConfig)
@@ -1046,10 +1105,58 @@ export class AgentManager extends EventEmitter {
         // Use triage-specific prompt
         promptText = this.buildTriagePrompt(task)
       } else {
+        // Reuse the task we already fetched above instead of hitting the DB again
         const currentTask = task || this.db.getTask(taskId)
         promptText = currentTask
           ? `Work on task: "${currentTask.title}"\n\n${currentTask.description || ''}`
           : `Work on task: ${taskId}`
+
+        // Add subtask context: if this is a subtask, include parent and sibling info
+        if (currentTask?.parent_task_id) {
+          const parentTask = this.db.getTask(currentTask.parent_task_id)
+          if (parentTask) {
+            promptText += `\n\n## Parent Task Context\nThis is a subtask of: "${parentTask.title}" (id: ${parentTask.id})\nParent description: ${parentTask.description || '(none)'}\nParent status: ${parentTask.status}`
+            if (parentTask.output_fields && parentTask.output_fields.length > 0) {
+              promptText += '\nParent output fields:'
+              for (const field of parentTask.output_fields) {
+                const val = (field as unknown as { value?: string }).value ?? '(not set)'
+                promptText += `\n  - ${field.name}: ${val}`
+              }
+            }
+
+            // Include sibling subtasks for coordination
+            const siblings = this.db.getSubtasks(currentTask.parent_task_id)
+            const otherSubtasks = siblings.filter(s => s.id !== currentTask.id)
+            if (otherSubtasks.length > 0) {
+              promptText += '\n\n## Sibling Subtasks'
+              for (const sibling of otherSubtasks) {
+                const resolution = sibling.resolution ? ` | Resolution: ${sibling.resolution}` : ''
+                const outputSummary = sibling.output_fields && sibling.output_fields.length > 0
+                  ? ` | Outputs: ${sibling.output_fields.length} field(s)`
+                  : ''
+                promptText += `\n- "${sibling.title}" (id: ${sibling.id}, status: ${sibling.status}${resolution}${outputSummary})`
+              }
+              promptText += '\n\nCoordinate with sibling subtasks — avoid duplicating work and ensure compatibility.'
+              promptText += '\nUse `get_task` with a sibling ID to read its full output fields and resolution.'
+            }
+          }
+          promptText += '\n\nYou can call `list_subtasks` or `get_task` via the `task-management` MCP server at any time for live data on parent and sibling tasks.'
+          promptText += '\nIMPORTANT: For all task operations (update_task, get_task, list_subtasks), use ONLY the `task-management` MCP server tools. Do NOT use integration tools like `pf-workflo-integrations` — those are for external system sync only.'
+        }
+
+        // If this task has subtasks, mention them
+        if (currentTask) {
+          const subtasks = this.db.getSubtasks(currentTask.id)
+          if (subtasks.length > 0) {
+            promptText += '\n\n## Subtasks'
+            for (const sub of subtasks) {
+              const subResolution = sub.resolution ? ` | Resolution: ${sub.resolution}` : ''
+              promptText += `\n- "${sub.title}" (id: ${sub.id}, status: ${sub.status}, agent: ${sub.agent_id || 'unassigned'}${subResolution})`
+            }
+            promptText += '\n\nThis task has subtasks. Each subtask has its own agent. Focus on coordination and any work not covered by subtasks.'
+            promptText += '\nUse `list_subtasks` or `get_task` via MCP tools to check live subtask status and outputs.'
+          }
+        }
 
         // Append output field instructions
         if (currentTask?.output_fields && currentTask.output_fields.length > 0) {
@@ -1150,6 +1257,15 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
     this.pollingEntries.set(initialSessionId, entry)
     console.log(`[AgentManager] Registered session ${initialSessionId} for polling (${this.pollingEntries.size} active)`)
 
+    // Wire up event-driven nudge so the adapter can trigger an immediate
+    // poll cycle when new stream data is buffered (instead of waiting for
+    // the 2-second heartbeat).
+    if (!adapter.onDataAvailable) {
+      adapter.onDataAvailable = (_sessionId: string) => {
+        this.nudgePollingCoordinator()
+      }
+    }
+
     // Start the coordinator if not already running
     this.ensurePollingCoordinator()
   }
@@ -1162,9 +1278,15 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
     console.log(`[AgentManager] Unregistered session ${sessionId} from polling (${this.pollingEntries.size} remaining)`)
 
     // Stop coordinator if no sessions left
-    if (this.pollingEntries.size === 0 && this.pollingTimer) {
-      clearTimeout(this.pollingTimer)
-      this.pollingTimer = null
+    if (this.pollingEntries.size === 0) {
+      if (this.pollingTimer) {
+        clearTimeout(this.pollingTimer)
+        this.pollingTimer = null
+      }
+      if (this.nudgeTimer) {
+        clearTimeout(this.nudgeTimer)
+        this.nudgeTimer = null
+      }
       console.log('[AgentManager] Polling coordinator stopped (no active sessions)')
     }
   }
@@ -1173,9 +1295,13 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
    * Ensures the single polling coordinator timer is running.
    */
   private ensurePollingCoordinator(): void {
-    if (this.pollingTimer) return // Already running
+    if (this.pollingTimer || this.pollingInProgress) return // Already running or executing
 
     const tick = async (): Promise<void> => {
+      // Prevent overlapping tick() calls from nudge + heartbeat firing together
+      if (this.pollingInProgress) return
+      this.pollingInProgress = true
+
       // Clear the timer reference — this tick is now executing, not pending.
       // ensurePollingCoordinator checks this to know whether to start a new loop.
       this.pollingTimer = null
@@ -1198,6 +1324,8 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
         }
       } catch (error) {
         console.error('[AgentManager] Polling coordinator error:', error)
+      } finally {
+        this.pollingInProgress = false
       }
 
       // ALWAYS reschedule if there are active sessions (even after errors).
@@ -1206,9 +1334,50 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
       }
     }
 
+    // Store reference so nudgePollingCoordinator can invoke it
+    this.pollTickFn = tick
+
     // Start after a short initial delay
     this.pollingTimer = setTimeout(tick, 1000)
     console.log('[AgentManager] Polling coordinator started')
+  }
+
+  /**
+   * Nudges the polling coordinator to run a poll cycle within NUDGE_DELAY_MS
+   * instead of waiting for the next 2-second heartbeat.  Called by adapters
+   * (via onDataAvailable) when new stream data is buffered.
+   *
+   * The short debounce (50ms) batches rapid-fire stream events so we don't
+   * run a poll cycle for every single streaming chunk.
+   */
+  private nudgePollingCoordinator(): void {
+    // Already have a nudge scheduled, no need to double-schedule
+    if (this.nudgeTimer) return
+
+    // If a tick is already running, it will pick up the new data — no nudge needed
+    if (this.pollingInProgress) return
+
+    // No active sessions → nothing to nudge
+    if (this.pollingEntries.size === 0) return
+
+    this.nudgeTimer = setTimeout(() => {
+      this.nudgeTimer = null
+
+      // Guard: still have sessions and tick isn't already running
+      if (this.pollingEntries.size === 0 || this.pollingInProgress) return
+
+      // Cancel the pending heartbeat timer — the nudge replaces it.
+      // tick() will reschedule the heartbeat after it finishes.
+      if (this.pollingTimer) {
+        clearTimeout(this.pollingTimer)
+        this.pollingTimer = null
+      }
+
+      // Run a poll cycle immediately
+      if (this.pollTickFn) {
+        this.pollTickFn()
+      }
+    }, AgentManager.NUDGE_DELAY_MS)
   }
 
   /**
@@ -1375,7 +1544,7 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
           data: {
             id: `error-${Date.now()}`,
             role: 'system',
-            content: status.message || 'Unknown error',
+            content: status.message || 'An unexpected error occurred. Check logs for details.',
             partType: 'error'
           }
         })
@@ -1416,8 +1585,12 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
     adapter: CodingAgentAdapter,
     agentId: string,
     taskId: string,
-    adapterSessionId: string
+    adapterSessionId: string,
+    options?: { replayToRenderer?: boolean }
   ): Promise<string> {
+    // Helper: yield event loop between bursts of sync DB/FS calls
+    const yieldEL = (): Promise<void> => new Promise((r) => setImmediate(r))
+
     const agent = this.db.getAgent(agentId)!
     const workspaceDir = this.db.getWorkspaceDir(taskId)
 
@@ -1425,7 +1598,11 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
     const isMastermind = taskId === 'mastermind-session'
     const task = this.db.getTask(taskId)
     const isTriageSession = task?.status === TaskStatus.Triaging
-    const mcpServers = await this.buildMcpServersForAdapter(agentId, { ensureTaskManagement: isMastermind || isTriageSession })
+    const isSubtask = !!task?.parent_task_id
+    const taskScope = isSubtask && task?.parent_task_id ? { taskId, parentTaskId: task.parent_task_id } : undefined
+    await yieldEL()
+
+    const mcpServers = await this.buildMcpServersForAdapter(agentId, { ensureTaskManagement: isMastermind || isTriageSession || isSubtask, taskScope })
 
     // Build system prompt with task context (survives context compaction)
     const baseSystemPrompt = agent.config?.system_prompt || ''
@@ -1442,6 +1619,7 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
       systemPrompt: baseSystemPrompt + taskContext,
       mcpServers,
       authMethod: agent.config?.auth_method,
+      permissionMode: agent.config?.permission_mode,
       apiKeys: agent.config?.api_keys
     }
 
@@ -1471,6 +1649,7 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
         sessionConfig.systemPrompt = (sessionConfig.systemPrompt || '') + this.buildSecretsSystemPrompt(secretRecords)
       }
     }
+    await yieldEL()
 
     // Initialize adapter
     await adapter.initialize()
@@ -1493,6 +1672,17 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
         errorMessage.includes('Session no longer exists on server')
       ) {
         console.warn(`[AgentManager] Session not found or incompatible: ${adapterSessionId}`)
+
+        // For completed/review tasks, the session may have ended normally.
+        // Don't show the alarming "incompatible" dialog — just clear the session_id
+        // so the UI shows "Start" instead. This commonly happens with subtask sessions.
+        const currentTask = this.db.getTask(taskId)
+        if (currentTask && (currentTask.status === TaskStatus.ReadyForReview || currentTask.status === TaskStatus.Completed)) {
+          console.log(`[AgentManager] Session ended normally for ${currentTask.status} task ${taskId} — clearing session_id`)
+          this.db.updateTask(taskId, { session_id: null })
+          this.sendToRenderer('task:updated', { taskId, updates: { session_id: null } })
+          throw new Error('SESSION_ENDED')
+        }
 
         // Clear the old session_id in the database
         this.db.updateTask(taskId, { session_id: null })
@@ -1523,25 +1713,29 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
       throw error
     }
 
+    const shouldReplayToRenderer = options?.replayToRenderer !== false
+
     // Replay messages to renderer in a single batch to avoid UI freeze
-    const batchMessages: Array<{ id: string; role: string; content: string; partType?: string; tool?: unknown }> = []
-    for (const message of messages) {
-      for (const part of message.parts) {
-        batchMessages.push({
-          id: part.id || `${message.role}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-          role: message.role,
-          content: part.content || part.text || '',
-          partType: part.type,
-          tool: part.tool
+    if (shouldReplayToRenderer) {
+      const batchMessages: Array<{ id: string; role: string; content: string; partType?: string; tool?: unknown }> = []
+      for (const message of messages) {
+        for (const part of message.parts) {
+          batchMessages.push({
+            id: part.id || `${message.role}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            role: message.role,
+            content: part.content || part.text || '',
+            partType: part.type,
+            tool: part.tool
+          })
+        }
+      }
+      if (batchMessages.length > 0) {
+        this.sendToRenderer('agent:output-batch', {
+          sessionId: adapterSessionId,
+          taskId,
+          messages: batchMessages
         })
       }
-    }
-    if (batchMessages.length > 0) {
-      this.sendToRenderer('agent:output-batch', {
-        sessionId: adapterSessionId,
-        taskId,
-        messages: batchMessages
-      })
     }
 
     // Store session in sessions map — idle until user sends a message
@@ -1695,6 +1889,49 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
   }
 
   /**
+   * Get a summary transcript for a task's session.
+   * Returns assistant text messages suitable for sibling subtask coordination.
+   * Used by the task-api-server to serve transcript data to subtask MCP agents.
+   */
+  async getTranscriptForTask(taskId: string): Promise<Array<{ role: string; text: string }>> {
+    // Find the active session for this task
+    let session: AgentSession | undefined
+    for (const s of this.sessions.values()) {
+      if (s.taskId === taskId) {
+        session = s
+        break
+      }
+    }
+
+    if (!session?.adapter?.getAllMessages) {
+      return []
+    }
+
+    try {
+      const config: SessionConfig = {
+        agentId: session.agentId,
+        taskId: session.taskId,
+        workspaceDir: session.workspaceDir || this.db.getWorkspaceDir(taskId)
+      }
+      const messages = await session.adapter.getAllMessages(session.id, config)
+      // Return a simplified transcript with role + text content only
+      return messages
+        .filter(m => m.parts && m.parts.length > 0)
+        .map(m => ({
+          role: m.role,
+          text: m.parts
+            .filter(p => p.type === 'text')
+            .map(p => p.content || '')
+            .join('\n')
+        }))
+        .filter(m => m.text.length > 0)
+    } catch (err) {
+      console.error(`[AgentManager] Failed to get transcript for task ${taskId}:`, err)
+      return []
+    }
+  }
+
+  /**
    * Reconnects to an existing session by its persisted session ID.
    * Replays all messages to the renderer and resumes polling.
    */
@@ -1726,6 +1963,12 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
     session.status = 'idle'
     console.log(`[AgentManager] Session ${sessionId} → idle`)
 
+    // Helper: yield event loop between synchronous DB operations so IPC,
+    // timers and rendering callbacks can run.  transitionToIdle chains many
+    // sync better-sqlite3 calls; without yields this blocks the main thread
+    // for the entire duration and freezes the UI.
+    const yieldEventLoop = (): Promise<void> => new Promise((r) => setImmediate(r))
+
     // In learning mode, skip output extraction, task status, and renderer notification
     if (session.learningMode) return
 
@@ -1733,6 +1976,7 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
     if (session.isTriageSession) {
       console.log(`[AgentManager] Triage session completed for task ${session.taskId}, reverting to NotStarted`)
       this.db.updateTask(session.taskId, { status: TaskStatus.NotStarted, session_id: null })
+      await yieldEventLoop()
 
       this.sendToRenderer('task:updated', {
         taskId: session.taskId,
@@ -1750,6 +1994,8 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
 
     // Check if task exists (e.g., orchestrator-session doesn't have a real task)
     const task = this.db.getTask(session.taskId)
+    await yieldEventLoop()
+
     if (!task) {
       console.log(`[AgentManager] No task found for ${session.taskId}, sending idle status only`)
       this.sendToRenderer('agent:status', {
@@ -1768,9 +2014,50 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
       } catch (err) {
         console.error(`[AgentManager] Skill sync error:`, err)
       }
+      await yieldEventLoop()
+
+      // For enterprise tasks, call executeAction to notify the backend (e.g. Workflo)
+      // before marking the task as completed locally. This mirrors the completion
+      // path used by the renderer's onCompleteTask / handleFeedbackSkip.
+      if (task.source_id && this.syncManager) {
+        const actionField = task.output_fields?.find((f: OutputFieldRecord) => f.id === 'action')
+        const actionValue = actionField?.value ? String(actionField.value) : 'complete'
+        console.log(`[AgentManager] Enterprise task — calling executeAction("${actionValue}") for source ${task.source_id}`)
+        try {
+          const result = await this.syncManager.executeAction(actionValue, task, undefined, task.source_id)
+          if (!result.success) {
+            console.error(`[AgentManager] executeAction failed:`, result.error)
+            // Revert to ReadyForReview so user can retry completion manually
+            this.db.updateTask(session.taskId, { status: TaskStatus.ReadyForReview })
+            await yieldEventLoop()
+            this.sendToRenderer('task:updated', {
+              taskId: session.taskId,
+              updates: { status: TaskStatus.ReadyForReview }
+            })
+            this.sendToRenderer('agent:status', {
+              sessionId, agentId: session.agentId, taskId: session.taskId, status: 'idle'
+            })
+            return
+          }
+        } catch (err) {
+          console.error(`[AgentManager] executeAction threw:`, err)
+          this.db.updateTask(session.taskId, { status: TaskStatus.ReadyForReview })
+          await yieldEventLoop()
+          this.sendToRenderer('task:updated', {
+            taskId: session.taskId,
+            updates: { status: TaskStatus.ReadyForReview }
+          })
+          this.sendToRenderer('agent:status', {
+            sessionId, agentId: session.agentId, taskId: session.taskId, status: 'idle'
+          })
+          return
+        }
+        await yieldEventLoop()
+      }
 
       // Mark task as completed
       this.db.updateTask(session.taskId, { status: TaskStatus.Completed })
+      await yieldEventLoop()
 
       this.sendToRenderer('task:updated', {
         taskId: session.taskId,
@@ -1789,10 +2076,13 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
     } catch (err) {
       console.error(`[AgentManager] extractOutputValues error:`, err)
     }
+    await yieldEventLoop()
 
     // Check again if task is still in a state where we should update it
     // (frontend might have already completed it during feedback flow)
     const taskAfterExtract = this.db.getTask(session.taskId)
+    await yieldEventLoop()
+
     if (taskAfterExtract?.status === TaskStatus.AgentLearning || taskAfterExtract?.status === TaskStatus.Completed) {
       console.log(`[AgentManager] Task already in final state (${taskAfterExtract.status}), skipping status update`)
       this.sendToRenderer('agent:status', {
@@ -1805,9 +2095,11 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
     if (task) {
       console.log(`[AgentManager] Updating task ${session.taskId} status to ReadyForReview`)
       this.db.updateTask(session.taskId, { status: TaskStatus.ReadyForReview })
+      await yieldEventLoop()
 
       // Auto-enable heartbeat if agent wrote a heartbeat.md file
       this.autoEnableHeartbeat(session.taskId)
+      await yieldEventLoop()
 
       // Get updated task with output fields and notify renderer
       const updatedTask = this.db.getTask(session.taskId)
@@ -1826,6 +2118,17 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
     this.sendToRenderer('agent:status', {
       sessionId, agentId: session.agentId, taskId: session.taskId, status: 'idle'
     })
+
+    // Record enterprise sync event: agent run completed
+    if (this.enterpriseStateSync && task && !session.isTriageSession && session.taskId !== 'mastermind-session' && !session.taskId.startsWith('heartbeat-')) {
+      const durationMinutes = (Date.now() - session.createdAt.getTime()) / (1000 * 60)
+      const agent = this.db.getAgent(session.agentId)
+      this.enterpriseStateSync.recordAgentRunCompleted(task, {
+        agentName: agent?.name,
+        durationMinutes: Math.round(durationMinutes * 10) / 10,
+        success: true
+      })
+    }
   }
 
   /**
@@ -1931,7 +2234,9 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
             console.log(`[AgentManager] Session ${sessionId} not found, attempting resume from ${persistedSessionId} for task ${taskId}`)
             const adapter = this.getAdapter(resolvedAgentId)
             if (adapter) {
-              const resumedId = await this.resumeAdapterSession(adapter, resolvedAgentId, taskId, persistedSessionId)
+              const resumedId = await this.resumeAdapterSession(adapter, resolvedAgentId, taskId, persistedSessionId, {
+                replayToRenderer: false
+              })
               session = this.sessions.get(resumedId)
               if (session) {
                 sessionId = resumedId
@@ -2140,7 +2445,7 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
     console.warn(`[AgentManager] No adapter handler for permission response in session ${sessionId}`)
   }
 
-  stopAllSessions(): void {
+  async stopAllSessions(): Promise<void> {
     console.log(`[AgentManager] Stopping all ${this.sessions.size} sessions`)
 
     // Stop the centralized polling coordinator first
@@ -2150,10 +2455,12 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
     }
     this.pollingEntries.clear()
 
-    for (const sessionId of [...this.sessions.keys()]) {
-      // Don't reset task status during app shutdown - preserve current status
-      this.stopSession(sessionId, false)
-    }
+    await Promise.allSettled(
+      [...this.sessions.keys()].map((sessionId) => {
+        // Don't reset task status during app shutdown - preserve current status
+        return this.stopSession(sessionId, false)
+      })
+    )
   }
 
   getSessionStatus(sessionId: string): { status: string; agentId: string; taskId: string } | null {
@@ -2506,6 +2813,10 @@ Description: ${task.description || '(none)'}
 Type: ${task.type || 'general'}
 Current Priority: ${task.priority || 'medium'}
 Current Labels: ${JSON.stringify(task.labels || [])}
+Current Output Fields: ${JSON.stringify(task.output_fields || [])}
+Parent Task: ${task.parent_task_id ? `This is a subtask of task ${task.parent_task_id}` : 'None (top-level task)'}
+
+IMPORTANT: For ALL task operations below, use ONLY the \`task-management\` MCP server tools (e.g. \`mcp__task-management__update_task\`, \`mcp__task-management__create_subtask\`). Do NOT use integration/sync tools like \`pf-workflo-integrations\` for updating tasks — those are for external system sync only.
 
 Follow these steps:
 
@@ -2519,14 +2830,35 @@ Follow these steps:
    - Appropriate repos (if the task relates to specific repositories)
    - Priority (critical/high/medium/low) — adjust if the current priority seems wrong
    - Labels — suggest relevant labels based on similar tasks
-6. Call \`update_task\` ONCE with task_id "${task.id}" and all the values you determined. You MUST include agent_id.
+   - output_fields — define the expected structured outputs for this task. Think about what concrete deliverables or data the agent should produce. Each output field needs an id (snake_case), name (human-readable), and type (text, number, url, file, boolean, textarea, list, date, email, country, currency). Mark fields as required if they are essential. Examples:
+     - A coding task might have: { id: "pr_url", name: "Pull Request URL", type: "url", required: true }
+     - A research task might have: { id: "summary", name: "Summary", type: "textarea", required: true }
+     - A review task might have: { id: "approved", name: "Approved", type: "boolean", required: true }
+6. If the task is complex and clearly involves multiple distinct steps that would benefit from separate agents or sequential human review, create subtasks using \`create_subtask\` from the \`task-management\` MCP server. Each subtask should:
+   - Have a clear, specific title describing one step
+   - Be assigned to the most appropriate agent_id (REQUIRED for each subtask)
+   - Have relevant skill_ids assigned based on what skills match that subtask's work
+   - Have repos set to the repositories relevant to that subtask (inherits from parent if not specified)
+   - Include a description explaining the subtask's scope, expected output, and how it relates to other subtasks
+   - Have output_fields defined to specify what structured data the subtask agent should produce
+   - NOT overlap with other subtasks — each subtask should be a distinct, self-contained piece of work
+   Only create subtasks when clearly needed — simple tasks should remain as single tasks.
+   When creating subtasks, consider the order of execution and dependencies between them.
+   Each subtask will run as a separate agent session with access to the parent task and sibling subtask outputs for coordination.
+7. Call \`update_task\` ONCE with task_id "${task.id}" and all the values you determined. You MUST include agent_id and output_fields.
+   If you created subtasks, the parent task's agent will coordinate the overall work.
 
 Important:
-- You MUST assign an agent_id. If only one agent exists, assign that one.
+- You MUST assign an agent_id to the parent task. If only one agent exists, assign that one.
+- You MUST also assign an agent_id to each subtask you create.
 - Do NOT change the task status — it will be handled automatically.
 - Do NOT attempt to work on or solve the task. Only triage it.
 - If no similar tasks exist, use your best judgment based on the title, description, and type.
-- Be efficient — make your tool calls and finish quickly.`
+- Be efficient — make your tool calls and finish quickly.
+- If the task already has output_fields defined (from an external source), preserve them and only add additional fields if needed. Do not remove existing output fields.
+- When creating subtasks, the parent task's agent will coordinate — subtask agents handle individual pieces.
+- Subtask agents can see the parent task, all sibling subtasks' status/resolution/outputs, and sibling transcripts for coordination.
+- NEVER use external integration MCP tools (like pf-workflo-integrations) for local task updates — always use task-management tools.`
   }
 
   /**
@@ -2948,15 +3280,22 @@ Important:
         const prevStatus = this.lastSentStatus.get(sessionId)
         this.lastSentStatus.set(sessionId, status)
 
+        // Check ALL conditions BEFORE doing any DB/notification work.
+        // Previously the sync db.getTask() call ran inside the notification
+        // block but BEFORE checking if the window was inactive, blocking the
+        // event loop on every status transition even when no notification was
+        // needed.
         const isWindowInactive = !this.mainWindow || this.mainWindow.isDestroyed() || !this.mainWindow.isFocused()
+        const isNotifiableTransition = prevStatus === SessionStatus.WORKING && (status === SessionStatus.IDLE || status === SessionStatus.WAITING_APPROVAL)
 
-        if (prevStatus === SessionStatus.WORKING && (status === SessionStatus.IDLE || status === SessionStatus.WAITING_APPROVAL) && isWindowInactive) {
+        if (isNotifiableTransition && isWindowInactive) {
           try {
             if (Notification.isSupported()) {
-              let title: string
-              let body: string
+              // Only hit the database when we actually need the title for a notification
               const taskTitle = taskId ? this.db.getTask(taskId)?.title : undefined
 
+              let title: string
+              let body: string
               if (status === SessionStatus.WAITING_APPROVAL) {
                 title = 'Agent needs approval'
                 body = taskTitle ? `"${taskTitle}" is waiting for your approval` : 'An agent is waiting for your approval'

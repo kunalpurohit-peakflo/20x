@@ -1,9 +1,15 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, act } from '@testing-library/react'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { render, act, fireEvent, screen, waitFor, cleanup } from '@testing-library/react'
 import { TaskWorkspace } from './TaskWorkspace'
 import { useAgentStore, SessionStatus } from '@/stores/agent-store'
 import { TaskStatus } from '@/types'
 import type { WorkfloTask, Agent } from '@/types'
+
+vi.mock('@/components/agents/AgentTranscriptPanel', () => ({
+  AgentTranscriptPanel: ({ onSend }: { onSend?: (message: string) => void }) => (
+    <button data-testid="mock-send" onClick={() => onSend?.('approved')}>send</button>
+  )
+}))
 
 // Add missing electronAPI mocks that child components need
 const api = window.electronAPI as unknown as Record<string, unknown>
@@ -42,6 +48,8 @@ function makeRendererTask(overrides: Partial<WorkfloTask> = {}): WorkfloTask {
     next_occurrence_at: null,
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
+    parent_task_id: null,
+    sort_order: 0,
     ...overrides
   }
 }
@@ -77,6 +85,10 @@ function renderWorkspace(task: WorkfloTask, agents: Agent[] = [makeAgent()]) {
     />
   )
 }
+
+afterEach(() => {
+  cleanup()
+})
 
 beforeEach(() => {
   useAgentStore.setState({
@@ -186,5 +198,51 @@ describe('TaskWorkspace – stale triage session cleanup', () => {
 
     // Session should still be present — it's a legitimate coding session, not stale triage
     expect(useAgentStore.getState().sessions.has(taskId)).toBe(true)
+  })
+
+  it('routes stale question replies to sendMessage when not waiting approval', async () => {
+    const taskId = 'task-1'
+    const agentId = 'agent-1'
+
+    useAgentStore.getState().initSession(taskId, 'session-1', agentId)
+    useAgentStore.setState((state) => {
+      const session = state.sessions.get(taskId)!
+      return {
+        sessions: new Map(state.sessions).set(taskId, {
+          ...session,
+          status: SessionStatus.IDLE,
+          messages: [
+            {
+              id: 'question-1',
+              role: 'assistant' as const,
+              content: 'Need approval',
+              timestamp: new Date(),
+              partType: 'question',
+              tool: {
+                name: 'permission',
+                status: 'pending',
+                questions: [
+                  {
+                    header: 'Permission',
+                    question: 'Allow write?',
+                    options: [{ label: 'Yes', description: 'Allow once' }]
+                  }
+                ]
+              }
+            }
+          ]
+        })
+      }
+    })
+
+    const task = makeRendererTask({ id: taskId, status: TaskStatus.AgentWorking, session_id: 'session-1' })
+    renderWorkspace(task)
+
+    fireEvent.click(screen.getByTestId('mock-send'))
+
+    await waitFor(() => {
+      expect(window.electronAPI.agentSession.send).toHaveBeenCalledWith('session-1', 'approved', taskId, agentId)
+    })
+    expect(window.electronAPI.agentSession.approve).not.toHaveBeenCalled()
   })
 })

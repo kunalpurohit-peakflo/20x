@@ -92,9 +92,13 @@ export function createTestDb(): { db: DatabaseManager; rawDb: InstanceType<typeo
       recurrence_parent_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
       last_occurrence_at TEXT DEFAULT NULL,
       next_occurrence_at TEXT DEFAULT NULL,
+      parent_task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+      sort_order INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+
+    CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id) WHERE parent_task_id IS NOT NULL;
 
     CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
     CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority);
@@ -141,6 +145,8 @@ export function createTestDb(): { db: DatabaseManager; rawDb: InstanceType<typeo
       last_used TEXT,
       tags TEXT NOT NULL DEFAULT '[]',
       is_deleted INTEGER NOT NULL DEFAULT 0,
+      enterprise_skill_id TEXT DEFAULT NULL,
+      uses_at_last_sync INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );

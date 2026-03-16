@@ -120,6 +120,10 @@ export interface WorkfloSkill {
   name: string
   description: string
   content: string
+  confidence?: number
+  version?: number
+  uses?: number
+  lastUsed?: string | null
   tags: string[]
   createdAt: string
   updatedAt: string
@@ -129,6 +133,20 @@ export interface WorkfloOrgNodeDetail {
   node: WorkfloOrgNode
   mcpServers: WorkfloMcpServer[]
   taskSources: WorkfloTaskSource[]
+}
+
+// ── Sync types ──────────────────────────────────────────────────────────
+
+export interface WorkfloSyncEvent {
+  eventType: string
+  entityType: string
+  entityId: string
+  entityTitle?: string
+  previousValue?: string
+  newValue?: string
+  eventData?: Record<string, unknown>
+  userName?: string
+  occurredAt?: string
 }
 
 // ── Client ──────────────────────────────────────────────────────────────
@@ -234,11 +252,94 @@ export class WorkfloApiClient {
    * List all skills
    */
   async listSkills(): Promise<WorkfloSkill[]> {
-    const result = (await this.auth.apiRequest(
+    const result = await this.auth.apiRequest(
       'GET',
       '/api/skills'
-    )) as { skills: WorkfloSkill[] }
-    return result.skills
+    )
+    // Handle both { skills: [...] } (new) and bare array (legacy) response formats
+    if (Array.isArray(result)) return result as WorkfloSkill[]
+    return (result as { skills: WorkfloSkill[] }).skills ?? []
+  }
+
+  /**
+   * Create a new skill on the server
+   */
+  async createSkill(data: {
+    name: string
+    description: string
+    content: string
+    confidence?: number
+    tags?: string[]
+    uses?: number
+    lastUsed?: string | null
+  }): Promise<WorkfloSkill> {
+    const result = (await this.auth.apiRequest(
+      'POST',
+      '/api/skills',
+      data
+    )) as WorkfloSkill
+    return result
+  }
+
+  /**
+   * Update an existing skill on the server
+   */
+  async updateSkill(
+    skillId: string,
+    data: {
+      name?: string
+      description?: string
+      content?: string
+      confidence?: number
+      tags?: string[]
+      usesDelta?: number
+      lastUsed?: string | null
+    }
+  ): Promise<WorkfloSkill> {
+    const result = (await this.auth.apiRequest(
+      'PATCH',
+      `/api/skills/${skillId}`,
+      data
+    )) as WorkfloSkill
+    return result
+  }
+
+  /**
+   * Delete a skill from the server
+   */
+  async deleteSkill(skillId: string): Promise<void> {
+    await this.auth.apiRequest('DELETE', `/api/skills/${skillId}`)
+  }
+
+  /**
+   * Clean up duplicate skills on the server (keeps oldest per name)
+   */
+  async cleanupDuplicateSkills(): Promise<{ deleted: number; kept: number }> {
+    const result = (await this.auth.apiRequest(
+      'POST',
+      '/api/skills/cleanup-duplicates'
+    )) as { deleted: number; kept: number }
+    return result
+  }
+
+  // ── Org Nodes (update) ──────────────────────────────────────────────
+
+  /**
+   * Update an org node (e.g. to assign skillIds)
+   */
+  async updateOrgNode(
+    nodeId: string,
+    data: {
+      skillIds?: string[]
+      agents?: WorkfloAgent[]
+    }
+  ): Promise<WorkfloOrgNode> {
+    const result = (await this.auth.apiRequest(
+      'PUT',
+      `/api/org-nodes/${nodeId}`,
+      data
+    )) as { node: WorkfloOrgNode }
+    return result.node
   }
 
   // ── File download ───────────────────────────────────────────────────
@@ -275,4 +376,41 @@ export class WorkfloApiClient {
     )) as { result: { imported: number; updated: number; unchanged: number; errors: string[]; totalFromSource: number } }
     return result.result
   }
+
+  // ── Sync (heartbeat + events + stats) ──────────────────────────────────
+
+  /**
+   * Send a heartbeat ping to Workflo.
+   * Should be called every ~1 minute when enterprise mode is active.
+   */
+  async sendHeartbeat(data?: {
+    appVersion?: string
+    userEmail?: string
+    userName?: string
+  }): Promise<{ ok: boolean; timestamp: string }> {
+    const result = (await this.auth.apiRequest(
+      'POST',
+      '/api/20x/sync/heartbeat',
+      data || {}
+    )) as { ok: boolean; timestamp: string }
+    return result
+  }
+
+  /**
+   * Send a batch of changelog events to Workflo.
+   * Events include task status changes, agent completions, etc.
+   */
+  async sendSyncEvents(
+    events: WorkfloSyncEvent[]
+  ): Promise<{ ok: boolean; inserted: number }> {
+    if (events.length === 0) return { ok: true, inserted: 0 }
+
+    const result = (await this.auth.apiRequest(
+      'POST',
+      '/api/20x/sync/events',
+      { events }
+    )) as { ok: boolean; inserted: number }
+    return result
+  }
+
 }

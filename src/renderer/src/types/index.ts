@@ -30,6 +30,8 @@ export enum CodingAgentType {
   CODEX = 'codex'
 }
 
+export type AgentPermissionMode = 'ask' | 'allow'
+
 export type ClaudeAuthMethod = 'subscription' | 'api_key'
 
 export const CODING_AGENTS: { value: CodingAgentType; label: string }[] = [
@@ -39,6 +41,7 @@ export const CODING_AGENTS: { value: CodingAgentType; label: string }[] = [
 ]
 
 export enum ClaudeModel {
+  SONNET_4_6 = 'claude-sonnet-4-6',
   SONNET_4_5 = 'claude-sonnet-4-5',
   OPUS_4_6 = 'claude-opus-4-6',
   HAIKU_4_5 = 'claude-haiku-4-5',
@@ -48,6 +51,7 @@ export enum ClaudeModel {
 }
 
 export const CLAUDE_MODELS: { id: ClaudeModel; name: string }[] = [
+  { id: ClaudeModel.SONNET_4_6, name: 'Claude Sonnet 4.6' },
   { id: ClaudeModel.SONNET_4_5, name: 'Claude Sonnet 4.5' },
   { id: ClaudeModel.OPUS_4_6, name: 'Claude Opus 4.6' },
   { id: ClaudeModel.HAIKU_4_5, name: 'Claude Haiku 4.5' },
@@ -57,6 +61,7 @@ export const CLAUDE_MODELS: { id: ClaudeModel; name: string }[] = [
 ]
 
 export enum CodexModel {
+  GPT_5_4_CODEX = 'gpt-5.4-codex',
   GPT_5_3_CODEX = 'gpt-5.3-codex',
   GPT_5_2_CODEX = 'gpt-5.2-codex',
   GPT_5_1_CODEX_MAX = 'gpt-5.1-codex-max',
@@ -68,7 +73,8 @@ export enum CodexModel {
 }
 
 export const CODEX_MODELS: { id: CodexModel; name: string }[] = [
-  { id: CodexModel.GPT_5_3_CODEX, name: 'GPT-5.3 Codex (Recommended)' },
+  { id: CodexModel.GPT_5_4_CODEX, name: 'GPT-5.4 Codex (Recommended)' },
+  { id: CodexModel.GPT_5_3_CODEX, name: 'GPT-5.3 Codex' },
   { id: CodexModel.GPT_5_2_CODEX, name: 'GPT-5.2 Codex' },
   { id: CodexModel.GPT_5_1_CODEX_MAX, name: 'GPT-5.1 Codex Max' },
   { id: CodexModel.GPT_5_1_CODEX, name: 'GPT-5.1 Codex' },
@@ -148,6 +154,7 @@ export interface AgentConfig {
   coding_agent?: CodingAgentType
   model?: string
   auth_method?: ClaudeAuthMethod
+  permission_mode?: AgentPermissionMode
   system_prompt?: string
   mcp_servers?: Array<string | AgentMcpServerEntry>
   skill_ids?: string[]
@@ -286,6 +293,8 @@ export interface WorkfloTask {
   heartbeat_interval_minutes?: number | null
   heartbeat_last_check_at?: string | null
   heartbeat_next_check_at?: string | null
+  parent_task_id: string | null
+  sort_order: number
   created_at: string
   updated_at: string
 }
@@ -305,6 +314,7 @@ export interface CreateTaskDTO {
   is_recurring?: boolean
   recurrence_pattern?: RecurrencePattern | null
   recurrence_parent_id?: string | null
+  parent_task_id?: string | null
 }
 
 export interface UpdateTaskDTO {
@@ -333,6 +343,8 @@ export interface UpdateTaskDTO {
   heartbeat_interval_minutes?: number | null
   heartbeat_last_check_at?: string | null
   heartbeat_next_check_at?: string | null
+  parent_task_id?: string | null
+  sort_order?: number
 }
 
 // ── Heartbeat log types ─────────────────────────────────────

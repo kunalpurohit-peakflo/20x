@@ -1,4 +1,4 @@
-import { execFile } from 'child_process'
+import { execFile, execSync } from 'child_process'
 import { readdirSync } from 'fs'
 import { app, BrowserWindow, net, protocol, shell, Tray, Menu, nativeImage } from 'electron'
 import { join } from 'path'
@@ -22,7 +22,9 @@ import { EnterpriseAuth } from './enterprise-auth'
 import { RecurrenceScheduler } from './recurrence-scheduler'
 import { HeartbeatScheduler } from './heartbeat-scheduler'
 import { ClaudePluginManager } from './claude-plugin-manager'
-import { setTaskApiNotifier } from './task-api-server'
+import { EnterpriseHeartbeat } from './enterprise-heartbeat'
+import { EnterpriseStateSync } from './enterprise-state-sync'
+import { setTaskApiNotifier, setTranscriptProvider, stopTaskApiServer } from './task-api-server'
 import { startSecretBroker, stopSecretBroker, writeSecretShellWrapper } from './secret-broker'
 import { startMobileApiServer, stopMobileApiServer, broadcastToMobileClients, setMobileApiNotifier } from './mobile-api-server'
 
@@ -41,6 +43,44 @@ let enterpriseAuth: EnterpriseAuth | null = null
 let recurrenceScheduler: RecurrenceScheduler | null = null
 let heartbeatScheduler: HeartbeatScheduler | null = null
 let claudePluginManager: ClaudePluginManager | null = null
+let enterpriseHeartbeatInstance: EnterpriseHeartbeat | null = null
+let enterpriseStateSyncInstance: EnterpriseStateSync | null = null
+let isShuttingDown = false
+
+async function shutdownAppServices(): Promise<void> {
+  enterpriseHeartbeatInstance?.stop()
+  heartbeatScheduler?.stop()
+
+  await agentManager?.stopAllSessions()
+  await agentManager?.stopServer()
+
+  mcpToolCaller?.destroy()
+  oauthManager?.destroy()
+  stopSecretBroker()
+  stopMobileApiServer()
+  stopTaskApiServer()
+
+  // Kill orphaned task-management-mcp processes (spawned by opencode, not cleaned up on exit)
+  try {
+    execSync('pkill -f "task-management-mcp\\.js"', { stdio: 'ignore' })
+    console.log('[Shutdown] Killed orphaned task-management-mcp processes')
+  } catch {
+    // pkill exits 1 if no processes matched — that's fine
+  }
+
+  // Stop all marimo server instances
+  try {
+    const { stopAllMarimo } = await import('./marimo-server')
+    stopAllMarimo()
+  } catch { /* marimo module may not be loaded */ }
+
+  db?.close()
+
+  if (tray) {
+    tray.destroy()
+    tray = null
+  }
+}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -120,6 +160,11 @@ function createWindow(): void {
       mainWindow.webContents.send(channel, data)
     }
   })
+
+  // Wire up transcript provider for subtask MCP agents to access sibling transcripts
+  if (agentManager) {
+    setTranscriptProvider((taskId) => agentManager!.getTranscriptForTask(taskId))
+  }
 
   // Wire up mobile-api-server notifications to the renderer
   setMobileApiNotifier((channel, data) => {
@@ -315,6 +360,7 @@ app.whenReady().then(async () => {
   pluginRegistry.register(new NotionPlugin())
 
   syncManager = new SyncManager(db, mcpToolCaller, pluginRegistry, oauthManager)
+  agentManager.setSyncManager(syncManager)
 
   recurrenceScheduler = new RecurrenceScheduler(db)
   heartbeatScheduler = new HeartbeatScheduler(db, agentManager)
@@ -343,8 +389,19 @@ app.whenReady().then(async () => {
 
         const apiClient = new WorkfloApiClient(enterpriseAuth)
         const enterpriseSyncMgr = new EnterpriseSyncManager(db, apiClient)
-        syncManager.setEnterpriseConnection(apiClient, enterpriseSyncMgr, session.userId)
-        console.log('[Main] Enterprise connection restored on startup')
+        // Initialize and start enterprise heartbeat + state sync
+        enterpriseHeartbeatInstance = new EnterpriseHeartbeat(apiClient)
+        enterpriseHeartbeatInstance.start({
+          userEmail: session.userEmail || undefined,
+          userName: session.userEmail || undefined
+        })
+
+        enterpriseStateSyncInstance = new EnterpriseStateSync(apiClient)
+        enterpriseStateSyncInstance.setUserName(session.userEmail || 'Unknown')
+
+        syncManager.setEnterpriseConnection(apiClient, enterpriseSyncMgr, session.userId, enterpriseStateSyncInstance)
+
+        console.log('[Main] Enterprise connection restored on startup (with heartbeat)')
       } else {
         console.log('[Main] Enterprise session not complete — skipping restore')
       }
@@ -355,7 +412,7 @@ app.whenReady().then(async () => {
     console.log('[Main] No enterprise auth instance — skipping restore')
   }
 
-  registerIpcHandlers(db, agentManager, githubManager, worktreeManager, syncManager, pluginRegistry, mcpToolCaller, oauthManager, recurrenceScheduler, enterpriseAuth ?? undefined, claudePluginManager, heartbeatScheduler)
+  registerIpcHandlers(db, agentManager, githubManager, worktreeManager, syncManager, pluginRegistry, mcpToolCaller, oauthManager, recurrenceScheduler, enterpriseAuth ?? undefined, claudePluginManager, heartbeatScheduler, enterpriseHeartbeatInstance ?? undefined, enterpriseStateSyncInstance ?? undefined)
 
   // Start secret broker and write shell wrapper (awaited so broker is ready before any sessions)
   try {
@@ -393,39 +450,21 @@ app.whenReady().then(async () => {
 })
 
 app.on('window-all-closed', () => {
-  // Stop all agent sessions and server
-  agentManager?.stopAllSessions()
-  agentManager?.stopServer()
-  oauthManager?.destroy()
-  stopSecretBroker()
-  stopMobileApiServer()
-
   if (process.platform !== 'darwin') {
     app.quit()
   }
 })
 
-app.on('before-quit', async () => {
-  isQuitting = true
-  // Ensure cleanup before quitting
-  heartbeatScheduler?.stop()
-  agentManager?.stopAllSessions()
-  agentManager?.stopServer()
-  mcpToolCaller?.destroy()
-  oauthManager?.destroy()
-
-  // Stop all marimo server instances
-  try {
-    const { stopAllMarimo } = await import('./marimo-server')
-    stopAllMarimo()
-  } catch { /* marimo module may not be loaded */ }
-
-  // Checkpoint WAL and close database
-  db?.close()
-
-  // Destroy tray
-  if (tray) {
-    tray.destroy()
-    tray = null
+app.on('before-quit', (event) => {
+  if (isShuttingDown) {
+    return
   }
+
+  event.preventDefault()
+  isShuttingDown = true
+  isQuitting = true
+
+  void shutdownAppServices().finally(() => {
+    app.exit(0)
+  })
 })

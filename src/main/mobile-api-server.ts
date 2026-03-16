@@ -207,7 +207,7 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
         return
       }
     }
-    handleApiRoute(req, res, pathname, url)
+    void handleApiRoute(req, res, pathname, url)
     return
   }
 
@@ -218,7 +218,7 @@ function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
 
 // ── API router ───────────────────────────────────────────────
 
-function handleApiRoute(req: IncomingMessage, res: ServerResponse, pathname: string, url: URL): void {
+async function handleApiRoute(req: IncomingMessage, res: ServerResponse, pathname: string, url: URL): Promise<void> {
   res.setHeader('Content-Type', 'application/json')
 
   // Collect body for POST requests
@@ -258,7 +258,7 @@ function handleApiRoute(req: IncomingMessage, res: ServerResponse, pathname: str
   // GET requests
   if (req.method === 'GET') {
     try {
-      const result = routeGet(pathname, url)
+      const result = await routeGet(pathname, url)
       res.writeHead(200)
       res.end(JSON.stringify(result))
     } catch (err: unknown) {
@@ -276,7 +276,7 @@ function handleApiRoute(req: IncomingMessage, res: ServerResponse, pathname: str
 
 // ── GET routes ───────────────────────────────────────────────
 
-function routeGet(pathname: string, url: URL): unknown {
+async function routeGet(pathname: string, url: URL): Promise<unknown> {
   const db = dbRef!
 
   // GET /api/tasks
@@ -304,12 +304,26 @@ function routeGet(pathname: string, url: URL): unknown {
     const order = url.searchParams.get('order') || 'desc'
     const dir = order === 'asc' ? 1 : -1
 
+    const PRIORITY_ORDER: Record<string, number> = { critical: 3, high: 2, medium: 1, low: 0 }
+    const STATUS_ORDER: Record<string, number> = { agent_working: 5, agent_learning: 4, triaging: 3, ready_for_review: 2, not_started: 1, completed: 0 }
+
     tasks.sort((a, b) => {
       const va = (a as unknown as Record<string, unknown>)[sort]
       const vb = (b as unknown as Record<string, unknown>)[sort]
       if (va == null && vb == null) return 0
       if (va == null) return dir
       if (vb == null) return -dir
+      // Use semantic ordering for priority and status instead of alphabetical
+      if (sort === 'priority') {
+        const pa = PRIORITY_ORDER[va as string] ?? 0
+        const pb = PRIORITY_ORDER[vb as string] ?? 0
+        return (pa - pb) * dir
+      }
+      if (sort === 'status') {
+        const sa = STATUS_ORDER[va as string] ?? 0
+        const sb = STATUS_ORDER[vb as string] ?? 0
+        return (sa - sb) * dir
+      }
       if (va < vb) return -dir
       if (va > vb) return dir
       return 0
@@ -353,6 +367,27 @@ function routeGet(pathname: string, url: URL): unknown {
   if (pathname === '/api/github/org') {
     const org = db.getSetting('github_org') || ''
     return { org }
+  }
+
+  // GET /api/github/orgs — returns available orgs + personal account
+  if (pathname === '/api/github/orgs') {
+    if (!githubRef) throw Object.assign(new Error('GitHub not configured'), { status: 500 })
+
+    const [status, orgs] = await Promise.all([
+      githubRef.checkGhCli(),
+      githubRef.fetchUserOrgs()
+    ])
+
+    const owners: Array<{ value: string; label: string }> = []
+    if (status.username) {
+      owners.push({ value: status.username, label: `${status.username} (personal)` })
+    }
+
+    for (const orgName of orgs) {
+      owners.push({ value: orgName, label: orgName })
+    }
+
+    return owners
   }
 
   throw Object.assign(new Error('Not found'), { status: 404 })
@@ -470,6 +505,14 @@ async function routePost(pathname: string, params: Record<string, unknown>): Pro
     if (!org) throw Object.assign(new Error('org is required'), { status: 400 })
     const repos = await githubRef.fetchOrgRepos(org)
     return repos
+  }
+
+  // POST /api/github/org — set configured github org
+  if (pathname === '/api/github/org') {
+    const { org } = params as { org?: string }
+    if (!org) throw Object.assign(new Error('org is required'), { status: 400 })
+    db.setSetting('github_org', org)
+    return { org }
   }
 
   throw Object.assign(new Error('Not found'), { status: 404 })

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { HeartbeatScheduler } from './heartbeat-scheduler'
-import { HeartbeatStatus, HEARTBEAT_OK_TOKEN, HEARTBEAT_DEFAULTS } from '../shared/constants'
+import { HeartbeatStatus, HEARTBEAT_OK_TOKEN, HEARTBEAT_INFO_TOKEN, HEARTBEAT_DEFAULTS } from '../shared/constants'
 import type { DatabaseManager, TaskRecord } from './database'
 import type { AgentManager } from './agent-manager'
 
@@ -178,6 +178,45 @@ describe('HeartbeatScheduler', () => {
     })
   })
 
+  // ── requiresCurrentStateChecks ───────────────────────────
+
+  describe('requiresCurrentStateChecks', () => {
+    const requiresCurrentStateChecks = (content: string) => {
+      const scheduler = new HeartbeatScheduler({} as DatabaseManager, {} as AgentManager)
+      return (scheduler as unknown as {
+        requiresCurrentStateChecks: (heartbeatContent: string) => boolean
+      }).requiresCurrentStateChecks(content)
+    }
+
+    it('returns true for requested changes and CI checks', () => {
+      expect(requiresCurrentStateChecks('Verify CI pipeline passed')).toBe(true)
+      expect(requiresCurrentStateChecks('Watch for requested changes on the PR')).toBe(true)
+    })
+
+    it('returns false for comments and conflict-only checks', () => {
+      expect(requiresCurrentStateChecks('Check for new PR comments and issue comments')).toBe(false)
+      expect(requiresCurrentStateChecks('Check whether the PR has conflicts')).toBe(false)
+    })
+  })
+
+  describe('hasMergeConflicts', () => {
+    const hasMergeConflicts = (prState: { mergeable: boolean | null; mergeable_state?: string | null }) => {
+      const scheduler = new HeartbeatScheduler({} as DatabaseManager, {} as AgentManager)
+      return (scheduler as unknown as {
+        hasMergeConflicts: (prState: { mergeable: boolean | null; mergeable_state?: string | null }) => boolean
+      }).hasMergeConflicts(prState)
+    }
+
+    it('returns true for dirty merge state', () => {
+      expect(hasMergeConflicts({ mergeable: false, mergeable_state: 'dirty' })).toBe(true)
+    })
+
+    it('returns false for non-conflicting states', () => {
+      expect(hasMergeConflicts({ mergeable: true, mergeable_state: 'clean' })).toBe(false)
+      expect(hasMergeConflicts({ mergeable: null, mergeable_state: 'unknown' })).toBe(false)
+    })
+  })
+
   // ── buildHeartbeatPrompt ──────────────────────────────────
 
   describe('buildHeartbeatPrompt', () => {
@@ -193,6 +232,18 @@ describe('HeartbeatScheduler', () => {
       expect(prompt).toContain('Fix auth bug')
       expect(prompt).toContain(content)
       expect(prompt).toContain(HEARTBEAT_OK_TOKEN)
+    })
+
+    it('adds current-state guidance for conflicts and CI checks', () => {
+      const buildPrompt = (scheduler as unknown as {
+        buildHeartbeatPrompt: (task: TaskRecord, content: string) => string
+      }).buildHeartbeatPrompt
+
+      const task = makeTask({ title: 'Fix auth bug' })
+      const content = '- Check PR conflicts\n- Verify CI pipeline passed'
+      const prompt = buildPrompt.call(scheduler, task, content)
+
+      expect(prompt).toContain('inspect the current state even if the problem started before the last check')
     })
   })
 
@@ -365,8 +416,33 @@ describe('HeartbeatScheduler', () => {
       expect(db.createHeartbeatLog).toHaveBeenCalledWith(expect.objectContaining({
         task_id: 'task-1',
         status: HeartbeatStatus.Ok,
+        summary: 'Everything is fine.',
         session_id: 'session-1',
       }))
+    })
+
+    it('falls back to default OK summary when only token is returned', () => {
+      const task = makeTask()
+      handle(scheduler).call(scheduler, task, 'session-1', HEARTBEAT_OK_TOKEN)
+
+      expect(db.createHeartbeatLog).toHaveBeenCalledWith(expect.objectContaining({
+        status: HeartbeatStatus.Ok,
+        summary: 'All checks passed (no new updates)',
+      }))
+    })
+
+    it('strips HEARTBEAT_INFO token prefix from summaries', () => {
+      const extractSummary = (scheduler as unknown as {
+        extractSummary: (result: string, status: HeartbeatStatus) => string
+      }).extractSummary
+
+      const summary = extractSummary.call(
+        scheduler,
+        `${HEARTBEAT_INFO_TOKEN}: PR approved; no action needed`,
+        HeartbeatStatus.Info,
+      )
+
+      expect(summary).toBe('PR approved; no action needed')
     })
 
     it('logs attention needed and notifies on non-OK result', () => {
@@ -529,6 +605,23 @@ describe('HeartbeatScheduler', () => {
       expect(agent.hasActiveSessionForTask).toHaveBeenCalledWith('task-1')
       // Should not have tried to start a heartbeat session
       expect(agent.startHeartbeatSession).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('writeHeartbeatFile', () => {
+    it('resets the heartbeat baseline when instructions change', () => {
+      const db = mockDbManager({
+        getWorkspaceDir: vi.fn().mockReturnValue(`/tmp/heartbeat-${Date.now()}`),
+        getTask: vi.fn().mockReturnValue(makeTask()),
+      })
+      const scheduler = new HeartbeatScheduler(db as unknown as DatabaseManager, agent as unknown as AgentManager)
+
+      scheduler.writeHeartbeatFile('task-1', `# Heartbeat Checks\n- [ ] Check PR conflicts`)
+
+      expect(db.updateTask).toHaveBeenCalledWith('task-1', expect.objectContaining({
+        heartbeat_last_check_at: null,
+        heartbeat_next_check_at: expect.any(String),
+      }))
     })
   })
 
