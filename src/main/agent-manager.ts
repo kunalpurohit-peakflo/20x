@@ -1560,6 +1560,7 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
           })
 
           // Record enterprise sync event: agent run failed
+          const task = this.db.getTask(config.taskId)
           if (this.enterpriseStateSync && task && !session.isTriageSession && session.taskId !== 'mastermind-session' && !session.taskId.startsWith('heartbeat-')) {
             const durationMinutes = (Date.now() - session.createdAt.getTime()) / (1000 * 60)
             const agent = this.db.getAgent(session.agentId)
