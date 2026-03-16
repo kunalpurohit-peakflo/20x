@@ -1558,6 +1558,17 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
             taskId: config.taskId,
             status: 'error'
           })
+
+          // Record enterprise sync event: agent run failed
+          if (this.enterpriseStateSync && task && !session.isTriageSession && session.taskId !== 'mastermind-session' && !session.taskId.startsWith('heartbeat-')) {
+            const durationMinutes = (Date.now() - session.createdAt.getTime()) / (1000 * 60)
+            const agent = this.db.getAgent(session.agentId)
+            this.enterpriseStateSync.recordAgentRunCompleted(task, {
+              agentName: agent?.name,
+              durationMinutes: Math.round(durationMinutes * 10) / 10,
+              success: false
+            })
+          }
         }
         this.stopAdapterPolling(sessionId)
         return
@@ -2126,6 +2137,7 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
       this.enterpriseStateSync.recordAgentRunCompleted(task, {
         agentName: agent?.name,
         durationMinutes: Math.round(durationMinutes * 10) / 10,
+        messageCount: session.seenMessageIds.size || undefined,
         success: true
       })
     }
