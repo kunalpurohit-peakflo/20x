@@ -643,22 +643,9 @@ describe('HeartbeatScheduler', () => {
         hasFailedCheckRuns: (owner: string, repo: string, sha: string) => Promise<boolean>
       }).hasFailedCheckRuns
 
-    it('returns true when check-runs have failures', async () => {
-      vi.useRealTimers()
-      const { execFile } = await import('child_process')
-      const { promisify } = await import('util')
-      const execFileAsync = promisify(execFile)
-
-      // Mock execFile at the module level
-      const execFileMock = vi.fn()
-      // First call: check-runs returns 1 failure
-      execFileMock.mockResolvedValueOnce({ stdout: '1', stderr: '' })
-
-      // We need to test the method in isolation since it uses execFileAsync
-      // The method catches errors internally, so we test the logic directly
+    it('exposes the method with the correct signature', () => {
       const s = new HeartbeatScheduler({} as DatabaseManager, {} as AgentManager)
-      // Since we can't easily mock execFileAsync inside the class,
-      // we verify the method exists and has the right signature
+      // Verify the method exists and has the right signature
       expect(typeof hasFailedCheckRuns(s)).toBe('function')
     })
   })
