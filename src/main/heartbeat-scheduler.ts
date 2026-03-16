@@ -418,33 +418,30 @@ export class HeartbeatScheduler {
         // Check if the session is still running
         const session = this.agentManager.getSession(sessionId)
 
-        // Guard against race condition: sendMessage fires doSendAdapterMessage
-        // as fire-and-forget, so the adapter may report IDLE before the prompt
-        // is even sent. Only treat idle/missing as "done" if the session has
-        // actually received at least one assistant message.
-        const hasReceivedMessages = session && session.seenPartIds.size > 0
-
         if (session?.status === 'error') {
           clearInterval(timer)
           reject(new Error(`Heartbeat session ${sessionId} ended with error`))
           return
         }
 
-        if ((!session || session.status === 'idle') && hasReceivedMessages) {
-          clearInterval(timer)
-
-          // Get the last assistant message from the session
+        if (!session || session.status === 'idle') {
+          // Guard against race condition: sendMessage fires doSendAdapterMessage
+          // as fire-and-forget, so the adapter may report IDLE before the prompt
+          // is even sent. Only treat idle as "done" if the session has actually
+          // produced an assistant response (lastAssistantText is set during polling).
           const lastMessage = this.agentManager.getLastAssistantMessage(sessionId)
           if (lastMessage) {
+            clearInterval(timer)
             resolve(lastMessage)
-          } else {
-            // No message means the session didn't produce a result — treat as error
-            // rather than silently assuming everything is OK.
+          } else if (elapsed >= 30_000) {
+            // After 30s, if we still have no message, give up rather than
+            // waiting the full 5-minute timeout. The session likely hit
+            // the premature-idle race condition and never recovered.
+            clearInterval(timer)
             reject(new Error(`Heartbeat session ${sessionId} completed without producing a result`))
           }
+          // Otherwise keep waiting — agent may not have processed the prompt yet
         }
-        // If session exists but hasn't received messages yet, keep waiting
-        // (the agent hasn't started processing the prompt yet)
       }, POLL_MS)
     })
   }

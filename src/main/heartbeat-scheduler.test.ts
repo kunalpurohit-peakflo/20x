@@ -653,11 +653,11 @@ describe('HeartbeatScheduler', () => {
   // ── waitForSessionResult (dangerous default fix) ────
 
   describe('waitForSessionResult', () => {
-    it('rejects when session completes without producing a message', async () => {
+    it('rejects when session completes without producing a message after 30s', { timeout: 40_000 }, async () => {
       vi.useRealTimers()
 
       const agentWithNoMessage = mockAgentManager({
-        getSession: vi.fn().mockReturnValue({ status: 'idle', seenPartIds: new Set(['part-1']) }),
+        getSession: vi.fn().mockReturnValue({ status: 'idle' }),
         getLastAssistantMessage: vi.fn().mockReturnValue(null), // No message produced
       })
       const s = new HeartbeatScheduler(db as unknown as DatabaseManager, agentWithNoMessage as unknown as AgentManager)
@@ -675,7 +675,7 @@ describe('HeartbeatScheduler', () => {
       vi.useRealTimers()
 
       const agentWithMessage = mockAgentManager({
-        getSession: vi.fn().mockReturnValue({ status: 'idle', seenPartIds: new Set(['part-1']) }),
+        getSession: vi.fn().mockReturnValue({ status: 'idle' }),
         getLastAssistantMessage: vi.fn().mockReturnValue('CI is failing on the PR'),
       })
       const s = new HeartbeatScheduler(db as unknown as DatabaseManager, agentWithMessage as unknown as AgentManager)
@@ -688,22 +688,22 @@ describe('HeartbeatScheduler', () => {
       expect(result).toBe('CI is failing on the PR')
     })
 
-    it('keeps waiting when session is idle but has no messages yet (race condition guard)', { timeout: 15_000 }, async () => {
+    it('keeps waiting when session is idle but has no message yet (race condition guard)', { timeout: 15_000 }, async () => {
       vi.useRealTimers()
 
-      // Session is idle but seenPartIds is empty — agent hasn't processed the prompt yet
+      // Session is idle but no lastAssistantText yet — agent hasn't processed the prompt
       let pollCount = 0
       const agentWithRace = mockAgentManager({
-        getSession: vi.fn().mockImplementation(() => {
+        getSession: vi.fn().mockReturnValue({ status: 'idle' }),
+        getLastAssistantMessage: vi.fn().mockImplementation(() => {
           pollCount++
           if (pollCount <= 2) {
-            // First 2 polls: idle with no messages (race condition)
-            return { status: 'idle', seenPartIds: new Set() }
+            // First 2 polls: no message yet (race condition — prompt not processed)
+            return null
           }
-          // After that: working then idle with messages
-          return { status: 'idle', seenPartIds: new Set(['part-1']) }
+          // After that: message available
+          return `${HEARTBEAT_OK_TOKEN}`
         }),
-        getLastAssistantMessage: vi.fn().mockReturnValue(`${HEARTBEAT_OK_TOKEN}`),
       })
       const s = new HeartbeatScheduler(db as unknown as DatabaseManager, agentWithRace as unknown as AgentManager)
 
