@@ -1744,3 +1744,356 @@ describe('AcpAdapter - In-progress tool call visibility', () => {
     expect(parts[0].update).toBe(false) // No prior part, so not an update
   })
 })
+
+// ─── Bug fix tests: codex messages garbage (duplication, user messages, tool calls) ───
+
+describe('AcpAdapter - sendPrompt clears stale messageBuffer', () => {
+  let adapter: AcpAdapter
+
+  beforeEach(() => {
+    adapter = new AcpAdapter('codex')
+  })
+
+  it('should clear messageBuffer on sendPrompt to prevent duplication on next poll', async () => {
+    const priv = adapterPrivate(adapter)
+    const session = createMockSession('sess-dedup')
+    session.messageBuffer = [
+      { method: 'session/update', params: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'stale' } } } },
+      { method: 'session/update', params: { update: { sessionUpdate: 'tool_call', toolCallId: 'old-tool', status: 'in_progress' } } }
+    ]
+    session.permanentMessages = []
+    session.process = {
+      stdin: { write: vi.fn((_data: string, cb?: (err?: Error | null) => void) => { if (cb) cb(null) }) }
+    } as unknown as ChildProcess
+
+    priv.sessions.set('sess-dedup', session)
+
+    // sendPrompt should clear the stale messageBuffer
+    await adapter.sendPrompt('sess-dedup', [{ type: MessagePartType.TEXT, text: 'new prompt' }], {} as never)
+
+    expect(session.messageBuffer).toEqual([])
+  })
+
+  it('should add synthetic user_message to permanentMessages for resume', async () => {
+    const priv = adapterPrivate(adapter)
+    const session = createMockSession('sess-user')
+    session.permanentMessages = []
+    session.process = {
+      stdin: { write: vi.fn((_data: string, cb?: (err?: Error | null) => void) => { if (cb) cb(null) }) }
+    } as unknown as ChildProcess
+
+    priv.sessions.set('sess-user', session)
+
+    await adapter.sendPrompt('sess-user', [{ type: MessagePartType.TEXT, text: 'Hello agent' }], {} as never)
+
+    // permanentMessages should contain a synthetic user_message
+    const userEvents = session.permanentMessages.filter((e: Record<string, unknown>) => {
+      const params = (e as { params?: { update?: { sessionUpdate?: string } } }).params
+      return params?.update?.sessionUpdate === 'user_message'
+    })
+
+    expect(userEvents.length).toBe(1)
+    const event = userEvents[0] as { params: { update: { content: { text: string }; messageId: string } } }
+    expect(event.params.update.content.text).toBe('Hello agent')
+    expect(event.params.update.messageId).toMatch(/^user-prompt-/)
+  })
+
+  it('should NOT leave stale events that cause duplicated messages after idle+restart', async () => {
+    const priv = adapterPrivate(adapter)
+    const session = createMockSession('sess-idle')
+
+    // Simulate stale events left in messageBuffer after idle
+    session.messageBuffer = [
+      { method: 'session/update', params: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'old text' } } } }
+    ]
+    session.process = {
+      stdin: { write: vi.fn((_data: string, cb?: (err?: Error | null) => void) => { if (cb) cb(null) }) }
+    } as unknown as ChildProcess
+
+    priv.sessions.set('sess-idle', session)
+
+    // sendPrompt clears the buffer before the new prompt starts
+    await adapter.sendPrompt('sess-idle', [{ type: MessagePartType.TEXT, text: 'fresh prompt' }], {} as never)
+
+    // Now poll — should get NO messages (buffer was cleared)
+    const parts = await adapter.pollMessages('sess-idle', new Set(), new Set(), new Map(), {} as never)
+    expect(parts).toEqual([])
+  })
+})
+
+describe('AcpAdapter - In-progress tool parts', () => {
+  let adapter: AcpAdapter
+
+  beforeEach(() => {
+    adapter = new AcpAdapter('codex')
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.clearAllMocks()
+  })
+
+  it('should emit in-progress tool part immediately when tool_call arrives', () => {
+    const priv = adapterPrivate(adapter)
+    const session = createMockSession('sess-tool-progress')
+    const seenPartIds = new Set<string>()
+
+    const toolCallInProgress = {
+      method: 'session/update',
+      params: {
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tool-ip-1',
+          kind: 'exec_command',
+          status: 'in_progress',
+          rawInput: { command: 'npm test' }
+        }
+      }
+    }
+
+    const parts = priv.convertAcpEventToMessageParts(
+      toolCallInProgress,
+      new Set(),
+      seenPartIds,
+      new Map(),
+      session
+    )
+
+    // Should emit a running tool part
+    expect(parts.length).toBe(1)
+    expect(parts[0].id).toBe('tool-ip-1')
+    expect(parts[0].type).toBe(MessagePartType.TOOL)
+    expect(parts[0].tool?.status).toBe('running')
+    expect(parts[0].tool?.name).toBe('command')
+  })
+
+  it('should update in-progress tool part when completed', () => {
+    const priv = adapterPrivate(adapter)
+    const session = createMockSession('sess-tool-update')
+    const seenPartIds = new Set<string>()
+
+    // First: in-progress event
+    const inProgressEvent = {
+      method: 'session/update',
+      params: {
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tool-up-1',
+          kind: 'exec_command',
+          status: 'in_progress',
+          rawInput: { command: 'ls -la' }
+        }
+      }
+    }
+
+    priv.convertAcpEventToMessageParts(
+      inProgressEvent,
+      new Set(),
+      seenPartIds,
+      new Map(),
+      session
+    )
+
+    expect(seenPartIds.has('tool-up-1')).toBe(true)
+
+    // Second: completed event
+    const completedEvent = {
+      method: 'session/update',
+      params: {
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tool-up-1',
+          kind: 'exec_command',
+          status: 'completed',
+          rawInput: { command: 'ls -la' },
+          rawOutput: { stdout: 'file1\nfile2' }
+        }
+      }
+    }
+
+    const completedParts = priv.convertAcpEventToMessageParts(
+      completedEvent,
+      new Set(),
+      seenPartIds,
+      new Map(),
+      session
+    )
+
+    expect(completedParts.length).toBe(1)
+    expect(completedParts[0].id).toBe('tool-up-1')
+    expect(completedParts[0].tool?.status).toBe('completed')
+    expect(completedParts[0].tool?.output).toBe('file1\nfile2')
+    expect(completedParts[0].update).toBe(true) // marked as update since in-progress was already emitted
+  })
+
+  it('should NOT duplicate in-progress tool part when same toolCallId arrives twice', () => {
+    const priv = adapterPrivate(adapter)
+    const session = createMockSession('sess-tool-nodup')
+    const seenPartIds = new Set<string>()
+
+    const toolCallEvent = {
+      method: 'session/update',
+      params: {
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tool-dup-1',
+          kind: 'exec_command',
+          status: 'in_progress',
+          rawInput: { command: 'echo hi' }
+        }
+      }
+    }
+
+    // First call
+    const parts1 = priv.convertAcpEventToMessageParts(
+      toolCallEvent,
+      new Set(),
+      seenPartIds,
+      new Map(),
+      session
+    )
+    expect(parts1.length).toBe(1)
+
+    // Second call with same toolCallId
+    const parts2 = priv.convertAcpEventToMessageParts(
+      toolCallEvent,
+      new Set(),
+      seenPartIds,
+      new Map(),
+      session
+    )
+    // Should NOT emit another in-progress part
+    expect(parts2.length).toBe(0)
+  })
+})
+
+describe('AcpAdapter - User message handling', () => {
+  let adapter: AcpAdapter
+
+  beforeEach(() => {
+    adapter = new AcpAdapter('codex')
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.clearAllMocks()
+  })
+
+  it('should convert user_message events to user-role parts', () => {
+    const priv = adapterPrivate(adapter)
+    const session = createMockSession('sess-user-msg')
+
+    const userMessageEvent = {
+      method: 'session/update',
+      params: {
+        update: {
+          sessionUpdate: 'user_message',
+          messageId: 'user-msg-1',
+          content: { type: 'text', text: 'Hello from user' }
+        }
+      }
+    }
+
+    const parts = priv.convertAcpEventToMessageParts(
+      userMessageEvent,
+      new Set(),
+      new Set(),
+      new Map(),
+      session
+    )
+
+    expect(parts.length).toBe(1)
+    expect(parts[0].role).toBe('user')
+    expect(parts[0].text).toBe('Hello from user')
+    expect(parts[0].id).toBe('user-msg-1')
+  })
+
+  it('should accumulate user_message_chunk events', () => {
+    const priv = adapterPrivate(adapter)
+    const session = createMockSession('sess-user-chunks')
+    const seenPartIds = new Set<string>()
+    const partContentLengths = new Map<string, string>()
+
+    const chunk1 = {
+      method: 'session/update',
+      params: {
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'Hello ' }
+        }
+      }
+    }
+
+    const parts1 = priv.convertAcpEventToMessageParts(
+      chunk1, new Set(), seenPartIds, partContentLengths, session
+    )
+
+    expect(parts1.length).toBe(1)
+    expect(parts1[0].role).toBe('user')
+    expect(parts1[0].text).toBe('Hello ')
+
+    const chunk2 = {
+      method: 'session/update',
+      params: {
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'world' }
+        }
+      }
+    }
+
+    const parts2 = priv.convertAcpEventToMessageParts(
+      chunk2, new Set(), seenPartIds, partContentLengths, session
+    )
+
+    expect(parts2.length).toBe(1)
+    expect(parts2[0].role).toBe('user')
+    expect(parts2[0].text).toBe('Hello world')
+    expect(parts2[0].update).toBe(true) // streaming update
+  })
+
+  it('synthetic user_message in permanentMessages survives getAllMessages', async () => {
+    const priv = adapterPrivate(adapter)
+    const session = createMockSession('sess-resume-user')
+
+    // Simulate what sendPrompt does: add synthetic user_message
+    session.permanentMessages.push({
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: {
+        update: {
+          sessionUpdate: 'user_message',
+          content: { type: 'text', text: 'User prompt text' },
+          messageId: 'user-prompt-1'
+        }
+      }
+    })
+
+    // Also add an agent response
+    session.permanentMessages.push({
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Agent response' }
+        }
+      }
+    })
+
+    priv.sessions.set('sess-resume-user', session)
+
+    const messages = await adapter.getAllMessages('sess-resume-user', {} as never)
+
+    // Should have both user and assistant messages
+    const userMessages = messages.filter(m => m.role === 'user')
+    const assistantMessages = messages.filter(m => m.role === 'assistant')
+
+    expect(userMessages.length).toBe(1)
+    expect(userMessages[0].parts[0].text).toBe('User prompt text')
+    expect(assistantMessages.length).toBe(1)
+    expect(assistantMessages[0].parts[0].text).toBe('Agent response')
+  })
+})
