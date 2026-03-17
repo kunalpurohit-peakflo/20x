@@ -1558,6 +1558,18 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
             taskId: config.taskId,
             status: 'error'
           })
+
+          // Record enterprise sync event: agent run failed
+          const task = this.db.getTask(config.taskId)
+          if (this.enterpriseStateSync && task && !session.isTriageSession && session.taskId !== 'mastermind-session' && !session.taskId.startsWith('heartbeat-')) {
+            const durationMinutes = (Date.now() - session.createdAt.getTime()) / (1000 * 60)
+            const agent = this.db.getAgent(session.agentId)
+            this.enterpriseStateSync.recordAgentRunCompleted(task, {
+              agentName: agent?.name,
+              durationMinutes: Math.round(durationMinutes * 10) / 10,
+              success: false
+            })
+          }
         }
         this.stopAdapterPolling(sessionId)
         return
@@ -2142,6 +2154,7 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
       this.enterpriseStateSync.recordAgentRunCompleted(task, {
         agentName: agent?.name,
         durationMinutes: Math.round(durationMinutes * 10) / 10,
+        messageCount: session.seenMessageIds.size || undefined,
         success: true
       })
     }
@@ -2335,6 +2348,14 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
       taskId: session.taskId,
       status: 'working'
     })
+
+    // Record enterprise sync event: agent run started (follow-up message)
+    // Each working→idle cycle is a separate agent run. Without this,
+    // follow-up messages produce agent_run_completed without a matching started.
+    if (this.enterpriseStateSync && currentTask && !session.isTriageSession && session.taskId !== 'mastermind-session' && !session.taskId.startsWith('heartbeat-')) {
+      const agent = this.db.getAgent(session.agentId)
+      this.enterpriseStateSync.recordAgentRunStarted(currentTask, agent?.name)
+    }
 
     // Show user's message in UI
     this.sendToRenderer('agent:output', {

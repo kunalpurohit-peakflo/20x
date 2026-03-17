@@ -110,12 +110,13 @@ export function registerIpcHandlers(
     const updated = db.updateTask(id, data)
 
     // Record status change event for enterprise sync
+    // Note: for completions, only emit task_completed (not both status_changed + completed)
+    // to avoid double-counting in downstream aggregation
     if (enterpriseStateSync && previousStatus && updated && data.status) {
-      enterpriseStateSync.recordTaskStatusChange(updated, previousStatus, data.status)
-
-      // If task just completed, also record a completion event
       if (data.status === 'completed') {
         enterpriseStateSync.recordTaskCompleted(updated)
+      } else {
+        enterpriseStateSync.recordTaskStatusChange(updated, previousStatus, data.status)
       }
     }
 
@@ -763,6 +764,11 @@ export function registerIpcHandlers(
         }
         enterpriseStateSync.setUserName(session.userEmail || 'Unknown')
         agentManager.setEnterpriseStateSync(enterpriseStateSync)
+
+        // Attach state sync to heartbeat so events flush every 60s
+        if (enterpriseHeartbeat) {
+          enterpriseHeartbeat.setStateSync(enterpriseStateSync)
+        }
       }
 
       // Wire enterprise connection into sync manager (after state sync is ready)
@@ -859,6 +865,11 @@ export function registerIpcHandlers(
           }
           enterpriseStateSync.setUserName(session.userEmail || 'Unknown')
           agentManager.setEnterpriseStateSync(enterpriseStateSync)
+
+          // Attach state sync to heartbeat so events flush every 60s
+          if (enterpriseHeartbeat) {
+            enterpriseHeartbeat.setStateSync(enterpriseStateSync)
+          }
         } catch (err) {
           console.error('[enterprise] Failed to restore state sync:', err)
         }
