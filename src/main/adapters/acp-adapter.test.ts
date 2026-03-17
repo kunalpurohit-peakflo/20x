@@ -1136,7 +1136,7 @@ describe('AcpAdapter - Turn Detection', () => {
       expect(afterToolParts[0].id).toBe('agent-response-2')
     })
 
-    it('clears active turn immediately when live tool activity arrives', async () => {
+    it('does NOT clear activeTurnId in updateSessionStatus (turn state managed only during polling)', async () => {
       const sessionId = 'test-session'
       const priv = adapterPrivate(adapter)
       const session = priv.sessions.get(sessionId) || createMockSession(sessionId)
@@ -1162,8 +1162,15 @@ describe('AcpAdapter - Turn Detection', () => {
         }
       }
 
+      // updateSessionStatus should NOT modify turn-related state (activeTurnId,
+      // pendingAssistantTurnSplit) — that's handled by convertAcpEventToMessageParts
+      // during polling to avoid race conditions with real-time event arrival.
       priv.updateSessionStatus(session, toolCall as never)
-      expect(session.activeTurnId).toBeNull()
+      expect(session.activeTurnId).toBe(1) // Preserved — turn state managed only during polling
+
+      // Process the tool call through the polling path
+      priv.convertAcpEventToMessageParts(toolCall, new Set(), seenPartIds, partContentLengths, session)
+      // Now pendingAssistantTurnSplit is set by convertAcpEventToMessageParts
 
       const assistantAfterTool = {
         method: 'session/update',
@@ -1179,6 +1186,7 @@ describe('AcpAdapter - Turn Detection', () => {
       const afterToolParts = priv.convertAcpEventToMessageParts(assistantAfterTool, new Set(), seenPartIds, partContentLengths, session)
 
       expect(session.currentTurnId).toBe(2)
+      expect(session.activeTurnId).toBe(2) // Updated by getAssistantTurnId
       expect(afterToolParts[0].id).toBe('agent-response-2')
     })
 
@@ -1516,5 +1524,697 @@ describe('AcpAdapter - Turn Detection', () => {
       // Should still work but use fallback ID
       expect(parts[0].id).toBe('agent-response') // Default when turnId is 0
     })
+  })
+})
+
+// ── Fix Tests: Message Duplication, User Messages, Function Calls ────
+
+describe('AcpAdapter - sendPrompt buffer clearing', () => {
+  let adapter: AcpAdapter
+
+  beforeEach(() => {
+    adapter = new AcpAdapter('codex')
+  })
+
+  it('should clear messageBuffer on sendPrompt to prevent stale event duplication', async () => {
+    const priv = adapterPrivate(adapter)
+    const session = createMockSession('sess-buffer')
+    session.process = {
+      stdin: { write: vi.fn() }
+    } as unknown as ChildProcess
+    priv.sessions.set('sess-buffer', session)
+
+    // Simulate stale events from the previous turn
+    session.messageBuffer.push({
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'stale text from old turn' }
+        }
+      }
+    })
+
+    // Send a new prompt — should clear stale buffer
+    await adapter.sendPrompt('sess-buffer', [{ type: MessagePartType.TEXT, text: 'New prompt' }], {} as never)
+
+    // The buffer should be empty (stale events cleared)
+    expect(session.messageBuffer).toEqual([])
+  })
+
+  it('should store synthetic user_message in permanentMessages on sendPrompt', async () => {
+    const priv = adapterPrivate(adapter)
+    const session = createMockSession('sess-usermsg')
+    session.process = {
+      stdin: { write: vi.fn() }
+    } as unknown as ChildProcess
+    priv.sessions.set('sess-usermsg', session)
+
+    await adapter.sendPrompt('sess-usermsg', [{ type: MessagePartType.TEXT, text: 'Hello agent' }], {} as never)
+
+    // permanentMessages should contain the synthetic user_message event
+    const userEvent = session.permanentMessages.find((e: unknown) => {
+      const params = (e as { params?: { update?: { sessionUpdate?: string } } }).params
+      return params?.update?.sessionUpdate === 'user_message'
+    })
+    expect(userEvent).toBeDefined()
+
+    // The event should contain the prompt text
+    const params = (userEvent as { params: { update: { content: { text: string } } } }).params
+    expect(params.update.content.text).toBe('Hello agent')
+  })
+
+  it('synthetic user messages should appear in getAllMessages replay', async () => {
+    const priv = adapterPrivate(adapter)
+    const session = createMockSession('sess-replay')
+    session.process = {
+      stdin: { write: vi.fn() }
+    } as unknown as ChildProcess
+    priv.sessions.set('sess-replay', session)
+
+    // Send a prompt (stores synthetic user_message in permanentMessages)
+    await adapter.sendPrompt('sess-replay', [{ type: MessagePartType.TEXT, text: 'Work on task' }], {} as never)
+
+    // Add an agent response to permanentMessages
+    session.permanentMessages.push({
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'I will work on it.' }
+        }
+      }
+    })
+
+    // getAllMessages should include both user and agent messages
+    const messages = await adapter.getAllMessages('sess-replay', {} as never)
+    const userParts = messages.flatMap(m => m.parts).filter(p => p.text?.includes('Work on task'))
+    const agentParts = messages.flatMap(m => m.parts).filter(p => p.text?.includes('I will work on it'))
+
+    expect(userParts.length).toBeGreaterThan(0)
+    expect(agentParts.length).toBeGreaterThan(0)
+  })
+})
+
+describe('AcpAdapter - In-progress tool call visibility', () => {
+  let adapter: AcpAdapter
+
+  beforeEach(() => {
+    adapter = new AcpAdapter('codex')
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.clearAllMocks()
+  })
+
+  it('should emit a running tool part for in_progress tool_call events', () => {
+    const priv = adapterPrivate(adapter)
+    const session = createMockSession('sess-tool')
+    const seenPartIds = new Set<string>()
+
+    const inProgressEvent = {
+      method: 'session/update',
+      params: {
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tool-abc',
+          kind: 'exec_command',
+          status: 'in_progress',
+          rawInput: { command: 'ls -la' }
+        }
+      }
+    }
+
+    const parts = priv.convertAcpEventToMessageParts(
+      inProgressEvent,
+      new Set(),
+      seenPartIds,
+      new Map(),
+      session
+    )
+
+    // Should emit a tool part with running status
+    expect(parts.length).toBe(1)
+    expect(parts[0].type).toBe(MessagePartType.TOOL)
+    expect(parts[0].tool?.status).toBe('running')
+    expect(parts[0].tool?.name).toBe('command')
+    expect(parts[0].id).toBe('tool-abc')
+    expect(seenPartIds.has('tool-abc')).toBe(true)
+  })
+
+  it('should update running tool to completed with output and update flag', () => {
+    const priv = adapterPrivate(adapter)
+    const session = createMockSession('sess-tool2')
+    const seenPartIds = new Set<string>()
+
+    // First: in_progress event
+    const inProgressEvent = {
+      method: 'session/update',
+      params: {
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tool-xyz',
+          kind: 'exec_command',
+          status: 'in_progress',
+          rawInput: { command: 'cat file.txt' }
+        }
+      }
+    }
+    priv.convertAcpEventToMessageParts(inProgressEvent, new Set(), seenPartIds, new Map(), session)
+
+    // seenPartIds should have the tool
+    expect(seenPartIds.has('tool-xyz')).toBe(true)
+
+    // Then: completed event
+    const completedEvent = {
+      method: 'session/update',
+      params: {
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tool-xyz',
+          status: 'completed',
+          rawOutput: { stdout: 'file contents here' }
+        }
+      }
+    }
+
+    const completedParts = priv.convertAcpEventToMessageParts(
+      completedEvent,
+      new Set(),
+      seenPartIds,
+      new Map(),
+      session
+    )
+
+    // Should emit completed tool part with update flag
+    expect(completedParts.length).toBe(1)
+    expect(completedParts[0].type).toBe(MessagePartType.TOOL)
+    expect(completedParts[0].tool?.status).toBe('completed')
+    expect(completedParts[0].tool?.output).toBe('file contents here')
+    expect(completedParts[0].update).toBe(true) // Should be marked as update
+  })
+
+  it('should create completed tool part even without prior in_progress event', () => {
+    const priv = adapterPrivate(adapter)
+    const session = createMockSession('sess-tool3')
+    const seenPartIds = new Set<string>()
+
+    // Only completed event (no prior in_progress)
+    const completedEvent = {
+      method: 'session/update',
+      params: {
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tool-direct',
+          kind: 'exec_command',
+          status: 'completed',
+          rawInput: { command: 'echo hello' },
+          rawOutput: { stdout: 'hello' }
+        }
+      }
+    }
+
+    const parts = priv.convertAcpEventToMessageParts(
+      completedEvent,
+      new Set(),
+      seenPartIds,
+      new Map(),
+      session
+    )
+
+    expect(parts.length).toBe(1)
+    expect(parts[0].tool?.status).toBe('completed')
+    expect(parts[0].tool?.output).toBe('hello')
+    expect(parts[0].update).toBe(false) // No prior part, so not an update
+  })
+})
+
+// ─── Bug fix tests: codex messages garbage (duplication, user messages, tool calls) ───
+
+describe('AcpAdapter - sendPrompt clears stale messageBuffer', () => {
+  let adapter: AcpAdapter
+
+  beforeEach(() => {
+    adapter = new AcpAdapter('codex')
+  })
+
+  it('should clear messageBuffer on sendPrompt to prevent duplication on next poll', async () => {
+    const priv = adapterPrivate(adapter)
+    const session = createMockSession('sess-dedup')
+    session.messageBuffer = [
+      { method: 'session/update', params: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'stale' } } } },
+      { method: 'session/update', params: { update: { sessionUpdate: 'tool_call', toolCallId: 'old-tool', status: 'in_progress' } } }
+    ]
+    session.permanentMessages = []
+    session.process = {
+      stdin: { write: vi.fn((_data: string, cb?: (err?: Error | null) => void) => { if (cb) cb(null) }) }
+    } as unknown as ChildProcess
+
+    priv.sessions.set('sess-dedup', session)
+
+    // sendPrompt should clear the stale messageBuffer
+    await adapter.sendPrompt('sess-dedup', [{ type: MessagePartType.TEXT, text: 'new prompt' }], {} as never)
+
+    expect(session.messageBuffer).toEqual([])
+  })
+
+  it('should add synthetic user_message to permanentMessages for resume', async () => {
+    const priv = adapterPrivate(adapter)
+    const session = createMockSession('sess-user')
+    session.permanentMessages = []
+    session.process = {
+      stdin: { write: vi.fn((_data: string, cb?: (err?: Error | null) => void) => { if (cb) cb(null) }) }
+    } as unknown as ChildProcess
+
+    priv.sessions.set('sess-user', session)
+
+    await adapter.sendPrompt('sess-user', [{ type: MessagePartType.TEXT, text: 'Hello agent' }], {} as never)
+
+    // permanentMessages should contain a synthetic user_message
+    const userEvents = session.permanentMessages.filter((e) => {
+      const params = (e as { params?: { update?: { sessionUpdate?: string } } }).params
+      return params?.update?.sessionUpdate === 'user_message'
+    })
+
+    expect(userEvents.length).toBe(1)
+    const event = userEvents[0] as { params: { update: { content: { text: string }; messageId: string } } }
+    expect(event.params.update.content.text).toBe('Hello agent')
+    expect(event.params.update.messageId).toMatch(/^user-prompt-/)
+  })
+
+  it('should NOT leave stale events that cause duplicated messages after idle+restart', async () => {
+    const priv = adapterPrivate(adapter)
+    const session = createMockSession('sess-idle')
+
+    // Simulate stale events left in messageBuffer after idle
+    session.messageBuffer = [
+      { method: 'session/update', params: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'old text' } } } }
+    ]
+    session.process = {
+      stdin: { write: vi.fn((_data: string, cb?: (err?: Error | null) => void) => { if (cb) cb(null) }) }
+    } as unknown as ChildProcess
+
+    priv.sessions.set('sess-idle', session)
+
+    // sendPrompt clears the buffer before the new prompt starts
+    await adapter.sendPrompt('sess-idle', [{ type: MessagePartType.TEXT, text: 'fresh prompt' }], {} as never)
+
+    // Now poll — should get NO messages (buffer was cleared)
+    const parts = await adapter.pollMessages('sess-idle', new Set(), new Set(), new Map(), {} as never)
+    expect(parts).toEqual([])
+  })
+})
+
+describe('AcpAdapter - In-progress tool parts', () => {
+  let adapter: AcpAdapter
+
+  beforeEach(() => {
+    adapter = new AcpAdapter('codex')
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.clearAllMocks()
+  })
+
+  it('should emit in-progress tool part immediately when tool_call arrives', () => {
+    const priv = adapterPrivate(adapter)
+    const session = createMockSession('sess-tool-progress')
+    const seenPartIds = new Set<string>()
+
+    const toolCallInProgress = {
+      method: 'session/update',
+      params: {
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tool-ip-1',
+          kind: 'exec_command',
+          status: 'in_progress',
+          rawInput: { command: 'npm test' }
+        }
+      }
+    }
+
+    const parts = priv.convertAcpEventToMessageParts(
+      toolCallInProgress,
+      new Set(),
+      seenPartIds,
+      new Map(),
+      session
+    )
+
+    // Should emit a running tool part
+    expect(parts.length).toBe(1)
+    expect(parts[0].id).toBe('tool-ip-1')
+    expect(parts[0].type).toBe(MessagePartType.TOOL)
+    expect(parts[0].tool?.status).toBe('running')
+    expect(parts[0].tool?.name).toBe('command')
+  })
+
+  it('should update in-progress tool part when completed', () => {
+    const priv = adapterPrivate(adapter)
+    const session = createMockSession('sess-tool-update')
+    const seenPartIds = new Set<string>()
+
+    // First: in-progress event
+    const inProgressEvent = {
+      method: 'session/update',
+      params: {
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tool-up-1',
+          kind: 'exec_command',
+          status: 'in_progress',
+          rawInput: { command: 'ls -la' }
+        }
+      }
+    }
+
+    priv.convertAcpEventToMessageParts(
+      inProgressEvent,
+      new Set(),
+      seenPartIds,
+      new Map(),
+      session
+    )
+
+    expect(seenPartIds.has('tool-up-1')).toBe(true)
+
+    // Second: completed event
+    const completedEvent = {
+      method: 'session/update',
+      params: {
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tool-up-1',
+          kind: 'exec_command',
+          status: 'completed',
+          rawInput: { command: 'ls -la' },
+          rawOutput: { stdout: 'file1\nfile2' }
+        }
+      }
+    }
+
+    const completedParts = priv.convertAcpEventToMessageParts(
+      completedEvent,
+      new Set(),
+      seenPartIds,
+      new Map(),
+      session
+    )
+
+    expect(completedParts.length).toBe(1)
+    expect(completedParts[0].id).toBe('tool-up-1')
+    expect(completedParts[0].tool?.status).toBe('completed')
+    expect(completedParts[0].tool?.output).toBe('file1\nfile2')
+    expect(completedParts[0].update).toBe(true) // marked as update since in-progress was already emitted
+  })
+
+  it('should NOT duplicate in-progress tool part when same toolCallId arrives twice', () => {
+    const priv = adapterPrivate(adapter)
+    const session = createMockSession('sess-tool-nodup')
+    const seenPartIds = new Set<string>()
+
+    const toolCallEvent = {
+      method: 'session/update',
+      params: {
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tool-dup-1',
+          kind: 'exec_command',
+          status: 'in_progress',
+          rawInput: { command: 'echo hi' }
+        }
+      }
+    }
+
+    // First call
+    const parts1 = priv.convertAcpEventToMessageParts(
+      toolCallEvent,
+      new Set(),
+      seenPartIds,
+      new Map(),
+      session
+    )
+    expect(parts1.length).toBe(1)
+
+    // Second call with same toolCallId
+    const parts2 = priv.convertAcpEventToMessageParts(
+      toolCallEvent,
+      new Set(),
+      seenPartIds,
+      new Map(),
+      session
+    )
+    // Should NOT emit another in-progress part
+    expect(parts2.length).toBe(0)
+  })
+})
+
+describe('AcpAdapter - User message handling', () => {
+  let adapter: AcpAdapter
+
+  beforeEach(() => {
+    adapter = new AcpAdapter('codex')
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.clearAllMocks()
+  })
+
+  it('should convert user_message events to user-role parts', () => {
+    const priv = adapterPrivate(adapter)
+    const session = createMockSession('sess-user-msg')
+
+    const userMessageEvent = {
+      method: 'session/update',
+      params: {
+        update: {
+          sessionUpdate: 'user_message',
+          messageId: 'user-msg-1',
+          content: { type: 'text', text: 'Hello from user' }
+        }
+      }
+    }
+
+    const parts = priv.convertAcpEventToMessageParts(
+      userMessageEvent,
+      new Set(),
+      new Set(),
+      new Map(),
+      session
+    )
+
+    expect(parts.length).toBe(1)
+    expect(parts[0].role).toBe('user')
+    expect(parts[0].text).toBe('Hello from user')
+    expect(parts[0].id).toBe('user-msg-1')
+  })
+
+  it('should accumulate user_message_chunk events', () => {
+    const priv = adapterPrivate(adapter)
+    const session = createMockSession('sess-user-chunks')
+    const seenPartIds = new Set<string>()
+    const partContentLengths = new Map<string, string>()
+
+    const chunk1 = {
+      method: 'session/update',
+      params: {
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'Hello ' }
+        }
+      }
+    }
+
+    const parts1 = priv.convertAcpEventToMessageParts(
+      chunk1, new Set(), seenPartIds, partContentLengths, session
+    )
+
+    expect(parts1.length).toBe(1)
+    expect(parts1[0].role).toBe('user')
+    expect(parts1[0].text).toBe('Hello ')
+
+    const chunk2 = {
+      method: 'session/update',
+      params: {
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'world' }
+        }
+      }
+    }
+
+    const parts2 = priv.convertAcpEventToMessageParts(
+      chunk2, new Set(), seenPartIds, partContentLengths, session
+    )
+
+    expect(parts2.length).toBe(1)
+    expect(parts2[0].role).toBe('user')
+    expect(parts2[0].text).toBe('Hello world')
+    expect(parts2[0].update).toBe(true) // streaming update
+  })
+
+  it('synthetic user_message in permanentMessages survives getAllMessages', async () => {
+    const priv = adapterPrivate(adapter)
+    const session = createMockSession('sess-resume-user')
+
+    // Simulate what sendPrompt does: add synthetic user_message
+    session.permanentMessages.push({
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: {
+        update: {
+          sessionUpdate: 'user_message',
+          content: { type: 'text', text: 'User prompt text' },
+          messageId: 'user-prompt-1'
+        }
+      }
+    })
+
+    // Also add an agent response
+    session.permanentMessages.push({
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Agent response' }
+        }
+      }
+    })
+
+    priv.sessions.set('sess-resume-user', session)
+
+    const messages = await adapter.getAllMessages('sess-resume-user', {} as never)
+
+    // Should have both user and assistant messages
+    const userMessages = messages.filter(m => m.role === 'user')
+    const assistantMessages = messages.filter(m => m.role === 'assistant')
+
+    expect(userMessages.length).toBe(1)
+    expect(userMessages[0].parts[0].text).toBe('User prompt text')
+    expect(assistantMessages.length).toBe(1)
+    expect(assistantMessages[0].parts[0].text).toBe('Agent response')
+  })
+})
+
+// ─── Regression tests: available_commands_update / plan must NOT cause turn splits ───
+
+describe('AcpAdapter - Non-content events must not fragment assistant messages', () => {
+  let adapter: AcpAdapter
+
+  beforeEach(() => {
+    adapter = new AcpAdapter('codex')
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.clearAllMocks()
+  })
+
+  it('available_commands_update between chunks should NOT start a new turn', () => {
+    const priv = adapterPrivate(adapter)
+    const session = createMockSession('sess-cmd-update')
+    session.currentTurnId = 1
+    session.activeTurnId = 1
+    session.lastSessionUpdateType = 'agent_message_chunk'
+    priv.sessions.set('sess-cmd-update', session)
+
+    const seenPartIds = new Set<string>()
+    const partContentLengths = new Map<string, string>()
+
+    // First assistant chunk
+    const chunk1 = {
+      method: 'session/update',
+      params: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Hello ' } } }
+    }
+    priv.convertAcpEventToMessageParts(chunk1, new Set(), seenPartIds, partContentLengths, session)
+    expect(session.currentTurnId).toBe(1)
+
+    // available_commands_update arrives (non-content event)
+    const cmdUpdate = {
+      method: 'session/update',
+      params: { update: { sessionUpdate: 'available_commands_update' } }
+    }
+    priv.convertAcpEventToMessageParts(cmdUpdate, new Set(), seenPartIds, partContentLengths, session)
+
+    // Second assistant chunk — should continue same turn
+    const chunk2 = {
+      method: 'session/update',
+      params: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'world' } } }
+    }
+    const parts2 = priv.convertAcpEventToMessageParts(chunk2, new Set(), seenPartIds, partContentLengths, session)
+
+    expect(session.currentTurnId).toBe(1) // SAME turn — no split
+    expect(parts2[0].id).toBe('agent-response-1') // same message ID
+    expect(parts2[0].text).toBe('Hello world') // accumulated text
+  })
+
+  it('plan event between chunks should NOT start a new turn', () => {
+    const priv = adapterPrivate(adapter)
+    const session = createMockSession('sess-plan')
+    session.currentTurnId = 1
+    session.activeTurnId = 1
+    session.lastSessionUpdateType = 'agent_message_chunk'
+    priv.sessions.set('sess-plan', session)
+
+    const seenPartIds = new Set<string>()
+    const partContentLengths = new Map<string, string>()
+
+    // First chunk
+    const chunk1 = {
+      method: 'session/update',
+      params: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Step 1: ' } } }
+    }
+    priv.convertAcpEventToMessageParts(chunk1, new Set(), seenPartIds, partContentLengths, session)
+
+    // plan event
+    const planEvent = {
+      method: 'session/update',
+      params: { update: { sessionUpdate: 'plan', entries: [{ content: 'step 1', priority: 'high', status: 'pending' }] } }
+    }
+    priv.convertAcpEventToMessageParts(planEvent, new Set(), seenPartIds, partContentLengths, session)
+
+    // Second chunk — should continue same turn
+    const chunk2 = {
+      method: 'session/update',
+      params: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'read file' } } }
+    }
+    const parts2 = priv.convertAcpEventToMessageParts(chunk2, new Set(), seenPartIds, partContentLengths, session)
+
+    expect(session.currentTurnId).toBe(1) // SAME turn
+    expect(parts2[0].id).toBe('agent-response-1')
+    expect(parts2[0].text).toBe('Step 1: read file')
+  })
+
+  it('updateSessionStatus should NOT modify turn state (activeTurnId, pendingAssistantTurnSplit)', () => {
+    const priv = adapterPrivate(adapter)
+    const session = createMockSession('sess-status')
+    session.currentTurnId = 1
+    session.activeTurnId = 1
+    session.pendingAssistantTurnSplit = false
+    priv.sessions.set('sess-status', session)
+
+    const toolNotification = {
+      method: 'session/update',
+      params: { update: { sessionUpdate: 'tool_call', toolCallId: 'tc-1', status: 'in_progress' } }
+    }
+
+    priv.updateSessionStatus(session, toolNotification as never)
+
+    // Status should be updated
+    expect(session.status).toBe('busy')
+    // Turn state should NOT be modified by updateSessionStatus
+    expect(session.activeTurnId).toBe(1)
+    expect(session.pendingAssistantTurnSplit).toBe(false)
   })
 })
