@@ -1692,7 +1692,12 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
     const now = new Date().toISOString()
 
     // Absolute path to the MCP server script (__dirname = out/main/)
-    const mcpServerPath = join(__dirname, 'mcp-servers', 'task-management-mcp.js')
+    // When packaged, the file is inside app.asar but we unpack it via asarUnpack,
+    // so replace app.asar with app.asar.unpacked to get the real filesystem path.
+    let mcpServerPath = join(__dirname, 'mcp-servers', 'task-management-mcp.js')
+    if (mcpServerPath.includes('app.asar')) {
+      mcpServerPath = mcpServerPath.replace('app.asar', 'app.asar.unpacked')
+    }
 
     // Start the HTTP API server so the MCP server can call back to it
     startTaskApiServer(this).catch(err =>

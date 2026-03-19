@@ -1,25 +1,24 @@
 import { spawn } from 'child_process'
-import type { McpServerRecord } from './database'
 
-export interface McpToolCallResult {
-  success: boolean
-  result?: unknown
-  error?: string
-}
+/**
+ * @typedef {{ success: boolean, result?: unknown, error?: string }} McpToolCallResult
+ * @typedef {{ resolve: (result: McpToolCallResult) => void, timer: ReturnType<typeof setTimeout> }} PendingCall
+ * @typedef {{ proc: ReturnType<typeof spawn>, alive: boolean, nextId: number, buffer: string, pending: Map<number, PendingCall> }} LocalMcpSession
+ * @typedef {{ id?: number, result?: unknown, error?: { message: string, code?: number, data?: unknown } }} JsonRpcMessage
+ */
 
 export class McpToolCaller {
-  private sessions = new Map<string, LocalMcpSession>()
-  private oauthManager?: import('./oauth/oauth-manager').OAuthManager
+  /** @type {Map<string, LocalMcpSession>} */
+  sessions = new Map()
 
-  setOAuthManager(manager: import('./oauth/oauth-manager').OAuthManager): void {
+  /** @type {import('./oauth/oauth-manager').OAuthManager | undefined} */
+  oauthManager
+
+  setOAuthManager(manager) {
     this.oauthManager = manager
   }
 
-  async callTool(
-    server: McpServerRecord,
-    toolName: string,
-    toolArgs: Record<string, unknown> = {}
-  ): Promise<McpToolCallResult> {
+  async callTool(server, toolName, toolArgs = {}) {
     console.log('[mcp] callTool:', toolName, '| server:', server.name, '| type:', server.type)
     const result = server.type === 'remote'
       ? await this.callRemoteTool(server, toolName, toolArgs)
@@ -33,7 +32,7 @@ export class McpToolCaller {
   }
 
   /** Kill a specific cached session (e.g. when server config changes) */
-  killSession(serverId: string): void {
+  killSession(serverId) {
     const session = this.sessions.get(serverId)
     if (session) {
       try { session.proc.kill('SIGTERM') } catch {}
@@ -42,7 +41,7 @@ export class McpToolCaller {
   }
 
   /** Clean up all persistent local MCP sessions */
-  destroy(): void {
+  destroy() {
     for (const [id, session] of this.sessions) {
       try { session.proc.kill('SIGTERM') } catch {}
       this.sessions.delete(id)
@@ -51,11 +50,7 @@ export class McpToolCaller {
 
   // ── Local (stdio) ───────────────────────────────────────
 
-  private async callLocalTool(
-    server: McpServerRecord,
-    toolName: string,
-    toolArgs: Record<string, unknown>
-  ): Promise<McpToolCallResult> {
+  async callLocalTool(server, toolName, toolArgs) {
     if (!server.command) {
       return { success: false, error: 'No command specified' }
     }
@@ -82,7 +77,7 @@ export class McpToolCaller {
     return result
   }
 
-  private async getOrCreateSession(server: McpServerRecord): Promise<LocalMcpSession | null> {
+  async getOrCreateSession(server) {
     const existing = this.sessions.get(server.id)
     if (existing && existing.alive) return existing
 
@@ -90,15 +85,21 @@ export class McpToolCaller {
     if (existing) this.sessions.delete(server.id)
 
     // Spawn the MCP server directly (no shell) to avoid path-quoting issues on Windows.
-    // Fall back to shell mode only for commands that need it (npx, .cmd/.bat wrappers).
-    const needsShell = /^(npx|uvx|bunx)\b/.test(server.command!) || (process.platform === 'win32' && /\.(cmd|bat)$/i.test(server.command!))
-    const proc = spawn(server.command!, server.args || [], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      ...(needsShell ? { shell: true } : {}),
-      env: { ...process.env, npm_config_yes: 'true', ...server.environment }
-    })
+    // Fall back to shell mode only for commands that look like they need a shell (e.g. npx, uvx).
+    const needsShell = /^(npx|uvx|bunx)\b/.test(server.command) || process.platform === 'win32' && /\.(cmd|bat)$/i.test(server.command)
+    const proc = needsShell
+      ? spawn(server.command, server.args || [], {
+          stdio: ['pipe', 'pipe', 'pipe'],
+          shell: true,
+          env: { ...process.env, npm_config_yes: 'true', ...server.environment }
+        })
+      : spawn(server.command, server.args || [], {
+          stdio: ['pipe', 'pipe', 'pipe'],
+          env: { ...process.env, npm_config_yes: 'true', ...server.environment }
+        })
 
-    const session: LocalMcpSession = {
+    /** @type {LocalMcpSession} */
+    const session = {
       proc,
       alive: true,
       nextId: 2,
@@ -106,14 +107,14 @@ export class McpToolCaller {
       pending: new Map()
     }
 
-    proc.stderr.on('data', (chunk: Buffer) => {
+    proc.stderr.on('data', (chunk) => {
       const line = chunk.toString().trim()
       // Redact lines that may contain auth headers
       if (/authorization|bearer|token|secret|password|api[_-]?key/i.test(line)) return
       console.error('[mcp:stderr]', line)
     })
 
-    proc.stdout.on('data', (chunk: Buffer) => {
+    proc.stdout.on('data', (chunk) => {
       session.buffer += chunk.toString()
       this.drainBuffer(session)
     })
@@ -135,7 +136,7 @@ export class McpToolCaller {
     })
 
     // Initialize handshake
-    const initResult = await new Promise<boolean>((resolve) => {
+    const initResult = await new Promise((resolve) => {
       const timer = setTimeout(() => {
         console.error('[mcp] Init timeout for', server.name)
         resolve(false)
@@ -176,11 +177,7 @@ export class McpToolCaller {
     return session
   }
 
-  private sendToolCall(
-    session: LocalMcpSession,
-    toolName: string,
-    toolArgs: Record<string, unknown>
-  ): Promise<McpToolCallResult> {
+  sendToolCall(session, toolName, toolArgs) {
     const id = session.nextId++
 
     return new Promise((resolve) => {
@@ -191,7 +188,7 @@ export class McpToolCaller {
 
       session.pending.set(id, { resolve, timer })
 
-      session.proc.stdin!.write(JSON.stringify({
+      session.proc.stdin.write(JSON.stringify({
         jsonrpc: '2.0',
         id,
         method: 'tools/call',
@@ -200,8 +197,8 @@ export class McpToolCaller {
     })
   }
 
-  private drainBuffer(session: LocalMcpSession): void {
-    let idx: number
+  drainBuffer(session) {
+    let idx
     while ((idx = session.buffer.indexOf('\n')) !== -1) {
       const line = session.buffer.slice(0, idx).trim()
       session.buffer = session.buffer.slice(idx + 1)
@@ -226,7 +223,7 @@ export class McpToolCaller {
     }
   }
 
-  private handleLocalMessage(session: LocalMcpSession, msg: JsonRpcMessage): void {
+  handleLocalMessage(session, msg) {
     const id = msg.id
     if (id == null) return // notification, ignore
 
@@ -247,17 +244,13 @@ export class McpToolCaller {
 
   // ── Remote (Streamable HTTP) ────────────────────────────
 
-  private async callRemoteTool(
-    server: McpServerRecord,
-    toolName: string,
-    toolArgs: Record<string, unknown>
-  ): Promise<McpToolCallResult> {
+  async callRemoteTool(server, toolName, toolArgs) {
     if (!server.url) {
       return { success: false, error: 'No URL specified' }
     }
 
     try {
-      const headers: Record<string, string> = {
+      const headers = {
         'Content-Type': 'application/json',
         Accept: 'application/json, text/event-stream',
         ...server.headers
@@ -314,25 +307,25 @@ export class McpToolCaller {
       }
 
       return { success: true, result: callMsg?.result }
-    } catch (error: unknown) {
+    } catch (error) {
       const msg = error instanceof Error ? error.message : 'Tool call failed'
       return { success: false, error: msg }
     }
   }
 
   /** Parse a Streamable HTTP response (JSON or SSE) */
-  private async parseStreamableResponse(res: Response): Promise<JsonRpcMessage | null> {
+  async parseStreamableResponse(res) {
     const contentType = res.headers.get('content-type') || ''
 
     // Regular JSON response
     if (contentType.includes('application/json')) {
-      return res.json() as Promise<JsonRpcMessage>
+      return res.json()
     }
 
     // SSE response — extract last JSON-RPC message
     if (contentType.includes('text/event-stream')) {
       const text = await res.text()
-      let lastMsg: JsonRpcMessage | null = null
+      let lastMsg = null
       for (const line of text.split('\n')) {
         if (line.startsWith('data: ')) {
           try {
@@ -344,29 +337,6 @@ export class McpToolCaller {
     }
 
     // Fallback: try JSON
-    return res.json() as Promise<JsonRpcMessage>
+    return res.json()
   }
-}
-
-// ── JSON-RPC types ───────────────────────────────────────
-
-interface JsonRpcMessage {
-  id?: number
-  result?: unknown
-  error?: { message: string; code?: number; data?: unknown }
-}
-
-// ── Local session types ─────────────────────────────────
-
-interface PendingCall {
-  resolve: (result: McpToolCallResult) => void
-  timer: ReturnType<typeof setTimeout>
-}
-
-interface LocalMcpSession {
-  proc: ReturnType<typeof spawn>
-  alive: boolean
-  nextId: number
-  buffer: string
-  pending: Map<number, PendingCall>
 }

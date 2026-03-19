@@ -104,18 +104,27 @@ export class CodexAdapter implements CodingAgentAdapter {
       const execFileAsync = promisify(execFile)
 
       // Try to find codex in PATH
-      const { stdout } = await execFileAsync('which', ['codex'])
-      this.codexExecutablePath = stdout.trim()
+      const isWin = process.platform === 'win32'
+      const whichCmd = isWin ? 'where' : 'which'
+      const binaryName = isWin ? 'codex.cmd' : 'codex'
+      const { stdout } = await execFileAsync(whichCmd, [binaryName])
+      this.codexExecutablePath = stdout.trim().split(/\r?\n/)[0]
       console.log(`[CodexAdapter] Found codex executable at: ${this.codexExecutablePath}`)
       return this.codexExecutablePath
     } catch {
       // Common installation locations
-      const commonPaths = [
-        '/usr/local/bin/codex',
-        '/opt/homebrew/bin/codex',
-        `${process.env.HOME}/.local/bin/codex`,
-        `${process.env.HOME}/.npm-global/bin/codex`,
-      ]
+      const home = process.env.HOME || process.env.USERPROFILE || ''
+      const commonPaths = process.platform === 'win32'
+        ? [
+            `${home}\\AppData\\Roaming\\npm\\codex.cmd`,
+            `${home}\\.local\\bin\\codex.cmd`
+          ]
+        : [
+            '/usr/local/bin/codex',
+            '/opt/homebrew/bin/codex',
+            `${home}/.local/bin/codex`,
+            `${home}/.npm-global/bin/codex`,
+          ]
 
       for (const path of commonPaths) {
         if (existsSync(path)) {

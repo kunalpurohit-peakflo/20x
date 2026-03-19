@@ -63,6 +63,7 @@ interface PollingEntry {
   seenMessageIds: Set<string>
   seenPartIds: Set<string>
   partContentLengths: Map<string, string>
+  initialPromptSent?: boolean
 }
 
 export class AgentManager extends EventEmitter {
@@ -800,6 +801,61 @@ export class AgentManager extends EventEmitter {
   }
 
   /**
+   * Spawns the opencode server process with platform-aware settings.
+   * On Windows, uses shell: true so .cmd wrappers are resolved.
+   */
+  private spawnOpencodeServer(hostname: string, port: number, isWin: boolean): Promise<{ close: () => void }> {
+    const args = ['serve', `--hostname=${hostname}`, `--port=${port}`]
+    const cmd = isWin ? 'opencode.cmd' : 'opencode'
+    const timeout = 10000
+
+    console.log(`[AgentManager] Spawning: ${cmd} ${args.join(' ')} (shell=${isWin})`)
+
+    const proc = spawn(cmd, args, {
+      shell: isWin,
+      windowsHide: true,
+      env: { ...process.env }
+    })
+
+    return new Promise((resolve, reject) => {
+      const id = setTimeout(() => {
+        reject(new Error(`Timeout waiting for opencode server after ${timeout}ms`))
+      }, timeout)
+
+      let output = ''
+
+      proc.stdout?.on('data', (chunk: Buffer) => {
+        output += chunk.toString()
+        const lines = output.split('\n')
+        for (const line of lines) {
+          if (line.startsWith('opencode server listening')) {
+            clearTimeout(id)
+            console.log(`[AgentManager] OpenCode server started: ${line.trim()}`)
+            resolve({ close: () => proc.kill() })
+            return
+          }
+        }
+      })
+
+      proc.stderr?.on('data', (chunk: Buffer) => {
+        output += chunk.toString()
+      })
+
+      proc.on('exit', (code) => {
+        clearTimeout(id)
+        let msg = `opencode server exited with code ${code}`
+        if (output.trim()) msg += `\nOutput: ${output.slice(0, 500)}`
+        reject(new Error(msg))
+      })
+
+      proc.on('error', (error) => {
+        clearTimeout(id)
+        reject(error)
+      })
+    })
+  }
+
+  /**
    * Ensures common binary install paths (e.g. ~/.opencode/bin) are in PATH
    * so the OpenCode SDK can find the `opencode` binary via spawn().
    */
@@ -809,7 +865,9 @@ export class AgentManager extends EventEmitter {
     const extraPaths = [
       ...(customPath ? [customPath] : []),
       join(homedir(), '.opencode', 'bin'),
-      '/usr/local/bin',
+      ...(process.platform === 'win32'
+        ? [join(homedir(), 'AppData', 'Roaming', 'npm')]
+        : ['/usr/local/bin']),
       join(homedir(), '.local', 'bin')
     ].filter(p => !currentPath.includes(p))
 
@@ -920,20 +978,15 @@ export class AgentManager extends EventEmitter {
         const hostname = url.hostname
         const port = parseInt(url.port || '4096', 10)
 
-        const result = await OpenCodeSDK.createOpencode({
-          hostname,
-          port
-        })
+        // On Windows, the SDK's createOpencodeServer uses spawn('opencode', ...)
+        // which can't find .cmd wrappers. Use a platform-aware spawn instead.
+        const isWin = process.platform === 'win32'
+        const serverResult = await this.spawnOpencodeServer(hostname, port, isWin)
 
-        this.serverInstance = result.server
+        this.serverInstance = serverResult
         this.serverUrl = targetUrl
 
         console.log(`[AgentManager] Embedded server created at ${this.serverUrl}`)
-
-        // Give server a moment to start listening
-        await new Promise(resolve => setTimeout(resolve, 1000))
-
-        console.log(`[AgentManager] Server ready at ${this.serverUrl}`)
       } catch (error) {
         console.error('[AgentManager] Failed to start server:', error)
         this.serverInstance = null
@@ -1220,6 +1273,13 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
         }
       })
 
+      // Mark that we already sent the initial user message so polling
+      // skips the duplicate user message returned by the adapter
+      const pollingEntry = this.pollingEntries.get(adapterSessionId)
+      if (pollingEntry) {
+        pollingEntry.initialPromptSent = true
+      }
+
       // Send prompt via adapter
       const parts: MessagePart[] = [
         { type: MessagePartType.TEXT, text: promptText }
@@ -1450,10 +1510,12 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
       // that each trigger a Zustand state update + React re-render.
       const batchMessages: Array<{ id: string; role: string; content: string; partType?: string; tool?: unknown; update?: boolean }> = []
       for (const part of newParts) {
-        // Allow user messages through so they appear in the transcript during
-        // session resume and replay.  The renderer's seenIds dedup prevents
-        // duplicate bubbles when the same message was already sent via the
-        // direct agent:output event.
+        // Skip the first user message from polling if we already sent it
+        // directly via agent:output (the IDs differ so seenIds dedup won't catch it)
+        if (entry.initialPromptSent && (part.role === 'user' || part.role === 'human')) {
+          entry.initialPromptSent = false // Only skip the first one
+          continue
+        }
         batchMessages.push({
           id: part.id || `part-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           role: part.role || 'assistant',
