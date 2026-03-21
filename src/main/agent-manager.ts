@@ -64,11 +64,13 @@ interface PollingEntry {
   seenPartIds: Set<string>
   partContentLengths: Map<string, string>
   initialPromptSent?: boolean
+  createdAt: number  // Timestamp to enforce grace period before IDLE transition
+  hasSeenWork?: boolean  // True once we've seen at least one non-IDLE status
 }
 
 export class AgentManager extends EventEmitter {
   private sessions: Map<string, AgentSession> = new Map()
-  private serverInstance: { url: string; close(): void } | null = null  // OpenCode SDK server instance
+  private serverInstance: { close(): void } | null = null  // OpenCode SDK server instance
   private serverUrl: string | null = null
   private serverStarting: Promise<void> | null = null  // Track server startup
   private sdkLoading: Promise<void> | null = null  // Track SDK loading
@@ -811,10 +813,30 @@ export class AgentManager extends EventEmitter {
 
     console.log(`[AgentManager] Spawning: ${cmd} ${args.join(' ')} (shell=${isWin})`)
 
+    // Read OpenCode auth.json to inject API keys as env vars
+    // OpenCode stores credentials in auth.json but expects env vars at runtime
+    const serverEnv: Record<string, string> = { ...process.env } as Record<string, string>
+    try {
+      const authPath = join(homedir(), '.local', 'share', 'opencode', 'auth.json')
+      if (existsSync(authPath)) {
+        const auth = JSON.parse(readFileSync(authPath, 'utf-8'))
+        if (auth.google?.key && !serverEnv.GOOGLE_GENERATIVE_AI_API_KEY) {
+          serverEnv.GOOGLE_GENERATIVE_AI_API_KEY = auth.google.key
+          console.log('[AgentManager] Injected GOOGLE_GENERATIVE_AI_API_KEY from OpenCode auth.json')
+        }
+        if (auth.openai?.key && !serverEnv.OPENAI_API_KEY) {
+          serverEnv.OPENAI_API_KEY = auth.openai.key
+          console.log('[AgentManager] Injected OPENAI_API_KEY from OpenCode auth.json')
+        }
+      }
+    } catch (e) {
+      console.log('[AgentManager] Could not read OpenCode auth.json:', e)
+    }
+
     const proc = spawn(cmd, args, {
       shell: isWin,
       windowsHide: true,
-      env: { ...process.env }
+      env: serverEnv
     })
 
     return new Promise((resolve, reject) => {
@@ -1098,10 +1120,12 @@ export class AgentManager extends EventEmitter {
     await yieldEL()
 
     // Initialize adapter
+    console.log(`[AgentManager] startAdapterSession: agent=${agent.name}, coding_agent=${agent.config?.coding_agent || 'opencode'}, model=${agent.config?.model}, adapter=${adapter.constructor.name}`)
     await adapter.initialize()
 
     // Create session via adapter
     const adapterSessionId = await adapter.createSession(sessionConfig)
+    console.log(`[AgentManager] Session created: ${adapterSessionId}, workspaceDir=${workspaceDir}`)
 
     // Store session in sessions map
     this.sessions.set(adapterSessionId, {
@@ -1147,8 +1171,10 @@ export class AgentManager extends EventEmitter {
       this.enterpriseStateSync.recordAgentRunStarted(task, agent.name)
     }
 
-    // Start polling adapter for messages
-    this.startAdapterPolling(adapterSessionId, adapter, sessionConfig)
+    // Start polling adapter for messages.
+    // Pass initialPromptSent=true BEFORE starting the poller so the first
+    // tick() won't forward the duplicate user message echoed by the adapter.
+    this.startAdapterPolling(adapterSessionId, adapter, sessionConfig, !skipInitialPrompt)
 
     // Send initial prompt if not skipped
     if (!skipInitialPrompt) {
@@ -1260,7 +1286,11 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
       const memoryFileName = this.getMemoryFileName(agentId)
       promptText += `\n\nIMPORTANT: First, read the \`${memoryFileName}\` file in the working directory — it has workspace config, skills, and project context.`
 
-      // Show user's prompt in UI first
+      // Show only the task title + description in the UI (not the appended system instructions)
+      const currentTaskForDisplay = task || this.db.getTask(taskId)
+      const displayPrompt = currentTaskForDisplay
+        ? `Work on task: "${currentTaskForDisplay.title}"\n\n${currentTaskForDisplay.description || ''}`
+        : `Work on task: ${taskId}`
       this.sendToRenderer('agent:output', {
         sessionId: adapterSessionId,
         taskId,
@@ -1268,23 +1298,29 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
         data: {
           id: `user-initial-${Date.now()}`,
           role: 'user',
-          content: promptText,
+          content: displayPrompt,
           partType: 'text'
         }
       })
 
-      // Mark that we already sent the initial user message so polling
-      // skips the duplicate user message returned by the adapter
-      const pollingEntry = this.pollingEntries.get(adapterSessionId)
-      if (pollingEntry) {
-        pollingEntry.initialPromptSent = true
-      }
+      // initialPromptSent was pre-set in startAdapterPolling() to prevent
+      // the race where the first tick() runs before we get here and forwards
+      // the duplicate user message echoed by the adapter.
 
       // Send prompt via adapter
       const parts: MessagePart[] = [
         { type: MessagePartType.TEXT, text: promptText }
       ]
-      await adapter.sendPrompt(adapterSessionId, parts, sessionConfig)
+      try {
+        await adapter.sendPrompt(adapterSessionId, parts, sessionConfig)
+      } catch (sendError) {
+        console.error(`[AgentManager] sendPrompt FAILED:`, sendError)
+        // Write to crash log for visibility
+        const fs = await import('fs')
+        const logPath = join(process.env.APPDATA || '', '20x', 'logs', 'agent-error.log')
+        fs.appendFileSync(logPath, `\n[${new Date().toISOString()}] sendPrompt error: ${sendError}\n${(sendError as Error).stack || ''}\n`)
+        throw sendError
+      }
     }
 
     return adapterSessionId
@@ -1303,7 +1339,8 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
   private startAdapterPolling(
     initialSessionId: string,
     adapter: CodingAgentAdapter,
-    config: SessionConfig
+    config: SessionConfig,
+    initialPromptSent?: boolean
   ): void {
     const entry: PollingEntry = {
       sessionId: initialSessionId,
@@ -1311,7 +1348,10 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
       config,
       seenMessageIds: new Set<string>(),
       seenPartIds: new Set<string>(),
-      partContentLengths: new Map<string, string>()
+      partContentLengths: new Map<string, string>(),
+      createdAt: Date.now(),
+      hasSeenWork: false,
+      initialPromptSent: initialPromptSent || false
     }
 
     this.pollingEntries.set(initialSessionId, entry)
@@ -1505,15 +1545,21 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
         }
       }
 
+      // Mark that the session has done real work once we receive any messages.
+      // This disables the IDLE grace period so future IDLE means truly done.
+      if (newParts.length > 0 && !entry.hasSeenWork) {
+        entry.hasSeenWork = true
+      }
+
       // Collect all parts into a batch instead of sending individually.
       // This avoids flooding the renderer with N separate IPC messages
       // that each trigger a Zustand state update + React re-render.
       const batchMessages: Array<{ id: string; role: string; content: string; partType?: string; tool?: unknown; update?: boolean }> = []
       for (const part of newParts) {
-        // Skip the first user message from polling if we already sent it
-        // directly via agent:output (the IDs differ so seenIds dedup won't catch it)
-        if (entry.initialPromptSent && (part.role === 'user' || part.role === 'human')) {
-          entry.initialPromptSent = false // Only skip the first one
+        // Skip ALL user/human messages from polling — we already show them in the UI
+        // via sendToRenderer in startAdapterSession (initial) and doSendAdapterMessage (follow-ups).
+        // The adapter echoes them back with different IDs so seenPartIds won't catch duplicates.
+        if (part.role === 'user' || part.role === 'human') {
           continue
         }
         batchMessages.push({
@@ -1638,6 +1684,20 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
         this.stopAdapterPolling(sessionId)
         return
       } else if (status.type === SessionStatusType.IDLE && session) {
+        // Grace period: don't transition to IDLE within the first 15 seconds of
+        // session creation. The prompt is sent asynchronously (fire-and-forget) and
+        // the backend may not have started processing it yet. Without this grace
+        // period, polling sees IDLE immediately, stops permanently, and the agent
+        // appears stuck showing only the system prompt.
+        const pollingEntry = this.pollingEntries.get(sessionId)
+        const sessionAge = pollingEntry ? Date.now() - pollingEntry.createdAt : Infinity
+        const IDLE_GRACE_PERIOD_MS = 15_000
+
+        if (!pollingEntry?.hasSeenWork && sessionAge < IDLE_GRACE_PERIOD_MS) {
+          // Still within grace period and haven't seen any work yet — keep polling
+          return
+        }
+
         console.log(`[AgentManager] Detected IDLE status for ${sessionId}, calling transitionToIdle`)
         session.pollingStarted = false
         // Remove from polling FIRST so other sessions aren't starved while

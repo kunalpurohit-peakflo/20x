@@ -41,6 +41,10 @@ export function initAutoUpdater(win: BrowserWindow): void {
   })
 
   autoUpdater.on('error', (err) => {
+    // Suppress 404 errors — no releases published yet is expected
+    if (err.message?.includes('404') || err.message?.includes('Cannot find latest')) {
+      return
+    }
     send('updater:status', {
       status: 'error',
       error: err.message

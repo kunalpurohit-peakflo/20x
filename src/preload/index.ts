@@ -358,7 +358,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onProgress: (callback: (data: { agentName: string; stage: string; output: string; percent: number }) => void): (() => void) => {
       const handler = (_: unknown, data: { agentName: string; stage: string; output: string; percent: number }): void => callback(data)
       ipcRenderer.on('agent-installer:progress', handler)
-      return () => ipcRenderer.removeAllListeners('agent-installer:progress')
+      return () => ipcRenderer.removeListener('agent-installer:progress', handler)
     }
   },
   webUtils: {
