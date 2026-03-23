@@ -49,7 +49,8 @@ export async function checkClaudeCodeHealth(): Promise<HealthStatus> {
     // 2. Check if Claude CLI is installed and authenticated
     try {
       const { execSync } = await import('child_process')
-      execSync('which claude', { stdio: 'ignore' })
+      const cmd = process.platform === 'win32' ? 'where claude.cmd' : 'which claude'
+      execSync(cmd, { stdio: 'ignore' })
     } catch {
       return {
         available: false,
