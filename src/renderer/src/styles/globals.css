@@ -81,6 +81,9 @@ html, body, #root {
 .drag-region { -webkit-app-region: drag; }
 .no-drag { -webkit-app-region: no-drag; }
 
+/* ── Windows: push content left of the title-bar overlay (min/max/close ≈ 140px) ── */
+[data-platform="win32"] .windows-titlebar-pad { padding-right: 150px; }
+
 /* ── Scrollbar ────────────────────────────────── */
 ::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }

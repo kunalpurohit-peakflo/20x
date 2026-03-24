@@ -103,8 +103,10 @@ export function AppLayout() {
 
       {/* Workspace — fills remaining space via CSS Grid 1fr */}
       <main className="flex flex-col min-w-0 overflow-hidden bg-background">
-        {/* Drag region for macOS traffic lights with mastermind toggle */}
-        <div className="drag-region h-12 flex-shrink-0 flex items-center justify-end px-4">
+        {/* Drag region for traffic lights (macOS) / title bar (Windows) with mastermind toggle.
+            On Windows, the title bar overlay (min/max/close) sits on top-right ~140px wide,
+            so we add extra right padding to keep the Mastermind button visible. */}
+        <div className="drag-region h-12 flex-shrink-0 flex items-center justify-end px-4 windows-titlebar-pad">
           <Button
             variant={showOrchestrator ? 'default' : 'ghost'}
             size="sm"
