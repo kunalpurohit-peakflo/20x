@@ -13,15 +13,19 @@ export default defineConfig({
         // Bundle pure-JS deps to enable tree-shaking and avoid shipping them in node_modules
         'js-yaml',
         'cron-parser',
-        '@opencode-ai/sdk'
+        '@opencode-ai/sdk',
+        'electron-updater'
       ]
     })],
+    resolve: {
+      extensions: ['.js', '.ts', '.jsx', '.tsx', '.json']
+    },
     build: {
       rollupOptions: {
         external: ['better-sqlite3'],
         input: {
           index: resolve(__dirname, 'src/main/index.ts'),
-          'mcp-servers/task-management-mcp': resolve(__dirname, 'src/main/mcp-servers/task-management-mcp.ts')
+          'mcp-servers/task-management-mcp': resolve(__dirname, 'src/main/mcp-servers/task-management-mcp.js')
         },
         output: {
           entryFileNames: '[name].js'
