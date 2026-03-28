@@ -19,6 +19,7 @@ import type {
 } from './database'
 import type { AgentManager } from './agent-manager'
 import type { GitHubManager } from './github-manager'
+import type { GitLabManager } from './gitlab-manager'
 import type { WorktreeManager } from './worktree-manager'
 import type { SyncManager } from './sync-manager'
 import type { PluginRegistry } from './plugins/registry'
@@ -71,7 +72,8 @@ export function registerIpcHandlers(
   claudePluginManager?: ClaudePluginManager,
   heartbeatScheduler?: import('./heartbeat-scheduler').HeartbeatScheduler,
   initialEnterpriseHeartbeat?: EnterpriseHeartbeat,
-  initialEnterpriseStateSync?: EnterpriseStateSync
+  initialEnterpriseStateSync?: EnterpriseStateSync,
+  gitlabManager?: GitLabManager
 ): void {
   // Mutable references — created on selectTenant, cleared on logout
   let enterpriseHeartbeat = initialEnterpriseHeartbeat
@@ -426,9 +428,38 @@ export function registerIpcHandlers(
     return await githubManager.fetchRepoCollaborators(owner, repo)
   })
 
+  // GitLab handlers
+  ipcMain.handle('gitlab:checkCli', async () => {
+    if (!gitlabManager) return { installed: false, authenticated: false }
+    return await gitlabManager.checkGlabCli()
+  })
+
+  ipcMain.handle('gitlab:startAuth', async (event) => {
+    if (!gitlabManager) throw new Error('GitLab manager not initialized')
+    await gitlabManager.startWebAuth((code) => {
+      event.sender.send('gitlab:deviceCode', code)
+    })
+  })
+
+  ipcMain.handle('gitlab:fetchOrgs', async () => {
+    if (!gitlabManager) return []
+    return await gitlabManager.fetchUserOrgs()
+  })
+
+  ipcMain.handle('gitlab:fetchOrgRepos', async (_, org: string) => {
+    if (!gitlabManager) return []
+    return await gitlabManager.fetchOrgRepos(org)
+  })
+
+  ipcMain.handle('gitlab:fetchUserRepos', async () => {
+    if (!gitlabManager) return []
+    return await gitlabManager.fetchUserRepos()
+  })
+
   // Worktree handlers
   ipcMain.handle('worktree:setup', async (_, taskId: string, repos: { fullName: string; defaultBranch: string }[], org: string) => {
-    return await worktreeManager.setupWorkspaceForTask(taskId, repos, org)
+    const provider = db.getSetting('git_provider') || 'github'
+    return await worktreeManager.setupWorkspaceForTask(taskId, repos, org, provider)
   })
 
   ipcMain.handle('worktree:cleanup', async (_, taskId: string, repos: { fullName: string }[], org: string, removeTaskDir?: boolean) => {

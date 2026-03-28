@@ -80,6 +80,13 @@ const mockElectronAPI = {
     fetchOrgs: vi.fn().mockResolvedValue([]),
     fetchOrgRepos: vi.fn().mockResolvedValue([])
   },
+  gitlab: {
+    checkCli: vi.fn().mockResolvedValue({ installed: false, authenticated: false }),
+    startAuth: vi.fn().mockResolvedValue(undefined),
+    fetchOrgs: vi.fn().mockResolvedValue([]),
+    fetchOrgRepos: vi.fn().mockResolvedValue([]),
+    fetchUserRepos: vi.fn().mockResolvedValue([])
+  },
   worktree: {
     setup: vi.fn().mockResolvedValue(''),
     cleanup: vi.fn().mockResolvedValue(undefined)
@@ -147,6 +154,12 @@ const mockElectronAPI = {
     return vi.fn()
   }),
   onTaskCreated: vi.fn((_cb: (event: { task: WorkfloTask }) => void) => {
+    return vi.fn()
+  }),
+  onGithubDeviceCode: vi.fn((_cb: (code: string) => void) => {
+    return vi.fn()
+  }),
+  onGitlabDeviceCode: vi.fn((_cb: (code: string) => void) => {
     return vi.fn()
   }),
   onTasksRefresh: vi.fn((_cb: () => void) => {

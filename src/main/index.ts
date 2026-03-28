@@ -7,6 +7,7 @@ import { is } from '@electron-toolkit/utils'
 import { DatabaseManager } from './database'
 import { AgentManager } from './agent-manager'
 import { GitHubManager } from './github-manager'
+import { GitLabManager } from './gitlab-manager'
 import { WorktreeManager } from './worktree-manager'
 import { McpToolCaller } from './mcp-tool-caller.js'
 import { SyncManager } from './sync-manager'
@@ -37,6 +38,7 @@ let isQuitting = false
 let db: DatabaseManager | null = null
 let agentManager: AgentManager | null = null
 let githubManager: GitHubManager | null = null
+let gitlabManager: GitLabManager | null = null
 let worktreeManager: WorktreeManager | null = null
 let mcpToolCaller: McpToolCaller | null = null
 let syncManager: SyncManager | null = null
@@ -395,8 +397,9 @@ app.whenReady().then(async () => {
 
   agentManager = new AgentManager(db)
   githubManager = new GitHubManager()
+  gitlabManager = new GitLabManager()
   worktreeManager = new WorktreeManager()
-  agentManager.setManagers(githubManager, worktreeManager)
+  agentManager.setManagers(githubManager, worktreeManager, gitlabManager ?? undefined)
 
   mcpToolCaller = new McpToolCaller()
 
@@ -473,7 +476,7 @@ app.whenReady().then(async () => {
     console.log('[Main] No enterprise auth instance — skipping restore')
   }
 
-  registerIpcHandlers(db, agentManager, githubManager, worktreeManager, syncManager, pluginRegistry, mcpToolCaller, oauthManager, recurrenceScheduler, enterpriseAuth ?? undefined, claudePluginManager, heartbeatScheduler, enterpriseHeartbeatInstance ?? undefined, enterpriseStateSyncInstance ?? undefined)
+  registerIpcHandlers(db, agentManager, githubManager, worktreeManager, syncManager, pluginRegistry, mcpToolCaller, oauthManager, recurrenceScheduler, enterpriseAuth ?? undefined, claudePluginManager, heartbeatScheduler, enterpriseHeartbeatInstance ?? undefined, enterpriseStateSyncInstance ?? undefined, gitlabManager ?? undefined)
 
   // Start secret broker and write shell wrapper (awaited so broker is ready before any sessions)
   try {
@@ -487,7 +490,7 @@ app.whenReady().then(async () => {
   // Start mobile API server
   try {
     agentManager.addExternalListener(broadcastToMobileClients)
-    const mobilePort = await startMobileApiServer(db, agentManager, githubManager!, undefined, syncManager, pluginRegistry)
+    const mobilePort = await startMobileApiServer(db, agentManager, githubManager!, undefined, syncManager, pluginRegistry, gitlabManager)
     console.log(`[Main] Mobile API server started on port ${mobilePort}`)
   } catch (err) {
     console.error('[Main] Failed to start mobile API server:', err)
