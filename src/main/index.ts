@@ -304,6 +304,9 @@ app.on('open-url', (event, url) => {
 })
 
 // Fix PATH for GUI apps (async to avoid blocking startup)
+// macOS GUI apps (launched from /Applications) do NOT inherit the user's shell
+// PATH, so CLI tools like codex, claude, gh etc. cannot be found. We read the
+// PATH from a login shell and apply it to process.env.
 function fixPlatformPath(): Promise<void> {
   if (process.platform === 'win32') {
     // On Windows, ensure common Node/npm/git paths are available
@@ -321,21 +324,84 @@ function fixPlatformPath(): Promise<void> {
     return Promise.resolve()
   }
   if (process.platform !== 'darwin') return Promise.resolve()
+
+  // We need the interactive shell (`-i`) because tools like NVM, pnpm, bun,
+  // etc. add their paths in `.zshrc` / `.bashrc` (interactive config), NOT in
+  // `.zprofile` / `.bash_profile` (login-only config).
+  //
+  // Problem: interactive mode also causes shell init scripts (oh-my-zsh,
+  // powerlevel10k, gitstatus, etc.) to emit escape codes, error messages,
+  // and prompt strings that corrupt the output.
+  //
+  // Solution: use unique markers around the PATH value so we can reliably
+  // extract it from the noisy output.
+  const PATH_START = '__20X_PATH_START__'
+  const PATH_END = '__20X_PATH_END__'
+
   return new Promise((resolve) => {
     const userShell = process.env.SHELL || '/bin/zsh'
-    execFile(userShell, ['-ilc', 'echo $PATH'], { timeout: 5000, encoding: 'utf8' }, (err, stdout) => {
-      if (!err && stdout && stdout.trim().length > 0) {
-        console.log('[Main] Setting PATH from shell:', userShell)
-        process.env.PATH = stdout.trim()
-      } else {
-        console.error('[Main] Failed to read shell PATH, using fallback')
-        const commonPaths = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', process.env.HOME + '/.nvm/versions/node/v22.14.0/bin']
-        const existingPath = process.env.PATH || ''
-        process.env.PATH = [...new Set([...commonPaths, ...existingPath.split(':')])].filter(Boolean).join(':')
+    execFile(
+      userShell,
+      ['-ilc', `echo ${PATH_START}$PATH${PATH_END}`],
+      { timeout: 5000, encoding: 'utf8' },
+      (err, stdout) => {
+        if (!err && stdout) {
+          // Extract PATH from between the markers, ignoring any garbage output
+          const match = stdout.match(new RegExp(`${PATH_START}(.+?)${PATH_END}`))
+          if (match && match[1]) {
+            console.log('[Main] Setting PATH from shell:', userShell)
+            process.env.PATH = match[1]
+            resolve()
+            return
+          }
+        }
+        console.error('[Main] Failed to read shell PATH, using fallback:', err?.message)
+        process.env.PATH = buildFallbackPath()
+        resolve()
       }
-      resolve()
-    })
+    )
   })
+}
+
+/**
+ * Build a comprehensive fallback PATH when the shell invocation fails.
+ * Covers Homebrew, system bins, npm/pnpm/volta globals, and NVM.
+ */
+function buildFallbackPath(): string {
+  const home = process.env.HOME || ''
+  const commonPaths = [
+    '/opt/homebrew/bin',
+    '/opt/homebrew/sbin',
+    '/usr/local/bin',
+    '/usr/bin',
+    '/bin',
+    '/usr/sbin',
+    '/sbin',
+    `${home}/.local/bin`,
+    `${home}/.npm-global/bin`,
+    `${home}/Library/pnpm`,
+    `${home}/.volta/bin`,
+  ]
+
+  // Dynamically detect NVM current version path instead of hardcoding
+  if (home) {
+    try {
+      const nvmVersionsDir = join(home, '.nvm', 'versions', 'node')
+      const versions = readdirSync(nvmVersionsDir) as string[]
+      if (versions.length > 0) {
+        // Sort descending to pick the latest installed version
+        versions.sort((a: string, b: string) => b.localeCompare(a, undefined, { numeric: true }))
+        commonPaths.push(join(nvmVersionsDir, versions[0], 'bin'))
+      }
+    } catch {
+      // NVM not installed — skip
+    }
+  }
+
+  const existingPath = process.env.PATH || ''
+  return [...new Set([...commonPaths, ...existingPath.split(':')])]
+    .filter(Boolean)
+    .join(':')
 }
 
 // Register app-attachment:// as a privileged scheme before app is ready.

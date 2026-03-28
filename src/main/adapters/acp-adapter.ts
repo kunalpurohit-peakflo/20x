@@ -8,6 +8,7 @@
 
 import { spawn, ChildProcess } from 'child_process'
 import { randomUUID } from 'crypto'
+import { dirname } from 'path'
 import type {
   CodingAgentAdapter,
   SessionConfig,
@@ -138,13 +139,83 @@ export class AcpAdapter implements CodingAgentAdapter {
     this.agentConfig = this.getAgentConfig(agentType)
   }
 
+  /**
+   * Get the Node.js command for spawning child processes.
+   *
+   * In packaged Electron apps, `node` is not on PATH. Instead we use the
+   * Electron binary itself (`process.execPath`) with ELECTRON_RUN_AS_NODE=1,
+   * which makes it behave as a standard Node.js runtime that can also read
+   * files from inside the ASAR archive.
+   *
+   * On Windows, ELECTRON_RUN_AS_NODE doesn't work properly with the packaged
+   * .exe — it still initialises Electron internals — so we fall back to the
+   * system `node` binary (which must be on PATH).
+   */
+  private getNodeCommand(): { command: string; env: Record<string, string> } {
+    const isWin = process.platform === 'win32'
+    return {
+      command: isWin ? 'node' : process.execPath,
+      env: isWin ? {} : { ELECTRON_RUN_AS_NODE: '1' },
+    }
+  }
+
+  /**
+   * Resolve the path to the codex-acp native binary for the current platform.
+   *
+   * codex-acp ships as a native binary per platform (e.g. codex-acp-darwin-arm64).
+   * The JS wrapper (codex-acp.js) uses import.meta.resolve() which returns an ASAR
+   * path — but the OS can't execute a native binary from inside an ASAR archive.
+   * We bypass the wrapper and resolve the native binary directly, replacing the
+   * ASAR path with the unpacked path (electron-builder auto-unpacks native binaries).
+   *
+   * pnpm note: the platform-specific package (e.g. codex-acp-darwin-arm64) is an
+   * optionalDependency of codex-acp, so under pnpm it is NOT hoisted to the root
+   * node_modules. We must resolve it from codex-acp's own directory using the
+   * `{ paths }` option of require.resolve. In a packaged app (ASAR), electron-builder
+   * flattens the structure so a plain require.resolve would also work.
+   */
+  private resolveCodexBinary(): string {
+    const platformMap: Record<string, Record<string, string>> = {
+      darwin: { arm64: 'codex-acp-darwin-arm64', x64: 'codex-acp-darwin-x64' },
+      linux:  { arm64: 'codex-acp-linux-arm64',  x64: 'codex-acp-linux-x64' },
+      win32:  { arm64: 'codex-acp-win32-arm64',  x64: 'codex-acp-win32-x64' },
+    }
+
+    const packages = platformMap[process.platform]
+    if (!packages) throw new Error(`Unsupported platform for codex-acp: ${process.platform}`)
+    const packageName = packages[process.arch]
+    if (!packageName) throw new Error(`Unsupported arch for codex-acp: ${process.arch} on ${process.platform}`)
+
+    const binaryName = process.platform === 'win32' ? 'codex-acp.exe' : 'codex-acp'
+
+    // Resolve from codex-acp's own directory so pnpm's nested optional deps are found.
+    const codexAcpDir = dirname(require.resolve('@zed-industries/codex-acp/package.json'))
+    let binaryPath = require.resolve(
+      `@zed-industries/${packageName}/bin/${binaryName}`,
+      { paths: [codexAcpDir] }
+    )
+
+    // In a packaged Electron app, require.resolve returns an ASAR path like:
+    //   /Applications/20x.app/Contents/Resources/app.asar/node_modules/.../bin/codex-acp
+    // The native binary is auto-unpacked to app.asar.unpacked, so fix the path.
+    if (binaryPath.includes('app.asar')) {
+      binaryPath = binaryPath.replace('app.asar', 'app.asar.unpacked')
+    }
+
+    console.log(`[AcpAdapter/codex] Resolved native binary: ${binaryPath}`)
+    return binaryPath
+  }
+
   private getAgentConfig(agentType: AcpAgentType): AcpAgentConfig {
+    const { command, env: nodeEnv } = this.getNodeCommand()
+
     switch (agentType) {
       case 'codex':
-        // codex-acp is a Node.js script, so we need to run it via node
+        // Codex ships as a native binary — spawn it directly, bypassing the JS wrapper
+        // which fails inside ASAR (see resolveCodexBinary docs for details).
         return {
-          command: 'node',
-          args: [require.resolve('@zed-industries/codex-acp/bin/codex-acp.js')],
+          command: this.resolveCodexBinary(),
+          args: [],
           env: {
             // Codex requires OPENAI_API_KEY or CODEX_API_KEY
             ...(process.env.OPENAI_API_KEY && { OPENAI_API_KEY: process.env.OPENAI_API_KEY }),
@@ -152,13 +223,13 @@ export class AcpAdapter implements CodingAgentAdapter {
           }
         }
       case 'claude-code':
-        // claude-code-acp is also a Node.js script
-        // Note: ANTHROPIC_API_KEY is NOT included here — it is handled per-session
-        // in createSession/resumeSession based on config.authMethod
+        // claude-code-acp is a pure Node.js script (no native binary).
+        // Run it via the Electron binary with ELECTRON_RUN_AS_NODE=1 which
+        // provides both Node.js runtime and ASAR filesystem support.
         return {
-          command: 'node',
+          command,
           args: [require.resolve('@zed-industries/claude-code-acp/dist/index.js')],
-          env: {}
+          env: { ...nodeEnv }
         }
       default:
         throw new Error(`Unsupported ACP agent type: ${agentType}`)
