@@ -1,13 +1,13 @@
-import { DepsWarningBanner } from './DepsWarningBanner'
 import { Sidebar } from './Sidebar'
 import { TaskWorkspace } from '@/components/tasks/TaskWorkspace'
 import { SkillWorkspace } from '@/components/skills/SkillWorkspace'
 import { SettingsWorkspace } from '@/components/settings/SettingsWorkspace'
+import { DashboardWorkspace } from '@/components/dashboard/DashboardWorkspace'
 import { TaskForm, type TaskFormSubmitData } from '@/components/tasks/TaskForm'
 import { DeleteConfirmDialog } from '@/components/tasks/DeleteConfirmDialog'
 import { Dialog, DialogContent, DialogHeader, DialogBody, DialogTitle } from '@/components/ui/Dialog'
 import { OrchestratorPanel } from '@/components/orchestrator/OrchestratorPanel'
-import { AgentSetupDialog } from '@/components/AgentSetupWizard'
+import { OnboardingWizard, shouldShowOnboarding } from '@/components/onboarding/OnboardingWizard'
 import { useTasks } from '@/hooks/use-tasks'
 import { useUIStore } from '@/stores/ui-store'
 import { useAgentStore } from '@/stores/agent-store'
@@ -17,10 +17,11 @@ import { attachmentApi, worktreeApi, settingsApi } from '@/lib/ipc-client'
 import { useTaskSourceStore } from '@/stores/task-source-store'
 import { isOverdue, isSnoozed } from '@/lib/utils'
 import { useEffect, useState, useCallback } from 'react'
-import { TaskStatus } from '@/types'
+import { TaskStatus, PluginActionId } from '@/types'
 import type { FileAttachment } from '@/types'
-import { MessageSquare } from 'lucide-react'
+import { MessageSquare, ExternalLink, LayoutDashboard, CheckSquare, Zap, Settings } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
+import type { SidebarView } from '@/stores/ui-store'
 
 export function AppLayout() {
   const { tasks, allTasks, selectedTask, createTask, updateTask, deleteTask, selectTask } = useTasks()
@@ -28,6 +29,7 @@ export function AppLayout() {
   const { executeAction } = useTaskSourceStore()
   const {
     sidebarView,
+    setSidebarView,
     activeModal,
     editingTaskId,
     deletingTaskId,
@@ -35,7 +37,9 @@ export function AppLayout() {
     openEditModal,
     openDeleteModal,
     openSettings,
-    closeModal
+    closeModal,
+    dashboardPreviewTaskId,
+    closeDashboardPreview
   } = useUIStore()
 
   useEffect(() => {
@@ -44,6 +48,13 @@ export function AppLayout() {
 
   const editingTask = editingTaskId ? tasks.find((t) => t.id === editingTaskId) || selectedTask : undefined
   const deletingTask = deletingTaskId ? tasks.find((t) => t.id === deletingTaskId) : undefined
+  const dashboardPreviewTask = dashboardPreviewTaskId ? allTasks.find((t) => t.id === dashboardPreviewTaskId) : undefined
+
+  const handleGoToFullView = useCallback((taskId: string) => {
+    closeDashboardPreview()
+    selectTask(taskId)
+    setSidebarView('tasks')
+  }, [closeDashboardPreview, selectTask, setSidebarView])
 
   const overdueCount = tasks.filter(
     (t) => isOverdue(t.due_date) && t.status !== TaskStatus.Completed && !isSnoozed(t.snoozed_until)
@@ -58,22 +69,22 @@ export function AppLayout() {
   }, [])
 
   const [showOrchestrator, setShowOrchestrator] = useState(false)
-  const [setupDialogOpen, setSetupDialogOpen] = useState(false)
+  const [onboardingOpen, setOnboardingOpen] = useState(false)
 
-  // Auto-open agent setup on every new install/update
+  // Auto-open onboarding on first launch or major/minor version bumps
   useEffect(() => {
     Promise.all([
       settingsApi.get('setup_completed_version'),
       window.electronAPI?.app?.getVersion()
     ]).then(([completedVersion, currentVersion]) => {
-      if (currentVersion && completedVersion !== currentVersion) {
-        setSetupDialogOpen(true)
+      if (currentVersion && shouldShowOnboarding(completedVersion, currentVersion)) {
+        setOnboardingOpen(true)
       }
     })
   }, [])
 
-  const handleSetupDialogChange = (open: boolean) => {
-    setSetupDialogOpen(open)
+  const handleOnboardingChange = (open: boolean) => {
+    setOnboardingOpen(open)
     if (!open) {
       window.electronAPI?.app?.getVersion().then((v) => {
         if (v) settingsApi.set('setup_completed_version', v)
@@ -89,43 +100,85 @@ export function AppLayout() {
     showToast
   })
 
+  const NAV_ITEMS: { key: SidebarView; label: string; icon: typeof LayoutDashboard }[] = [
+    { key: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
+    { key: 'tasks', label: 'Tasks', icon: CheckSquare },
+    { key: 'skills', label: 'Skills', icon: Zap }
+  ]
+
   return (
     <>
-      {/* Sidebar — constrained to 280px by CSS Grid on #root */}
-      <Sidebar
-        tasks={tasks}
-        selectedTaskId={selectedTask?.id || null}
-        overdueCount={overdueCount}
-        onSelectTask={selectTask}
-        onCreateTask={openCreateModal}
-        onOpenSettings={openSettings}
-      />
+      {/* ── Top bar: drag region with logo (left) + nav switcher (center-left) + actions (right) ── */}
+      <div className="drag-region h-12 flex-shrink-0 flex items-center justify-center px-4 border-b border-border/50 windows-titlebar-pad">
+        {/* View switcher — centered */}
+        <div className="no-drag flex rounded-md border border-border bg-muted/30 p-0.5">
+          {NAV_ITEMS.map(({ key, label, icon: Icon }) => (
+            <button
+              key={key}
+              onClick={() => {
+                if (activeModal === 'settings') closeModal()
+                setSidebarView(key)
+              }}
+              className={`rounded px-3 py-1 text-xs font-medium transition-colors cursor-pointer flex items-center gap-1.5 ${
+                sidebarView === key
+                  ? 'bg-background text-foreground shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              <Icon className="h-3 w-3" />
+              {label}
+            </button>
+          ))}
+        </div>
 
-      {/* Workspace — fills remaining space via CSS Grid 1fr */}
-      <main className="flex flex-col min-w-0 overflow-hidden bg-background">
-        {/* Drag region for traffic lights (macOS) / title bar (Windows) with mastermind toggle.
-            On Windows, the title bar overlay (min/max/close) sits on top-right ~140px wide,
-            so we add extra right padding to keep the Mastermind button visible. */}
-        <div className="drag-region h-12 flex-shrink-0 flex items-center justify-end px-4 windows-titlebar-pad">
+        {/* Global actions — pinned right */}
+        <div className="no-drag absolute right-4 flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={openSettings}
+            className="h-7 px-2"
+            title="Settings"
+          >
+            <Settings className="h-3.5 w-3.5" />
+          </Button>
           <Button
             variant={showOrchestrator ? 'default' : 'ghost'}
             size="sm"
             onClick={() => setShowOrchestrator(!showOrchestrator)}
-            className="no-drag h-7 px-2"
+            className="h-7 px-2"
           >
             <MessageSquare className="h-3.5 w-3.5 mr-1" />
             <span className="text-xs">Mastermind</span>
           </Button>
         </div>
-        <DepsWarningBanner />
-        <div className="flex-1 overflow-hidden relative">
-          {/* Main workspace content */}
-          {activeModal === 'settings' ? (
-            <SettingsWorkspace />
-          ) : sidebarView === 'skills' ? (
-            <SkillWorkspace />
-          ) : (
-            <TaskWorkspace
+      </div>
+
+      {/* ── Content area: optional sidebar + workspace ── */}
+      <div className="flex flex-1 min-h-0 overflow-hidden">
+        {/* Sidebar — only for tasks and skills views */}
+        {sidebarView !== 'dashboard' && (
+          <Sidebar
+            tasks={tasks}
+            selectedTaskId={selectedTask?.id || null}
+            overdueCount={overdueCount}
+            onSelectTask={selectTask}
+            onCreateTask={openCreateModal}
+          />
+        )}
+
+        {/* Workspace */}
+        <main className="flex flex-col flex-1 min-w-0 overflow-hidden bg-background">
+          <div className="flex-1 overflow-hidden relative">
+            {/* Main workspace content */}
+            {activeModal === 'settings' ? (
+              <SettingsWorkspace />
+            ) : sidebarView === 'dashboard' ? (
+              <DashboardWorkspace />
+            ) : sidebarView === 'skills' ? (
+              <SkillWorkspace />
+            ) : (
+              <TaskWorkspace
               task={selectedTask}
               agents={agents}
               onEdit={() => {
@@ -150,7 +203,7 @@ export function AppLayout() {
                 try {
                   if (selectedTask.source_id) {
                     const actionField = selectedTask.output_fields.find((f) => f.id === 'action')
-                    const actionValue = actionField?.value ? String(actionField.value) : 'complete'
+                    const actionValue = actionField?.value ? String(actionField.value) : PluginActionId.Complete
                     const result = await executeAction(actionValue, selectedTask.id, selectedTask.source_id)
                     if (!result.success) {
                       showToast(result.error || 'Failed to complete task', true)
@@ -187,8 +240,9 @@ export function AppLayout() {
           >
             <OrchestratorPanel onClose={() => setShowOrchestrator(false)} />
           </div>
-        </div>
-      </main>
+          </div>
+        </main>
+      </div>
 
       {/* Create Task Dialog */}
       <Dialog open={activeModal === 'create'} onOpenChange={(open) => !open && closeModal()}>
@@ -278,8 +332,76 @@ export function AppLayout() {
         onCancel={closeModal}
       />
 
-      {/* Agent Setup Dialog — auto-opens on first launch */}
-      <AgentSetupDialog open={setupDialogOpen} onOpenChange={handleSetupDialogChange} />
+      {/* Onboarding Wizard — auto-opens on first launch or major/minor version bumps */}
+      <OnboardingWizard open={onboardingOpen} onOpenChange={handleOnboardingChange} />
+
+      {/* Dashboard task preview — reuses the full TaskWorkspace inside a dialog */}
+      <Dialog open={!!dashboardPreviewTaskId} onOpenChange={(open) => { if (!open) closeDashboardPreview() }}>
+        <DialogContent className="max-w-[90vw] h-[85vh] w-full">
+          <DialogHeader className="flex-row items-center justify-between gap-4">
+            <DialogTitle className="truncate">{dashboardPreviewTask?.title || 'Task'}</DialogTitle>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="shrink-0 mr-8"
+              onClick={() => dashboardPreviewTaskId && handleGoToFullView(dashboardPreviewTaskId)}
+            >
+              <ExternalLink className="h-3.5 w-3.5 mr-1" />
+              <span className="text-xs">Go to Tasks view</span>
+            </Button>
+          </DialogHeader>
+          <div className="flex-1 min-h-0 overflow-hidden">
+            {dashboardPreviewTask && (
+              <TaskWorkspace
+                task={dashboardPreviewTask}
+                agents={agents}
+                onEdit={() => {
+                  if (dashboardPreviewTask) openEditModal(dashboardPreviewTask.id)
+                }}
+                onDelete={() => {
+                  if (dashboardPreviewTask) openDeleteModal(dashboardPreviewTask.id)
+                }}
+                onUpdateAttachments={async (attachments: FileAttachment[]) => {
+                  await updateTask(dashboardPreviewTask.id, { attachments })
+                }}
+                onUpdateOutputFields={async (output_fields) => {
+                  await updateTask(dashboardPreviewTask.id, { output_fields })
+                }}
+                onCompleteTask={async () => {
+                  const taskTitle = dashboardPreviewTask.title
+                  try {
+                    if (dashboardPreviewTask.source_id) {
+                      const actionField = dashboardPreviewTask.output_fields.find((f) => f.id === 'action')
+                      const actionValue = actionField?.value ? String(actionField.value) : PluginActionId.Complete
+                      const result = await executeAction(actionValue, dashboardPreviewTask.id, dashboardPreviewTask.source_id)
+                      if (!result.success) {
+                        showToast(result.error || 'Failed to complete task', true)
+                        return
+                      }
+                    }
+                    await updateTask(dashboardPreviewTask.id, { status: TaskStatus.Completed })
+                  } catch (err) {
+                    console.error('Failed to complete task:', err)
+                    showToast('Failed to complete task', true)
+                    return
+                  }
+                  showToast(`"${taskTitle}" completed`)
+                }}
+                onAssignAgent={async (taskId, agentId) => {
+                  await updateTask(taskId, { agent_id: agentId })
+                }}
+                onUpdateTask={async (taskId, data) => {
+                  await updateTask(taskId, data)
+                }}
+                onNavigateToTask={(taskId) => {
+                  closeDashboardPreview()
+                  handleGoToFullView(taskId)
+                }}
+              />
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* Toast */}
       {toast && (

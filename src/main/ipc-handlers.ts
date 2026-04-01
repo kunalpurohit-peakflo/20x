@@ -1,10 +1,6 @@
-import { ipcMain, dialog, shell, Notification, app } from 'electron'
+import { ipcMain, dialog, shell, Notification, app, session } from 'electron'
 import { copyFileSync, existsSync, unlinkSync, readdirSync, statSync, readFileSync } from 'fs'
-import { execFile } from 'child_process'
-import { promisify } from 'util'
 import { join, basename, extname } from 'path'
-
-const execFileAsync = promisify(execFile)
 import type {
   DatabaseManager,
   CreateTaskData,
@@ -23,6 +19,7 @@ import type {
 } from './database'
 import type { AgentManager } from './agent-manager'
 import type { GitHubManager } from './github-manager'
+import type { GitLabManager } from './gitlab-manager'
 import type { WorktreeManager } from './worktree-manager'
 import type { SyncManager } from './sync-manager'
 import type { PluginRegistry } from './plugins/registry'
@@ -75,7 +72,8 @@ export function registerIpcHandlers(
   claudePluginManager?: ClaudePluginManager,
   heartbeatScheduler?: import('./heartbeat-scheduler').HeartbeatScheduler,
   initialEnterpriseHeartbeat?: EnterpriseHeartbeat,
-  initialEnterpriseStateSync?: EnterpriseStateSync
+  initialEnterpriseStateSync?: EnterpriseStateSync,
+  gitlabManager?: GitLabManager
 ): void {
   // Mutable references — created on selectTenant, cleared on logout
   let enterpriseHeartbeat = initialEnterpriseHeartbeat
@@ -134,6 +132,11 @@ export function registerIpcHandlers(
 
   ipcMain.handle('db:getSubtasks', (_, parentId: string) => {
     return db.getSubtasks(parentId)
+  })
+
+  ipcMain.handle('db:reorderSubtasks', (_, parentId: string, orderedIds: string[]) => {
+    db.reorderSubtasks(parentId, orderedIds)
+    return true
   })
 
   // Attachment handlers
@@ -425,9 +428,38 @@ export function registerIpcHandlers(
     return await githubManager.fetchRepoCollaborators(owner, repo)
   })
 
+  // GitLab handlers
+  ipcMain.handle('gitlab:checkCli', async () => {
+    if (!gitlabManager) return { installed: false, authenticated: false }
+    return await gitlabManager.checkGlabCli()
+  })
+
+  ipcMain.handle('gitlab:startAuth', async (event) => {
+    if (!gitlabManager) throw new Error('GitLab manager not initialized')
+    await gitlabManager.startWebAuth((code) => {
+      event.sender.send('gitlab:deviceCode', code)
+    })
+  })
+
+  ipcMain.handle('gitlab:fetchOrgs', async () => {
+    if (!gitlabManager) return []
+    return await gitlabManager.fetchUserOrgs()
+  })
+
+  ipcMain.handle('gitlab:fetchOrgRepos', async (_, org: string) => {
+    if (!gitlabManager) return []
+    return await gitlabManager.fetchOrgRepos(org)
+  })
+
+  ipcMain.handle('gitlab:fetchUserRepos', async () => {
+    if (!gitlabManager) return []
+    return await gitlabManager.fetchUserRepos()
+  })
+
   // Worktree handlers
   ipcMain.handle('worktree:setup', async (_, taskId: string, repos: { fullName: string; defaultBranch: string }[], org: string) => {
-    return await worktreeManager.setupWorkspaceForTask(taskId, repos, org)
+    const provider = db.getSetting('git_provider') || 'github'
+    return await worktreeManager.setupWorkspaceForTask(taskId, repos, org, provider)
   })
 
   ipcMain.handle('worktree:cleanup', async (_, taskId: string, repos: { fullName: string }[], org: string, removeTaskDir?: boolean) => {
@@ -522,28 +554,19 @@ export function registerIpcHandlers(
     return db.deleteSecret(id)
   })
 
-  // Dependency check handler
-  let depsCheckCache: { gh: boolean; opencode: boolean; opencodeBinary: boolean; claudeCodeBinary: boolean; codexBinary: boolean } | null = null
+  // Dependency check handler — delegates to the shared detectInstalledAgents()
+  // which returns Record<string, { installed: boolean; version: string | null }>
+  let depsCheckCache: Record<string, { installed: boolean; version: string | null }> | null = null
 
   ipcMain.handle('deps:check', async () => {
     if (depsCheckCache) {
-      // Return cache only if all binaries were found; otherwise re-check
-      // so that installing a binary mid-session is picked up.
-      const allFound = depsCheckCache.opencodeBinary && depsCheckCache.claudeCodeBinary && depsCheckCache.codexBinary
+      // Return cache only if all agent binaries were found; otherwise re-check
+      const allFound = depsCheckCache.claudeCode?.installed && depsCheckCache.opencode?.installed && depsCheckCache.codex?.installed
       if (allFound) return depsCheckCache
       depsCheckCache = null
     }
 
-    // OpenCode: Check if SDK is installed (it's an npm package)
-    let opencodeAvailable = false
-    try {
-      await import('@opencode-ai/sdk')
-      opencodeAvailable = true
-    } catch {
-      opencodeAvailable = false
-    }
-
-    // OpenCode binary: Check if the `opencode` command is findable
+    // Augment PATH with custom opencode path and common bin dirs before detection
     const { homedir } = await import('os')
     const { join: pathJoin, delimiter } = await import('path')
     const customPath = db.getSetting('OPENCODE_BINARY_PATH')
@@ -560,38 +583,8 @@ export function registerIpcHandlers(
       process.env.PATH = [...extraPaths, process.env.PATH || ''].join(delimiter)
     }
 
-    let check: (cmd: string) => Promise<{ stdout: string; stderr: string }>
-    if (isWin) {
-      const whichCmd = (bin: string) => execFileAsync('where', [bin])
-      check = whichCmd
-    } else {
-      const loginShell = existsSync('/bin/zsh') ? '/bin/zsh' : '/bin/bash'
-      check = (cmd: string) => execFileAsync(loginShell, ['-l', '-c', cmd])
-    }
-
-    const [gh, opencodeBin, claudeCodeBin, codexBin] = await Promise.allSettled(
-      isWin
-        ? [
-            check('gh'),
-            check('opencode'),
-            check('claude.cmd'),
-            check('codex')
-          ]
-        : [
-            check('gh --version'),
-            check('which opencode'),
-            check('which claude'),
-            check('which codex')
-          ]
-    )
-
-    const result = {
-      gh: gh.status === 'fulfilled',
-      opencode: opencodeAvailable,
-      opencodeBinary: opencodeBin.status === 'fulfilled',
-      claudeCodeBinary: claudeCodeBin.status === 'fulfilled',
-      codexBinary: codexBin.status === 'fulfilled'
-    }
+    const { detectInstalledAgents } = await import('./agent-installer/detect.js')
+    const result = await detectInstalledAgents()
     depsCheckCache = result
     return result
   })
@@ -928,6 +921,47 @@ export function registerIpcHandlers(
   ipcMain.handle('enterprise:apiRequest', async (_, method: string, path: string, body?: unknown) => {
     if (!enterpriseAuth) throw new Error('Enterprise auth not available')
     return await enterpriseAuth.apiRequest(method, path, body)
+  })
+
+  ipcMain.handle('enterprise:getApiUrl', () => {
+    if (!enterpriseAuth) throw new Error('Enterprise auth not available')
+    return enterpriseAuth.getApiUrl()
+  })
+
+  ipcMain.handle('enterprise:getJwt', async () => {
+    if (!enterpriseAuth) throw new Error('Enterprise auth not available')
+    return enterpriseAuth.getJwt()
+  })
+
+  // Inject Authorization header for iframe requests to the enterprise API.
+  // The interceptor is scoped to the API URL so it only affects API-bound requests.
+  let iframeAuthEnabled = false
+
+  ipcMain.handle('enterprise:enableIframeAuth', async () => {
+    if (!enterpriseAuth) throw new Error('Enterprise auth not available')
+    if (iframeAuthEnabled) return { apiUrl: enterpriseAuth.getApiUrl() }
+
+    const apiUrl = enterpriseAuth.getApiUrl()
+    const filter = { urls: [`${apiUrl}/*`] }
+
+    session.defaultSession.webRequest.onBeforeSendHeaders(filter, async (details, callback) => {
+      if (iframeAuthEnabled && enterpriseAuth) {
+        try {
+          const jwt = await enterpriseAuth.getJwt()
+          details.requestHeaders['Authorization'] = `Bearer ${jwt}`
+        } catch {
+          // If JWT retrieval fails, proceed without auth
+        }
+      }
+      callback({ requestHeaders: details.requestHeaders })
+    })
+
+    iframeAuthEnabled = true
+    return { apiUrl }
+  })
+
+  ipcMain.handle('enterprise:disableIframeAuth', () => {
+    iframeAuthEnabled = false
   })
 
   // ── Claude Plugin Marketplace handlers ─────────────────────

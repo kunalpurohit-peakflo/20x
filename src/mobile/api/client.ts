@@ -48,10 +48,24 @@ export const api = {
     },
     get: (id: string) => get<unknown>(`/api/tasks/${encodeURIComponent(id)}`),
     create: (data: unknown) => post<unknown>('/api/tasks', data),
-    update: (id: string, data: unknown) => post<unknown>(`/api/tasks/${encodeURIComponent(id)}`, data)
+    update: (id: string, data: unknown) => post<unknown>(`/api/tasks/${encodeURIComponent(id)}`, data),
+    reorderSubtasks: (parentId: string, orderedIds: string[]) =>
+      post<{ success: boolean }>('/api/tasks/reorder-subtasks', { parentId, orderedIds })
   },
   taskSources: {
+    list: () => get<unknown[]>('/api/task-sources'),
+    create: (data: { name: string; plugin_id: string; config: Record<string, unknown>; mcp_server_id?: string | null }) =>
+      post<unknown>('/api/task-sources', data),
+    update: (id: string, data: unknown) => post<unknown>(`/api/task-sources/${encodeURIComponent(id)}`, data),
+    sync: (id: string) => post<unknown>(`/api/task-sources/${encodeURIComponent(id)}/sync`),
     syncAll: () => post<unknown[]>('/api/task-sources/sync-all')
+  },
+  plugins: {
+    list: () => get<Array<{ id: string; displayName: string; description: string; icon: string; requiresMcpServer: boolean }>>('/api/plugins'),
+    getSchema: (pluginId: string) => get<unknown[]>(`/api/plugins/${encodeURIComponent(pluginId)}/schema`),
+    getDocumentation: (pluginId: string) => get<{ documentation: string | null }>(`/api/plugins/${encodeURIComponent(pluginId)}/documentation`),
+    resolveOptions: (pluginId: string, resolverKey: string, config: Record<string, unknown>) =>
+      post<Array<{ value: string; label: string }>>(`/api/plugins/${encodeURIComponent(pluginId)}/resolve-options`, { resolverKey, config })
   },
   agents: {
     list: () => get<unknown[]>('/api/agents'),
@@ -60,12 +74,15 @@ export const api = {
   skills: {
     list: () => get<unknown[]>('/api/skills')
   },
+  git: {
+    getProvider: () => get<{ provider: string }>('/api/git/provider')
+  },
   github: {
     getOrg: () => get<{ org: string }>('/api/github/org'),
-    getOrgs: () => get<Array<{ value: string; label: string }>>('/api/github/orgs'),
+    getOrgs: () => get<Array<{ value: string; label: string; provider?: string }>>('/api/github/orgs'),
     setOrg: (org: string) => post<{ org: string }>('/api/github/org', { org }),
-    fetchRepos: (org: string) =>
-      post<Array<{ name: string; fullName: string; defaultBranch: string; cloneUrl: string; description: string; isPrivate: boolean }>>('/api/github/repos', { org })
+    fetchRepos: (org: string, provider?: string) =>
+      post<Array<{ name: string; fullName: string; defaultBranch: string; cloneUrl: string; description: string; isPrivate: boolean }>>('/api/github/repos', { org, provider })
   },
   sessions: {
     list: () => get<unknown[]>('/api/sessions'),

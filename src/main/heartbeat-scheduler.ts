@@ -82,6 +82,15 @@ export class HeartbeatScheduler {
       heartbeat_next_check_at: nextCheck.toISOString()
     })
 
+    this.sendToRenderer('task:updated', {
+      taskId,
+      updates: {
+        heartbeat_enabled: true,
+        heartbeat_interval_minutes: interval,
+        heartbeat_next_check_at: nextCheck.toISOString()
+      }
+    })
+
     console.log(`[HeartbeatScheduler] Enabled heartbeat for task ${taskId}, interval: ${interval}min, next: ${nextCheck.toISOString()}`)
   }
 
@@ -92,6 +101,14 @@ export class HeartbeatScheduler {
     this.dbManager.updateTask(taskId, {
       heartbeat_enabled: false,
       heartbeat_next_check_at: null
+    })
+
+    this.sendToRenderer('task:updated', {
+      taskId,
+      updates: {
+        heartbeat_enabled: false,
+        heartbeat_next_check_at: null
+      }
     })
 
     console.log(`[HeartbeatScheduler] Disabled heartbeat for task ${taskId}`)
@@ -354,6 +371,7 @@ export class HeartbeatScheduler {
   private buildHeartbeatPrompt(task: TaskRecord, heartbeatContent: string): string {
     const globalInstructions = this.dbManager.getSetting('heartbeat_global_instructions') || ''
     const lastCheck = task.heartbeat_last_check_at
+    const hasGitHubPullLink = this.extractGitHubUrls(heartbeatContent).some(url => url.type === 'pull')
 
     let prompt = `Heartbeat check for task: "${task.title}"\n\n`
 
@@ -361,7 +379,7 @@ export class HeartbeatScheduler {
       prompt += `IMPORTANT: Only consider events after ${lastCheck}. Ignore anything older — it has already been handled.\n\n`
     }
 
-    if (this.requiresCurrentStateChecks(heartbeatContent)) {
+    if (hasGitHubPullLink || this.requiresCurrentStateChecks(heartbeatContent)) {
       prompt += 'For checks about current state (for example merge conflicts, unresolved requested changes, or the latest CI status), inspect the current state even if the problem started before the last check.\n\n'
     }
 
@@ -679,9 +697,11 @@ export class HeartbeatScheduler {
       }
     }
 
-    // Phase 2: If heartbeat needs current-state checks beyond CI (e.g., unresolved
-    // requested changes), delegate to LLM since pre-flight can't evaluate those.
-    if (this.requiresCurrentStateChecks(heartbeatContent)) {
+    // Phase 2: If heartbeat needs current-state checks that pre-flight cannot
+    // reliably interpret (for example unresolved requested changes), delegate to
+    // the LLM. Conflict state, CI status, comments, and reviews are covered by
+    // the hard checks above/below.
+    if (this.requiresLlmCurrentStateChecks(heartbeatContent)) {
       return 'inconclusive'
     }
 
@@ -708,7 +728,11 @@ export class HeartbeatScheduler {
    * not just new activity since the last run.
    */
   private requiresCurrentStateChecks(heartbeatContent: string): boolean {
-    return /(requested changes|request changes|ci\b|pipeline|status check|check run)/i.test(heartbeatContent)
+    return /(requested changes|request changes|merge conflict|conflict|ci\b|pipeline|status check|check run)/i.test(heartbeatContent)
+  }
+
+  private requiresLlmCurrentStateChecks(heartbeatContent: string): boolean {
+    return /(requested changes|request changes)/i.test(heartbeatContent)
   }
 
   private hasMergeConflicts(prState: { mergeable: boolean | null; mergeable_state?: string | null }): boolean {

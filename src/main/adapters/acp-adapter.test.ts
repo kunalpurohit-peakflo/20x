@@ -2218,3 +2218,42 @@ describe('AcpAdapter - Non-content events must not fragment assistant messages',
     expect(session.pendingAssistantTurnSplit).toBe(false)
   })
 })
+
+describe('AcpAdapter process spawning for packaged Electron apps', () => {
+  it('codex should spawn the native binary directly, not via the JS wrapper', () => {
+    const adapter = new AcpAdapter('codex')
+    const config = (adapter as any).agentConfig
+
+    // Command should be the resolved native binary path, NOT 'node'
+    expect(config.command).not.toBe('node')
+    expect(config.command).toContain('codex-acp')
+    // Should not need ELECTRON_RUN_AS_NODE since it's a native binary
+    expect(config.env).not.toHaveProperty('ELECTRON_RUN_AS_NODE')
+    // No args — the binary is run directly
+    expect(config.args).toEqual([])
+  })
+
+  it('codex should replace app.asar with app.asar.unpacked in the binary path', async () => {
+    const fs = await import('fs')
+    const path = await import('path')
+    const source = fs.readFileSync(
+      path.join(__dirname, 'acp-adapter.ts'),
+      'utf8'
+    )
+
+    // Should have the ASAR → unpacked replacement logic
+    expect(source).toContain("app.asar.unpacked")
+    expect(source).toContain("binaryPath.replace('app.asar', 'app.asar.unpacked')")
+  })
+
+  it('claude-code should use process.execPath with ELECTRON_RUN_AS_NODE on non-Windows', () => {
+    const adapter = new AcpAdapter('claude-code')
+    const config = (adapter as any).agentConfig
+
+    // claude-code-acp is a pure JS script, needs Node.js runtime
+    if (process.platform !== 'win32') {
+      expect(config.command).toBe(process.execPath)
+      expect(config.env).toHaveProperty('ELECTRON_RUN_AS_NODE', '1')
+    }
+  })
+})

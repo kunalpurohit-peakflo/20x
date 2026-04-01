@@ -1,5 +1,5 @@
 import type { WorkfloTask, CreateTaskDTO, UpdateTaskDTO, FileAttachment, Agent, CreateAgentDTO, UpdateAgentDTO, McpServer, CreateMcpServerDTO, UpdateMcpServerDTO, Skill, CreateSkillDTO, UpdateSkillDTO, Secret, CreateSecretDTO, UpdateSecretDTO, TaskSource, CreateTaskSourceDTO, UpdateTaskSourceDTO, SyncResult, PluginMeta, ConfigFieldSchema, ConfigFieldOption, PluginAction, ActionResult, SourceUser, ReassignResult, MarketplaceSource, InstalledPlugin, DiscoverablePlugin, MarketplaceCatalog, PluginResources } from '@/types'
-import type { AgentOutputEvent, AgentOutputBatchEvent, AgentStatusEvent, AgentApprovalRequest, GhCliStatus, GitHubRepo, GitHubCollaborator, WorktreeProgressEvent, McpTestResult, SkillSyncResult, DepsStatus } from '@/types/electron'
+import type { AgentOutputEvent, AgentOutputBatchEvent, AgentStatusEvent, AgentApprovalRequest, GhCliStatus, GlabCliStatus, GitHubRepo, GitHubCollaborator, WorktreeProgressEvent, McpTestResult, SkillSyncResult, DepsStatus } from '@/types/electron'
 
 export const taskApi = {
   getAll: (): Promise<WorkfloTask[]> => {
@@ -24,6 +24,10 @@ export const taskApi = {
 
   getSubtasks: (parentId: string): Promise<WorkfloTask[]> => {
     return window.electronAPI.db.getSubtasks(parentId)
+  },
+
+  reorderSubtasks: (parentId: string, orderedIds: string[]): Promise<boolean> => {
+    return window.electronAPI.db.reorderSubtasks(parentId, orderedIds)
   }
 }
 
@@ -161,6 +165,10 @@ export const onOverdueCheck = (callback: () => void): (() => void) => {
   return window.electronAPI.onOverdueCheck(callback)
 }
 
+export const onTasksRefresh = (callback: () => void): (() => void) => {
+  return window.electronAPI.onTasksRefresh(callback)
+}
+
 export const attachmentApi = {
   pick: (): Promise<string[]> => {
     return window.electronAPI.attachments.pick()
@@ -262,6 +270,24 @@ export const githubApi = {
   },
   fetchCollaborators: (owner: string, repo: string): Promise<GitHubCollaborator[]> => {
     return window.electronAPI.github.fetchCollaborators(owner, repo)
+  }
+}
+
+export const gitlabApi = {
+  checkCli: (): Promise<GlabCliStatus> => {
+    return window.electronAPI.gitlab.checkCli()
+  },
+  startAuth: (): Promise<void> => {
+    return window.electronAPI.gitlab.startAuth()
+  },
+  fetchOrgs: (): Promise<string[]> => {
+    return window.electronAPI.gitlab.fetchOrgs()
+  },
+  fetchOrgRepos: (org: string): Promise<GitHubRepo[]> => {
+    return window.electronAPI.gitlab.fetchOrgRepos(org)
+  },
+  fetchUserRepos: (): Promise<GitHubRepo[]> => {
+    return window.electronAPI.gitlab.fetchUserRepos()
   }
 }
 
@@ -473,5 +499,21 @@ export const enterpriseApi = {
 
   apiRequest: (method: string, path: string, body?: unknown): Promise<unknown> => {
     return window.electronAPI.enterprise.apiRequest(method, path, body)
+  },
+
+  getApiUrl: (): Promise<string> => {
+    return window.electronAPI.enterprise.getApiUrl()
+  },
+
+  getJwt: (): Promise<string> => {
+    return window.electronAPI.enterprise.getJwt()
+  },
+
+  enableIframeAuth: (): Promise<{ apiUrl: string }> => {
+    return window.electronAPI.enterprise.enableIframeAuth()
+  },
+
+  disableIframeAuth: (): Promise<void> => {
+    return window.electronAPI.enterprise.disableIframeAuth()
   }
 }

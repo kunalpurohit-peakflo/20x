@@ -9,7 +9,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     updateTask: (id: string, data: Record<string, unknown>): Promise<unknown> =>
       ipcRenderer.invoke('db:updateTask', id, data),
     deleteTask: (id: string): Promise<boolean> => ipcRenderer.invoke('db:deleteTask', id),
-    getSubtasks: (parentId: string): Promise<unknown[]> => ipcRenderer.invoke('db:getSubtasks', parentId)
+    getSubtasks: (parentId: string): Promise<unknown[]> => ipcRenderer.invoke('db:getSubtasks', parentId),
+    reorderSubtasks: (parentId: string, orderedIds: string[]): Promise<boolean> => ipcRenderer.invoke('db:reorderSubtasks', parentId, orderedIds)
   },
   tasks: {
     getWorkspaceDir: (taskId: string): Promise<string> =>
@@ -116,6 +117,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('overdue:check', handler)
     return () => ipcRenderer.removeListener('overdue:check', handler)
   },
+  onTasksRefresh: (callback: () => void): (() => void) => {
+    const handler = (): void => callback()
+    ipcRenderer.on('tasks:refresh', handler)
+    return () => ipcRenderer.removeListener('tasks:refresh', handler)
+  },
   onAgentOutput: (callback: (event: unknown) => void): (() => void) => {
     const handler = (_: unknown, data: unknown): void => callback(data)
     ipcRenderer.on('agent:output', handler)
@@ -171,6 +177,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     fetchCollaborators: (owner: string, repo: string): Promise<unknown[]> =>
       ipcRenderer.invoke('github:fetchCollaborators', owner, repo)
   },
+  gitlab: {
+    checkCli: (): Promise<{ installed: boolean; authenticated: boolean; username?: string }> =>
+      ipcRenderer.invoke('gitlab:checkCli'),
+    startAuth: (): Promise<void> => ipcRenderer.invoke('gitlab:startAuth'),
+    fetchOrgs: (): Promise<string[]> => ipcRenderer.invoke('gitlab:fetchOrgs'),
+    fetchOrgRepos: (org: string): Promise<unknown[]> =>
+      ipcRenderer.invoke('gitlab:fetchOrgRepos', org),
+    fetchUserRepos: (): Promise<unknown[]> =>
+      ipcRenderer.invoke('gitlab:fetchUserRepos')
+  },
   worktree: {
     setup: (taskId: string, repos: { fullName: string; defaultBranch: string }[], org: string): Promise<string> =>
       ipcRenderer.invoke('worktree:setup', taskId, repos, org),
@@ -212,7 +228,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     delete: (id: string): Promise<boolean> => ipcRenderer.invoke('secrets:delete', id)
   },
   deps: {
-    check: (): Promise<{ gh: boolean; opencode: boolean; opencodeBinary: boolean }> =>
+    check: (): Promise<Record<string, { installed: boolean; version: string | null }>> =>
       ipcRenderer.invoke('deps:check'),
     setOpencodePath: (dirPath: string): Promise<{ success: boolean; error?: string }> =>
       ipcRenderer.invoke('deps:setOpencodePath', dirPath)
@@ -292,6 +308,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('github:deviceCode', handler)
     return () => ipcRenderer.removeListener('github:deviceCode', handler)
   },
+  onGitlabDeviceCode: (callback: (code: string) => void): (() => void) => {
+    const handler = (_: unknown, code: string): void => callback(code)
+    ipcRenderer.on('gitlab:deviceCode', handler)
+    return () => ipcRenderer.removeListener('gitlab:deviceCode', handler)
+  },
   app: {
     getVersion: (): Promise<string> =>
       ipcRenderer.invoke('app:getVersion'),
@@ -333,7 +354,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     refreshToken: (): Promise<{ token: string }> =>
       ipcRenderer.invoke('enterprise:refreshToken'),
     apiRequest: (method: string, path: string, body?: unknown): Promise<unknown> =>
-      ipcRenderer.invoke('enterprise:apiRequest', method, path, body)
+      ipcRenderer.invoke('enterprise:apiRequest', method, path, body),
+    getApiUrl: (): Promise<string> =>
+      ipcRenderer.invoke('enterprise:getApiUrl'),
+    getJwt: (): Promise<string> =>
+      ipcRenderer.invoke('enterprise:getJwt'),
+    enableIframeAuth: (): Promise<{ apiUrl: string }> =>
+      ipcRenderer.invoke('enterprise:enableIframeAuth'),
+    disableIframeAuth: (): Promise<void> =>
+      ipcRenderer.invoke('enterprise:disableIframeAuth')
   },
   updater: {
     check: (): Promise<{ success: boolean; version?: string; error?: string }> =>

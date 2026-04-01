@@ -12,38 +12,46 @@ export function fixPathManual(): void {
     return
   }
 
+  const PATH_START = '__20X_PATH_START__'
+  const PATH_END = '__20X_PATH_END__'
+
   try {
     // Get user's shell
     const shell = process.env.SHELL || '/bin/zsh'
 
-    // Execute shell and read PATH
-    // Using login shell to get full environment
-    const shellPath = execSync(`${shell} -ilc 'echo $PATH'`, {
-      encoding: 'utf8',
-      timeout: 5000
-    }).trim()
+    // Use interactive login shell (`-ilc`) because tools like NVM, pnpm, bun
+    // add their paths in .zshrc (interactive config), not .zprofile (login-only).
+    // Wrap the PATH value in unique markers to extract it from noisy output
+    // (oh-my-zsh, powerlevel10k, etc. emit escape codes and messages).
+    const output = execSync(
+      `${shell} -ilc 'echo ${PATH_START}$PATH${PATH_END}'`,
+      { encoding: 'utf8', timeout: 5000 }
+    )
 
-    if (shellPath && shellPath.length > 0) {
+    const match = output.match(new RegExp(`${PATH_START}(.+?)${PATH_END}`))
+    if (match && match[1]) {
       console.log('[fixPath] Setting PATH from shell:', shell)
-      process.env.PATH = shellPath
+      process.env.PATH = match[1]
+      return
     }
   } catch (error) {
     console.error('[fixPath] Failed to read shell PATH:', error)
-    // Fallback: add common paths
-    const commonPaths = [
-      '/opt/homebrew/bin',
-      '/usr/local/bin',
-      '/usr/bin',
-      '/bin',
-      '/usr/sbin',
-      '/sbin'
-    ]
-    const existingPath = process.env.PATH || ''
-    const newPath = [...new Set([...commonPaths, ...existingPath.split(':')])]
-      .filter(Boolean)
-      .join(':')
-
-    console.log('[fixPath] Using fallback PATH')
-    process.env.PATH = newPath
   }
+
+  // Fallback: add common paths
+  const commonPaths = [
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+    '/usr/bin',
+    '/bin',
+    '/usr/sbin',
+    '/sbin'
+  ]
+  const existingPath = process.env.PATH || ''
+  const newPath = [...new Set([...commonPaths, ...existingPath.split(':')])]
+    .filter(Boolean)
+    .join(':')
+
+  console.log('[fixPath] Using fallback PATH')
+  process.env.PATH = newPath
 }

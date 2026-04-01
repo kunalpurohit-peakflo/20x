@@ -8,9 +8,10 @@ import { Agent as UndiciAgent } from 'undici'
 import { Notification } from 'electron'
 import type { BrowserWindow } from 'electron'
 import type { DatabaseManager, AgentMcpServerEntry, OutputFieldRecord, SecretRecord, SkillRecord, TaskRecord } from './database'
-import { TaskStatus, SessionStatus } from '../shared/constants'
+import { TaskStatus, SessionStatus, PluginActionId } from '../shared/constants'
 import type { WorktreeManager } from './worktree-manager'
 import type { GitHubManager } from './github-manager'
+import type { GitLabManager } from './gitlab-manager'
 import { OpencodeAdapter } from './adapters/opencode-adapter'
 import { ClaudeCodeAdapter } from './adapters/claude-code-adapter'
 import { AcpAdapter } from './adapters/acp-adapter'
@@ -82,6 +83,7 @@ export class AgentManager extends EventEmitter {
   private adapters: Map<string, CodingAgentAdapter> = new Map()  // Adapter instances
   private worktreeManager: WorktreeManager | null = null
   private githubManager: GitHubManager | null = null
+  private gitlabManager: GitLabManager | null = null
   private oauthManager: import('./oauth/oauth-manager').OAuthManager | null = null
   private externalListeners: Array<(channel: string, data: unknown) => void> = []
   private enterpriseStateSync: import('./enterprise-state-sync').EnterpriseStateSync | null = null
@@ -155,9 +157,10 @@ export class AgentManager extends EventEmitter {
     this.mainWindow = window
   }
 
-  setManagers(githubManager: GitHubManager, worktreeManager: WorktreeManager): void {
+  setManagers(githubManager: GitHubManager, worktreeManager: WorktreeManager, gitlabManager?: GitLabManager): void {
     this.githubManager = githubManager
     this.worktreeManager = worktreeManager
+    this.gitlabManager = gitlabManager ?? null
   }
 
   setOAuthManager(manager: import('./oauth/oauth-manager').OAuthManager): void {
@@ -172,8 +175,9 @@ export class AgentManager extends EventEmitter {
   private async setupWorktreeIfNeeded(taskId: string): Promise<string | undefined> {
     if (taskId === 'mastermind-session' || taskId.startsWith('heartbeat-')) return undefined
 
-    if (!this.githubManager || !this.worktreeManager) return undefined
+    if (!this.worktreeManager) return undefined
 
+    const gitProvider = this.db.getSetting('git_provider') || 'github'
     const githubOrg = this.db.getSetting('github_org')
     if (!githubOrg) return undefined
 
@@ -183,21 +187,41 @@ export class AgentManager extends EventEmitter {
     if (!task.repos || task.repos.length === 0) return undefined
 
     try {
-      const orgRepos = await this.githubManager.fetchOrgRepos(githubOrg)
+      console.log(`[AgentManager] setupWorktreeIfNeeded: provider=${gitProvider}, org=${githubOrg}, taskRepos=${task.repos.join(', ')}`)
+
+      let orgRepos: Array<{ fullName: string; defaultBranch: string }>
+
+      if (gitProvider === 'gitlab' && this.gitlabManager) {
+        orgRepos = await this.gitlabManager.fetchOrgRepos(githubOrg)
+      } else if (this.githubManager) {
+        orgRepos = await this.githubManager.fetchOrgRepos(githubOrg)
+      } else {
+        console.warn(`[AgentManager] No ${gitProvider} manager available, skipping worktree setup`)
+        return undefined
+      }
+
+      console.log(`[AgentManager] Fetched ${orgRepos.length} org repos, matching against task repos: ${task.repos.join(', ')}`)
+
       const matched = task.repos
         .map((name) => orgRepos.find((r) => r.fullName === name))
         .filter(Boolean) as Array<{ fullName: string; defaultBranch: string }>
 
-      if (matched.length === 0) return undefined
+      if (matched.length === 0) {
+        console.warn(`[AgentManager] No matching repos found. Task repos: [${task.repos.join(', ')}], Org repos: [${orgRepos.map(r => r.fullName).slice(0, 10).join(', ')}${orgRepos.length > 10 ? '...' : ''}]`)
+        return undefined
+      }
+
+      console.log(`[AgentManager] Matched ${matched.length} repos: ${matched.map(r => r.fullName).join(', ')}`)
 
       const workspaceDir = await this.worktreeManager.setupWorkspaceForTask(
         taskId,
         matched.map((r) => ({ fullName: r.fullName, defaultBranch: r.defaultBranch })),
-        githubOrg
+        githubOrg,
+        gitProvider
       )
       return workspaceDir
     } catch (error) {
-      console.error('[AgentManager] Worktree setup failed:', error)
+      console.error(`[AgentManager] Worktree setup failed for ${gitProvider}:`, error)
       return undefined
     }
   }
@@ -2217,7 +2241,7 @@ Only create this file when there's genuinely useful monitoring to do. Do not cre
       // path used by the renderer's onCompleteTask / handleFeedbackSkip.
       if (task.source_id && this.syncManager) {
         const actionField = task.output_fields?.find((f: OutputFieldRecord) => f.id === 'action')
-        const actionValue = actionField?.value ? String(actionField.value) : 'complete'
+        const actionValue = actionField?.value ? String(actionField.value) : PluginActionId.Complete
         console.log(`[AgentManager] Enterprise task — calling executeAction("${actionValue}") for source ${task.source_id}`)
         try {
           const result = await this.syncManager.executeAction(actionValue, task, undefined, task.source_id)
@@ -3536,7 +3560,16 @@ Important:
           try {
             if (Notification.isSupported()) {
               // Only hit the database when we actually need the title for a notification
-              const taskTitle = taskId ? this.db.getTask(taskId)?.title : undefined
+              const task = taskId ? this.db.getTask(taskId) : undefined
+              const taskTitle = task?.title
+
+              // Skip notifications for subtasks whose parent task is already completed
+              if (task?.parent_task_id) {
+                const parentTask = this.db.getTask(task.parent_task_id)
+                if (parentTask?.status === TaskStatus.Completed) {
+                  return
+                }
+              }
 
               let title: string
               let body: string

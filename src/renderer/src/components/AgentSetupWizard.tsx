@@ -29,18 +29,22 @@ const TOOL_META: Record<string, { label: string; color: string; letter: string; 
   npm: { label: 'npm', color: 'bg-red-600', letter: 'n', required: true, description: 'Package manager (included with Node.js)', category: 'prerequisite' },
   git: { label: 'Git', color: 'bg-orange-600', letter: 'G', description: 'Version control system', category: 'prerequisite' },
   gh: { label: 'GitHub CLI', color: 'bg-gray-600', letter: 'gh', description: 'GitHub command-line tool', category: 'tool' },
+  glab: { label: 'GitLab CLI', color: 'bg-orange-500', letter: 'gl', description: 'GitLab command-line tool', category: 'tool' },
   claudeCode: { label: 'Claude Code', color: 'bg-amber-600', letter: 'C', description: 'Anthropic\'s coding agent', category: 'agent' },
   opencode: { label: 'OpenCode', color: 'bg-blue-600', letter: 'O', description: 'Open-source coding agent (free models)', category: 'agent' },
   codex: { label: 'Codex', color: 'bg-purple-600', letter: 'X', description: 'OpenAI\'s coding agent', category: 'agent' }
 }
 
 // All tools are now installable
-const INSTALLABLE = ['nodejs', 'npm', 'git', 'gh', 'claudeCode', 'opencode', 'codex', 'pnpm']
+const INSTALLABLE = ['nodejs', 'npm', 'git', 'gh', 'glab', 'claudeCode', 'opencode', 'codex', 'pnpm']
 
 // Install order: prerequisites first, then tools, then agents
-const INSTALL_ORDER = ['nodejs', 'git', 'gh', 'claudeCode', 'opencode', 'codex']
+const INSTALL_ORDER = ['nodejs', 'git', 'gh', 'glab', 'claudeCode', 'opencode', 'codex']
 
-export function AgentSetupDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
+/** @deprecated Use `ToolSetupDialog` instead */
+export const AgentSetupDialog = ToolSetupDialog
+
+export function ToolSetupDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const [status, setStatus] = useState<StatusMap | null>(null)
   const [installing, setInstalling] = useState<string | null>(null)
   const [terminalOutput, setTerminalOutput] = useState('')
@@ -91,7 +95,12 @@ export function AgentSetupDialog({ open, onOpenChange }: { open: boolean; onOpen
     setInstalling(agentName)
     setTerminalOutput((prev) => prev + `\n── Installing ${TOOL_META[agentName]?.label || agentName} ──\n`)
     try {
-      await window.electronAPI.agentInstaller.install(agentName)
+      const result = await window.electronAPI.agentInstaller.install(agentName) as { success: boolean; error: string | null; newStatus: Record<string, { installed: boolean; version: string | null }> }
+      if (result && !result.success) {
+        setTerminalOutput((prev) => prev + `${result.error || 'Installation not available on this platform.'}\n`)
+        setInstalling(null)
+        if (result.newStatus) setStatus(result.newStatus)
+      }
     } catch (err) {
       setTerminalOutput((prev) => prev + `Error: ${err}\n`)
       setInstalling(null)
@@ -118,7 +127,11 @@ export function AgentSetupDialog({ open, onOpenChange }: { open: boolean; onOpen
       setInstalling(agentName)
       setTerminalOutput((prev) => prev + `\n── Installing ${TOOL_META[agentName]?.label || agentName} ──\n`)
       try {
-        await window.electronAPI.agentInstaller.install(agentName)
+        const result = await window.electronAPI.agentInstaller.install(agentName) as { success: boolean; error: string | null; newStatus: Record<string, { installed: boolean; version: string | null }> }
+        if (result && !result.success) {
+          setTerminalOutput((prev) => prev + `${result.error || 'Installation not available on this platform.'}\n`)
+          if (result.newStatus) setStatus(result.newStatus)
+        }
       } catch (err) {
         setTerminalOutput((prev) => prev + `Error: ${err}\n`)
       }

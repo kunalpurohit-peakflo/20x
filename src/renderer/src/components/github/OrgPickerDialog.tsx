@@ -2,33 +2,24 @@ import { useState, useEffect } from 'react'
 import { Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogBody } from '@/components/ui/Dialog'
-import { githubApi } from '@/lib/ipc-client'
+import { fetchAllProviderOrgs, type OrgEntry } from '@/lib/git-provider-api'
 
 interface OrgPickerDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
-  onSelect: (org: string) => void
+  onSelect: (org: string, provider: OrgEntry['provider']) => void
 }
 
 export function OrgPickerDialog({ open, onOpenChange, onSelect }: OrgPickerDialogProps) {
-  const [owners, setOwners] = useState<{ value: string; label: string }[]>([])
+  const [owners, setOwners] = useState<OrgEntry[]>([])
   const [loading, setLoading] = useState(false)
 
   useEffect(() => {
     if (!open) return
     setLoading(true)
 
-    Promise.all([githubApi.checkCli(), githubApi.fetchOrgs()])
-      .then(([status, orgs]) => {
-        const list: { value: string; label: string }[] = []
-        if (status.username) {
-          list.push({ value: status.username, label: `${status.username} (personal)` })
-        }
-        for (const org of orgs) {
-          list.push({ value: org, label: org })
-        }
-        setOwners(list)
-      })
+    fetchAllProviderOrgs()
+      .then(setOwners)
       .catch(() => setOwners([]))
       .finally(() => setLoading(false))
   }, [open])
@@ -37,7 +28,7 @@ export function OrgPickerDialog({ open, onOpenChange, onSelect }: OrgPickerDialo
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-sm">
         <DialogHeader>
-          <DialogTitle>Select GitHub Organization</DialogTitle>
+          <DialogTitle>Select Organization</DialogTitle>
         </DialogHeader>
         <DialogBody className="space-y-3">
           <p className="text-sm text-muted-foreground">
@@ -56,10 +47,10 @@ export function OrgPickerDialog({ open, onOpenChange, onSelect }: OrgPickerDialo
             <div className="space-y-1">
               {owners.map((o) => (
                 <Button
-                  key={o.value}
+                  key={`${o.provider}:${o.value}`}
                   variant="ghost"
                   className="w-full justify-start"
-                  onClick={() => onSelect(o.value)}
+                  onClick={() => onSelect(o.value, o.provider)}
                 >
                   {o.label}
                 </Button>

@@ -125,12 +125,27 @@ export interface WorktreeProgressEvent {
   error?: string
 }
 
+export interface ToolStatus {
+  installed: boolean
+  version: string | null
+}
+
 export interface DepsStatus {
-  gh: boolean
-  opencode: boolean
-  opencodeBinary: boolean
-  claudeCodeBinary: boolean
-  codexBinary: boolean
+  nodejs: ToolStatus
+  npm: ToolStatus
+  pnpm: ToolStatus
+  git: ToolStatus
+  gh: ToolStatus
+  glab: ToolStatus
+  claudeCode: ToolStatus
+  opencode: ToolStatus
+  codex: ToolStatus
+}
+
+export interface GlabCliStatus {
+  installed: boolean
+  authenticated: boolean
+  username?: string
 }
 
 interface ElectronAPI {
@@ -141,6 +156,7 @@ interface ElectronAPI {
     updateTask: (id: string, data: UpdateTaskDTO) => Promise<WorkfloTask | undefined>
     deleteTask: (id: string) => Promise<boolean>
     getSubtasks: (parentId: string) => Promise<WorkfloTask[]>
+    reorderSubtasks: (parentId: string, orderedIds: string[]) => Promise<boolean>
   }
   tasks: {
     getWorkspaceDir: (taskId: string) => Promise<string>
@@ -217,6 +233,13 @@ interface ElectronAPI {
     fetchOrgRepos: (org: string) => Promise<GitHubRepo[]>
     fetchUserRepos: () => Promise<GitHubRepo[]>
     fetchCollaborators: (owner: string, repo: string) => Promise<GitHubCollaborator[]>
+  }
+  gitlab: {
+    checkCli: () => Promise<GlabCliStatus>
+    startAuth: () => Promise<void>
+    fetchOrgs: () => Promise<string[]>
+    fetchOrgRepos: (org: string) => Promise<GitHubRepo[]>
+    fetchUserRepos: () => Promise<GitHubRepo[]>
   }
   worktree: {
     setup: (taskId: string, repos: { fullName: string; defaultBranch: string }[], org: string) => Promise<string>
@@ -313,6 +336,22 @@ interface ElectronAPI {
     }>
     refreshToken: () => Promise<{ token: string }>
     apiRequest: (method: string, path: string, body?: unknown) => Promise<unknown>
+    getApiUrl: () => Promise<string>
+    getJwt: () => Promise<string>
+    enableIframeAuth: () => Promise<{ apiUrl: string }>
+    disableIframeAuth: () => Promise<void>
+  }
+  updater: {
+    check: () => Promise<{ success: boolean; version?: string; error?: string }>
+    download: () => Promise<{ success: boolean; error?: string }>
+    install: () => Promise<void>
+    onStatus: (callback: (data: { status: string; version?: string; percent?: number; error?: string; releaseNotes?: string }) => void) => () => void
+  }
+  agentInstaller: {
+    detect: () => Promise<Record<string, { installed: boolean; version: string | null }>>
+    install: (agentName: string) => Promise<{ success: boolean; error: string | null; newStatus: Record<string, { installed: boolean; version: string | null }> }>
+    getCommand: (agentName: string) => Promise<string>
+    onProgress: (callback: (data: { agentName: string; stage: string; output: string; percent: number }) => void) => () => void
   }
   updater: {
     check: () => Promise<{ success: boolean; version?: string; error?: string }>
@@ -330,6 +369,7 @@ interface ElectronAPI {
     getPathForFile: (file: File) => string
   }
   onOverdueCheck: (callback: () => void) => () => void
+  onTasksRefresh: (callback: () => void) => () => void
   onAgentOutput: (callback: (event: AgentOutputEvent) => void) => () => void
   onAgentOutputBatch: (callback: (event: AgentOutputBatchEvent) => void) => () => void
   onAgentStatus: (callback: (event: AgentStatusEvent) => void) => () => void
@@ -341,6 +381,7 @@ interface ElectronAPI {
   onHeartbeatDisabled: (callback: (event: { taskId: string; reason: string }) => void) => () => void
   onWorktreeProgress: (callback: (event: WorktreeProgressEvent) => void) => () => void
   onGithubDeviceCode: (callback: (code: string) => void) => () => void
+  onGitlabDeviceCode: (callback: (code: string) => void) => () => void
   onOAuthCallback: (callback: (event: { code: string; state: string }) => void) => () => void
 }
 

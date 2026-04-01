@@ -13,7 +13,9 @@ import { randomUUID, timingSafeEqual } from 'crypto'
 import type { DatabaseManager } from './database'
 import type { AgentManager } from './agent-manager'
 import type { GitHubManager } from './github-manager'
+import type { GitLabManager } from './gitlab-manager'
 import type { SyncManager } from './sync-manager'
+import type { PluginRegistry } from './plugins/registry'
 
 // ── State ────────────────────────────────────────────────────
 let server: HttpServer | null = null
@@ -21,7 +23,9 @@ let wss: WebSocketServer | null = null
 let dbRef: DatabaseManager | null = null
 let agentRef: AgentManager | null = null
 let githubRef: GitHubManager | null = null
+let gitlabRef: GitLabManager | null = null
 let syncManagerRef: SyncManager | null = null
+let pluginRegistryRef: PluginRegistry | null = null
 let authToken: string | null = null
 let notifyDesktop: ((channel: string, data: unknown) => void) | null = null
 
@@ -43,14 +47,18 @@ export function startMobileApiServer(
   agentManager: AgentManager,
   githubManager: GitHubManager,
   port = 20620,
-  syncManager?: SyncManager | null
+  syncManager?: SyncManager | null,
+  pluginRegistry?: PluginRegistry | null,
+  gitlabManager?: GitLabManager | null
 ): Promise<number> {
   if (server) return Promise.resolve(port)
 
   dbRef = db
   agentRef = agentManager
   githubRef = githubManager
+  gitlabRef = gitlabManager ?? null
   syncManagerRef = syncManager ?? null
+  pluginRegistryRef = pluginRegistry ?? null
 
   // Read or generate auth token — auth is always required
   authToken = db.getSetting('mobile_auth_token') ?? null
@@ -363,28 +371,90 @@ async function routeGet(pathname: string, url: URL): Promise<unknown> {
     return getActiveSessions()
   }
 
+  // GET /api/task-sources — list all configured task sources
+  if (pathname === '/api/task-sources') {
+    return db.getTaskSources()
+  }
+
+  // GET /api/plugins — list available plugins
+  if (pathname === '/api/plugins') {
+    if (!pluginRegistryRef) return []
+    return pluginRegistryRef.list()
+  }
+
+  // GET /api/plugins/:id/schema — get config schema for a plugin
+  const pluginSchemaMatch = pathname.match(/^\/api\/plugins\/([^/]+)\/schema$/)
+  if (pluginSchemaMatch) {
+    if (!pluginRegistryRef) throw Object.assign(new Error('Plugin registry not available'), { status: 503 })
+    const plugin = pluginRegistryRef.get(pluginSchemaMatch[1])
+    if (!plugin) throw Object.assign(new Error('Plugin not found'), { status: 404 })
+    return plugin.getConfigSchema()
+  }
+
+  // GET /api/plugins/:id/documentation — get setup documentation for a plugin
+  const pluginDocMatch = pathname.match(/^\/api\/plugins\/([^/]+)\/documentation$/)
+  if (pluginDocMatch) {
+    if (!pluginRegistryRef) throw Object.assign(new Error('Plugin registry not available'), { status: 503 })
+    const plugin = pluginRegistryRef.get(pluginDocMatch[1])
+    if (!plugin) throw Object.assign(new Error('Plugin not found'), { status: 404 })
+    return { documentation: plugin.getSetupDocumentation?.() ?? null }
+  }
+
   // GET /api/github/org — returns the configured github org
   if (pathname === '/api/github/org') {
     const org = db.getSetting('github_org') || ''
     return { org }
   }
 
-  // GET /api/github/orgs — returns available orgs + personal account
+  // GET /api/git/provider — returns the configured git provider
+  if (pathname === '/api/git/provider') {
+    const provider = db.getSetting('git_provider') || 'github'
+    return { provider }
+  }
+
+  // GET /api/github/orgs — returns available orgs + personal accounts
+  // Fetches from ALL authenticated providers (GitHub and/or GitLab)
   if (pathname === '/api/github/orgs') {
-    if (!githubRef) throw Object.assign(new Error('GitHub not configured'), { status: 500 })
+    const owners: Array<{ value: string; label: string; provider: string }> = []
 
-    const [status, orgs] = await Promise.all([
-      githubRef.checkGhCli(),
-      githubRef.fetchUserOrgs()
-    ])
-
-    const owners: Array<{ value: string; label: string }> = []
-    if (status.username) {
-      owners.push({ value: status.username, label: `${status.username} (personal)` })
+    // Try GitHub
+    if (githubRef) {
+      try {
+        const [status, orgs] = await Promise.all([
+          githubRef.checkGhCli(),
+          githubRef.fetchUserOrgs()
+        ])
+        if (status.authenticated) {
+          if (status.username) {
+            owners.push({ value: status.username, label: `${status.username} (GitHub personal)`, provider: 'github' })
+          }
+          for (const orgName of orgs) {
+            owners.push({ value: orgName, label: `${orgName} (GitHub)`, provider: 'github' })
+          }
+        }
+      } catch { /* GitHub not available — skip */ }
     }
 
-    for (const orgName of orgs) {
-      owners.push({ value: orgName, label: orgName })
+    // Try GitLab
+    if (gitlabRef) {
+      try {
+        const [status, orgs] = await Promise.all([
+          gitlabRef.checkGlabCli(),
+          gitlabRef.fetchUserOrgs()
+        ])
+        if (status.authenticated) {
+          if (status.username) {
+            owners.push({ value: status.username, label: `${status.username} (GitLab personal)`, provider: 'gitlab' })
+          }
+          for (const orgName of orgs) {
+            owners.push({ value: orgName, label: `${orgName} (GitLab)`, provider: 'gitlab' })
+          }
+        }
+      } catch { /* GitLab not available — skip */ }
+    }
+
+    if (owners.length === 0) {
+      throw Object.assign(new Error('No git provider authenticated'), { status: 500 })
     }
 
     return owners
@@ -399,7 +469,34 @@ async function routePost(pathname: string, params: Record<string, unknown>): Pro
   const agent = agentRef!
   const db = dbRef!
 
-  // POST /api/task-sources/sync-all — sync all enabled task sources
+  // POST /api/plugins/:id/resolve-options — resolve dynamic options for a plugin config field
+  const pluginResolveMatch = pathname.match(/^\/api\/plugins\/([^/]+)\/resolve-options$/)
+  if (pluginResolveMatch) {
+    if (!pluginRegistryRef) throw Object.assign(new Error('Plugin registry not available'), { status: 503 })
+    const pluginId = pluginResolveMatch[1]
+    const plugin = pluginRegistryRef.get(pluginId)
+    if (!plugin) throw Object.assign(new Error('Plugin not found'), { status: 404 })
+
+    const { resolverKey, config } = params as { resolverKey?: string; config?: Record<string, unknown> }
+    if (!resolverKey) throw Object.assign(new Error('resolverKey is required'), { status: 400 })
+
+    // YouTrack and other non-MCP plugins don't use toolCaller, but the type requires it
+    const ctx = { db } as Parameters<typeof plugin.resolveOptions>[2]
+    const options = await plugin.resolveOptions(resolverKey, config || {}, ctx)
+    return options
+  }
+
+  // POST /api/task-sources — create a new task source
+  if (pathname === '/api/task-sources') {
+    const { name, plugin_id, config, mcp_server_id } = params as {
+      name?: string; plugin_id?: string; config?: Record<string, unknown>; mcp_server_id?: string | null
+    }
+    if (!name || !plugin_id) throw Object.assign(new Error('name and plugin_id are required'), { status: 400 })
+    const source = db.createTaskSource({ name, plugin_id, config: config || {}, mcp_server_id: mcp_server_id || null })
+    return source
+  }
+
+  // POST /api/task-sources/sync-all — sync all enabled task sources (must be before :id routes)
   if (pathname === '/api/task-sources/sync-all') {
     if (!syncManagerRef) throw Object.assign(new Error('Sync manager not available'), { status: 503 })
     const sources = db.getTaskSources().filter((s: { enabled: boolean }) => s.enabled)
@@ -409,6 +506,36 @@ async function routePost(pathname: string, params: Record<string, unknown>): Pro
     return results.map((r) =>
       r.status === 'fulfilled' ? r.value : { error: String((r as PromiseRejectedResult).reason) }
     )
+  }
+
+  // POST /api/task-sources/:id/sync — sync a single task source
+  const sourceSyncMatch = pathname.match(/^\/api\/task-sources\/([^/]+)\/sync$/)
+  if (sourceSyncMatch) {
+    if (!syncManagerRef) throw Object.assign(new Error('Sync manager not available'), { status: 503 })
+    const result = await syncManagerRef.importTasks(sourceSyncMatch[1])
+    return result
+  }
+
+  // POST /api/task-sources/:id — update a task source
+  const sourceUpdateMatch = pathname.match(/^\/api\/task-sources\/([^/]+)$/)
+  if (sourceUpdateMatch) {
+    const sourceId = sourceUpdateMatch[1]
+    const source = db.getTaskSource(sourceId)
+    if (!source) throw Object.assign(new Error('Task source not found'), { status: 404 })
+    const updated = db.updateTaskSource(sourceId, params as Parameters<DatabaseManager['updateTaskSource']>[1])
+    return updated
+  }
+
+  // POST /api/tasks/reorder-subtasks — reorder subtasks under a parent
+  if (pathname === '/api/tasks/reorder-subtasks') {
+    const { parentId, orderedIds } = params as { parentId?: string; orderedIds?: string[] }
+    if (!parentId || !Array.isArray(orderedIds)) {
+      throw Object.assign(new Error('parentId and orderedIds are required'), { status: 400 })
+    }
+    db.reorderSubtasks(parentId, orderedIds)
+    broadcastToMobileClients('task:subtasks-reordered', { parentId, orderedIds })
+    if (notifyDesktop) notifyDesktop('task:subtasks-reordered', { parentId, orderedIds })
+    return { success: true }
   }
 
   // POST /api/tasks — create task (must be checked before the :id update route)
@@ -499,10 +626,21 @@ async function routePost(pathname: string, params: Record<string, unknown>): Pro
   }
 
   // POST /api/github/repos — fetch org repos
+  // Accepts optional `provider` param ('github' | 'gitlab') to route to the right backend.
+  // Falls back to the configured git_provider setting for backward compat.
   if (pathname === '/api/github/repos') {
-    if (!githubRef) throw Object.assign(new Error('GitHub not configured'), { status: 500 })
-    const { org } = params as { org?: string }
+    const { org, provider: reqProvider } = params as { org?: string; provider?: string }
     if (!org) throw Object.assign(new Error('org is required'), { status: 400 })
+
+    const provider = reqProvider || db.getSetting('git_provider') || 'github'
+
+    if (provider === 'gitlab') {
+      if (!gitlabRef) throw Object.assign(new Error('GitLab not configured'), { status: 500 })
+      const repos = await gitlabRef.fetchOrgRepos(org)
+      return repos
+    }
+
+    if (!githubRef) throw Object.assign(new Error('GitHub not configured'), { status: 500 })
     const repos = await githubRef.fetchOrgRepos(org)
     return repos
   }

@@ -1,4 +1,4 @@
-import { useMemo, useCallback, useState } from 'react'
+import { useMemo, useCallback, useState, useRef } from 'react'
 import { TaskStatus } from '@shared/constants'
 import { CollapsibleDescription } from '../components/CollapsibleDescription'
 import { useTaskStore, type Task } from '../stores/task-store'
@@ -11,6 +11,66 @@ import { TaskStatusDot } from '../components/TaskStatusDot'
 import { MessageBubble } from '../components/MessageBubble'
 import { cn, formatDate, isOverdue, formatRelativeDate, formatRelativeFuture, STATUS_VARIANT, STATUS_DOT_COLORS } from '../lib/utils'
 import type { Route } from '../App'
+
+function ParentTaskContextMobile({ parentTask, onNavigate }: { parentTask: Task; onNavigate: (route: Route) => void }) {
+  const [isExpanded, setIsExpanded] = useState(false)
+
+  return (
+    <div className="border-b border-border/30 bg-accent/30">
+      <div className="flex items-center gap-1">
+        <button
+          onClick={() => setIsExpanded(!isExpanded)}
+          className="flex-1 flex items-center gap-2 px-4 py-2.5 text-left active:opacity-60"
+        >
+          <svg className={cn("h-3 w-3 text-muted-foreground shrink-0 transition-transform", isExpanded && "rotate-90")} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="m9 18 6-6-6-6" />
+          </svg>
+          <span className="text-xs text-muted-foreground shrink-0">Parent task:</span>
+          <span className="text-sm truncate">{parentTask.title}</span>
+        </button>
+        <button
+          onClick={() => onNavigate({ page: 'detail', taskId: parentTask.id })}
+          className="shrink-0 mr-3 px-2 py-1 text-xs text-muted-foreground active:opacity-60 flex items-center gap-1"
+        >
+          <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="m15 18-6-6 6-6" />
+          </svg>
+          Go to parent
+        </button>
+      </div>
+      {isExpanded && (
+        <div className="px-4 pb-3 space-y-2.5 border-t border-border/30">
+          <div className="flex items-center gap-2 pt-2.5 flex-wrap">
+            <TaskStatusDot status={parentTask.status} />
+            {STATUS_VARIANT[parentTask.status] && (
+              <Badge variant={STATUS_VARIANT[parentTask.status].variant}>{STATUS_VARIANT[parentTask.status].label}</Badge>
+            )}
+            <PriorityBadge priority={parentTask.priority} />
+            {parentTask.type !== 'general' && (
+              <Badge variant={parentTask.type === 'coding' ? 'blue' : parentTask.type === 'review' ? 'purple' : 'default'}>
+                {parentTask.type}
+              </Badge>
+            )}
+          </div>
+          {parentTask.description && (
+            <CollapsibleDescription
+              taskId={parentTask.id}
+              description={parentTask.description}
+              size="sm"
+            />
+          )}
+          {parentTask.labels && parentTask.labels.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              {parentTask.labels.map((label) => (
+                <Badge key={label} variant="blue" className="text-[10px]">{label}</Badge>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
 
 export function TaskDetailPage({ taskId, onNavigate }: { taskId: string; onNavigate: (route: Route) => void }) {
   const task = useTaskStore((s) => s.tasks.find((t) => t.id === taskId))
@@ -60,6 +120,15 @@ export function TaskDetailPage({ taskId, onNavigate }: { taskId: string; onNavig
     if (!task) return
     await updateTask(task.id, { repos: task.repos.filter((r) => r !== repo) })
   }, [task, updateTask])
+
+  const handleReorderSubtasks = useCallback(async (orderedIds: string[]) => {
+    if (!task) return
+    try {
+      await api.tasks.reorderSubtasks(task.id, orderedIds)
+    } catch (err) {
+      console.error('[TaskDetailPage] Failed to reorder subtasks:', err)
+    }
+  }, [task])
 
   // Session controls (shared hook provides double-click protection and rollback)
   const handleStart = useCallback(() => {
@@ -203,17 +272,9 @@ export function TaskDetailPage({ taskId, onNavigate }: { taskId: string; onNavig
       />
 
       <div className="flex-1 overflow-y-auto">
-        {/* Parent task breadcrumb */}
+        {/* Parent task context panel */}
         {parentTask && (
-          <button
-            onClick={() => onNavigate({ page: 'detail', taskId: parentTask.id })}
-            className="flex items-center gap-1.5 px-4 py-2 text-xs text-muted-foreground active:opacity-60 border-b border-border/30"
-          >
-            <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="m15 18-6-6 6-6" />
-            </svg>
-            {parentTask.title}
-          </button>
+          <ParentTaskContextMobile parentTask={parentTask} onNavigate={onNavigate} />
         )}
 
         {/* Badges bar — matches desktop TaskDetailView header */}
@@ -471,6 +532,7 @@ export function TaskDetailPage({ taskId, onNavigate }: { taskId: string; onNavig
           <SubtasksSection
             subtasks={subtasks}
             onNavigateToTask={(id) => onNavigate({ page: 'detail', taskId: id })}
+            onReorderSubtasks={handleReorderSubtasks}
           />
         )}
 
@@ -515,14 +577,77 @@ export function TaskDetailPage({ taskId, onNavigate }: { taskId: string; onNavig
         <FeedbackModal
           onSubmit={handleFeedbackSubmit}
           onSkip={handleFeedbackSkip}
+          onCancel={() => setShowFeedback(false)}
         />
       )}
     </div>
   )
 }
 
-function SubtasksSection({ subtasks, onNavigateToTask }: { subtasks: Task[]; onNavigateToTask: (taskId: string) => void }) {
+function SubtasksSection({ subtasks, onNavigateToTask, onReorderSubtasks }: { subtasks: Task[]; onNavigateToTask: (taskId: string) => void; onReorderSubtasks?: (orderedIds: string[]) => void }) {
   const completedCount = subtasks.filter(s => s.status === TaskStatus.Completed).length
+  const [dragIndex, setDragIndex] = useState<number | null>(null)
+  const [overIndex, setOverIndex] = useState<number | null>(null)
+  const itemRefs = useRef<Map<number, HTMLDivElement>>(new Map())
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const startY = useRef(0)
+
+  const handleTouchStart = (index: number, e: React.TouchEvent) => {
+    startY.current = e.touches[0].clientY
+    longPressTimer.current = setTimeout(() => {
+      setDragIndex(index)
+      setOverIndex(index)
+    }, 300)
+  }
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    // Cancel long press if finger moves too far before activation
+    if (dragIndex === null && longPressTimer.current) {
+      const dy = Math.abs(e.touches[0].clientY - startY.current)
+      if (dy > 10) {
+        clearTimeout(longPressTimer.current)
+        longPressTimer.current = null
+      }
+      return
+    }
+    if (dragIndex === null) return
+    e.preventDefault()
+
+    const touchY = e.touches[0].clientY
+    // Find which item we're over
+    for (const [idx, el] of itemRefs.current.entries()) {
+      const rect = el.getBoundingClientRect()
+      if (touchY >= rect.top && touchY <= rect.bottom) {
+        setOverIndex(idx)
+        break
+      }
+    }
+  }
+
+  const handleTouchEnd = () => {
+    if (longPressTimer.current) {
+      clearTimeout(longPressTimer.current)
+      longPressTimer.current = null
+    }
+    if (dragIndex !== null && overIndex !== null && dragIndex !== overIndex && onReorderSubtasks) {
+      const newOrder = [...subtasks]
+      const [moved] = newOrder.splice(dragIndex, 1)
+      newOrder.splice(overIndex, 0, moved)
+      onReorderSubtasks(newOrder.map(s => s.id))
+    }
+    setDragIndex(null)
+    setOverIndex(null)
+  }
+
+  const getDisplayOrder = () => {
+    if (dragIndex === null || overIndex === null || dragIndex === overIndex) return subtasks
+    const reordered = [...subtasks]
+    const [moved] = reordered.splice(dragIndex, 1)
+    reordered.splice(overIndex, 0, moved)
+    return reordered
+  }
+
+  const displaySubtasks = getDisplayOrder()
 
   return (
     <div className="px-4 py-3 border-b border-border">
@@ -536,34 +661,53 @@ function SubtasksSection({ subtasks, onNavigateToTask }: { subtasks: Task[]; onN
         </span>
       </div>
       <div className="rounded-md border border-border divide-y divide-border">
-        {subtasks.map((subtask) => (
-          <button
+        {displaySubtasks.map((subtask, idx) => (
+          <div
             key={subtask.id}
-            onClick={() => onNavigateToTask(subtask.id)}
-            className="w-full flex items-center gap-3 px-3 py-2.5 text-left active:bg-accent/50 transition-colors"
+            ref={(el) => { if (el) itemRefs.current.set(idx, el); else itemRefs.current.delete(idx) }}
+            className={cn(
+              'flex items-center gap-1 px-1 py-2.5 transition-colors',
+              dragIndex !== null && displaySubtasks[idx]?.id === subtasks[dragIndex]?.id && 'bg-accent/30'
+            )}
+            onTouchStart={(e) => handleTouchStart(idx, e)}
+            onTouchMove={handleTouchMove}
+            onTouchEnd={handleTouchEnd}
           >
-            <div className={cn('h-1.5 w-1.5 rounded-full shrink-0', STATUS_DOT_COLORS[subtask.status] || 'bg-muted-foreground')} />
-            <div className="min-w-0 flex-1">
-              <div className="text-sm truncate">{subtask.title}</div>
+            {/* Drag handle */}
+            <div className="shrink-0 p-1 text-muted-foreground/50 touch-none">
+              <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="9" cy="5" r="1"/><circle cx="15" cy="5" r="1"/>
+                <circle cx="9" cy="12" r="1"/><circle cx="15" cy="12" r="1"/>
+                <circle cx="9" cy="19" r="1"/><circle cx="15" cy="19" r="1"/>
+              </svg>
             </div>
-            <svg className="h-3.5 w-3.5 text-muted-foreground shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="m9 18 6-6-6-6" />
-            </svg>
-          </button>
+            <button
+              onClick={() => { if (dragIndex === null) onNavigateToTask(subtask.id) }}
+              className="flex-1 flex items-center gap-3 text-left min-w-0 pr-2"
+            >
+              <div className={cn('h-1.5 w-1.5 rounded-full shrink-0', STATUS_DOT_COLORS[subtask.status] || 'bg-muted-foreground')} />
+              <div className="min-w-0 flex-1">
+                <div className="text-sm truncate">{subtask.title}</div>
+              </div>
+              <svg className="h-3.5 w-3.5 text-muted-foreground shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="m9 18 6-6-6-6" />
+              </svg>
+            </button>
+          </div>
         ))}
       </div>
     </div>
   )
 }
 
-function FeedbackModal({ onSubmit, onSkip }: { onSubmit: (rating: number, comment: string) => void; onSkip: () => void }) {
+function FeedbackModal({ onSubmit, onSkip, onCancel }: { onSubmit: (rating: number, comment: string) => void; onSkip: () => void; onCancel: () => void }) {
   const [rating, setRating] = useState(0)
   const [comment, setComment] = useState('')
 
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center">
       {/* Backdrop */}
-      <div className="fixed inset-0 bg-black/60" onClick={onSkip} />
+      <div className="fixed inset-0 bg-black/60" onClick={onCancel} />
 
       {/* Modal */}
       <div className="relative z-50 w-full max-w-md mx-4 mb-4 bg-card border border-border rounded-xl shadow-xl animate-in slide-in-from-bottom-4 duration-200">
