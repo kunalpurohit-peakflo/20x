@@ -111,7 +111,7 @@ function runInstaller(installerPath, args, agentName, onProgress) {
     // "Process must exit before requested information" errors.
     const psArgs = [
       '-NoProfile', '-Command',
-      `$p = Start-Process -FilePath '${installerPath}' -ArgumentList '${args.join("','")}' -Verb RunAs -PassThru; $p.WaitForExit(); exit $p.ExitCode`
+      `$p = Start-Process -FilePath '${installerPath}' -ArgumentList @(${args.map(a => `'${a}'`).join(',')}) -Verb RunAs -PassThru; $p.WaitForExit(); exit $p.ExitCode`
     ]
 
     const proc = spawn('powershell.exe', psArgs, {
