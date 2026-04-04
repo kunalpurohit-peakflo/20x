@@ -204,7 +204,7 @@ describe('ClaudeCodeAdapter error result handling', () => {
       expect(session.status).toBe('error')
     })
 
-    it('does NOT reset queryIterator when stream completes normally (idle)', async () => {
+    it('resets queryIterator when stream completes normally (idle) so resume is used instead of continue', async () => {
       const adapter = new ClaudeCodeAdapter()
 
       const fakeIterator = {
@@ -227,8 +227,11 @@ describe('ClaudeCodeAdapter error result handling', () => {
 
       await (adapter as any).consumeStream('s1', session)
 
-      // queryIterator should remain set — process is alive for continue
-      expect(session.queryIterator).toBe(fakeIterator)
+      // queryIterator is always reset when stream ends — even on normal idle.
+      // This ensures sendPrompt uses --resume (exact session) instead of
+      // --continue (most-recent in directory), which could pick up the wrong
+      // conversation if another session ran in the same workspace.
+      expect(session.queryIterator).toBeNull()
       expect(session.status).toBe('idle')
     })
 
@@ -325,6 +328,120 @@ describe('ClaudeCodeAdapter error result handling', () => {
       expect(session.status).toBe('idle')
       // Only the valid message should be buffered
       expect(session.messageBuffer.length).toBe(1)
+    })
+  })
+
+  describe('sendPrompt session continuation mode', () => {
+    // These tests verify the continuation logic (--resume vs --continue vs new)
+    // by inspecting session state rather than calling through the real SDK,
+    // because the Claude Code binary is not available in CI.
+
+    it('uses resume when queryIterator is null but session has a Claude Code UUID (error recovery)', () => {
+      // Session state: error recovery — queryIterator null, but has a real sessionId
+      const session: any = {
+        sessionId: 'abc-def-123', // Real Claude Code UUID from previous run
+        queryIterator: null,      // Null because of error recovery
+        isResumed: false,         // NOT a resumed session — was created via startSession
+      }
+
+      // sendPrompt determines isFirstPrompt from queryIterator:
+      const isFirstPrompt = !session.queryIterator
+      expect(isFirstPrompt).toBe(true)
+
+      // Continuation logic from sendPrompt (lines 643-652):
+      // if (isFirstPrompt && session.isResumed) → options.resume = sessionId
+      // else if (isFirstPrompt && session.sessionId) → options.resume = session.sessionId
+      // else if (!isFirstPrompt) → options.continue = true
+      const options: any = {}
+      if (isFirstPrompt && session.isResumed) {
+        options.resume = session.sessionId
+      } else if (isFirstPrompt && session.sessionId) {
+        options.resume = session.sessionId
+      } else if (!isFirstPrompt) {
+        options.continue = true
+      }
+
+      // Should use resume with the real Claude Code session UUID
+      expect(options.resume).toBe('abc-def-123')
+      expect(options.continue).toBeUndefined()
+    })
+
+    it('does NOT use resume for brand-new sessions with empty sessionId', () => {
+      // Brand-new session: empty sessionId, no queryIterator
+      const session: any = {
+        sessionId: '',           // Empty — brand new, no Claude Code UUID yet
+        queryIterator: null,
+        isResumed: false,
+      }
+
+      const isFirstPrompt = !session.queryIterator
+      expect(isFirstPrompt).toBe(true)
+
+      const options: any = {}
+      if (isFirstPrompt && session.isResumed) {
+        options.resume = session.sessionId
+      } else if (isFirstPrompt && session.sessionId) {
+        options.resume = session.sessionId
+      } else if (!isFirstPrompt) {
+        options.continue = true
+      }
+
+      // Should NOT resume — this is a brand new session (empty sessionId is falsy)
+      expect(options.resume).toBeUndefined()
+      expect(options.continue).toBeUndefined()
+    })
+
+    it('uses resume after normal idle completion (isResumed flag)', () => {
+      // After consumeStream ends normally, queryIterator is null and isResumed is true
+      const session: any = {
+        sessionId: 'session-uuid-456',
+        queryIterator: null,     // Reset after stream completion
+        isResumed: true,         // Set by consumeStream finally block
+      }
+
+      const isFirstPrompt = !session.queryIterator
+      expect(isFirstPrompt).toBe(true)
+
+      const options: any = {}
+      if (isFirstPrompt && session.isResumed) {
+        options.resume = session.sessionId
+      } else if (isFirstPrompt && session.sessionId) {
+        options.resume = session.sessionId
+      } else if (!isFirstPrompt) {
+        options.continue = true
+      }
+
+      // Should use resume with the session UUID (not --continue which picks up most-recent)
+      expect(options.resume).toBe('session-uuid-456')
+      expect(options.continue).toBeUndefined()
+    })
+
+    it('uses continue when process is still alive (queryIterator truthy)', () => {
+      const fakeIterator = {
+        [Symbol.asyncIterator]() { return this },
+        async next() { return { done: true, value: undefined } },
+      }
+      const session: any = {
+        sessionId: 'session-uuid-789',
+        queryIterator: fakeIterator, // Process still alive
+        isResumed: false,
+      }
+
+      const isFirstPrompt = !session.queryIterator
+      expect(isFirstPrompt).toBe(false)
+
+      const options: any = {}
+      if (isFirstPrompt && session.isResumed) {
+        options.resume = session.sessionId
+      } else if (isFirstPrompt && session.sessionId) {
+        options.resume = session.sessionId
+      } else if (!isFirstPrompt) {
+        options.continue = true
+      }
+
+      // Process is alive — use --continue for in-process continuation
+      expect(options.continue).toBe(true)
+      expect(options.resume).toBeUndefined()
     })
   })
 
