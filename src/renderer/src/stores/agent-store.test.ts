@@ -425,6 +425,29 @@ describe('useAgentStore', () => {
       expect(session.sessionId).toBe('real-session-id')
       expect(session.messages).toHaveLength(1)
     })
+
+    it('does not poison dedup with an empty assistant text placeholder', async () => {
+      useAgentStore.getState().initSession('task-1', 'sess-1', 'agent-1')
+
+      batchCallback!({
+        sessionId: 'sess-1',
+        taskId: 'task-1',
+        messages: [{ id: 'msg-1', role: 'assistant', content: '', partType: 'text' }]
+      })
+
+      batchCallback!({
+        sessionId: 'sess-1',
+        taskId: 'task-1',
+        messages: [{ id: 'msg-1', role: 'assistant', content: 'Final answer', partType: 'text', update: true }]
+      })
+
+      await flushBatches()
+
+      const session = useAgentStore.getState().sessions.get('task-1')!
+      expect(session.messages).toHaveLength(1)
+      expect(session.messages[0].content).toBe('Final answer')
+      expect(session.messages[0].partType).toBe('text')
+    })
   })
 
   describe('Session ID re-keying via onAgentStatus', () => {

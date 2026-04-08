@@ -273,6 +273,9 @@ export const useAgentStore = create<AgentState>((set, get) => {
     }
 
     if (seen.has(msgId)) return
+
+    // Ignore empty placeholder parts without poisoning dedup for the real content.
+    if (!content && !data.tool && !data.questions && !data.todos && !data.taskProgress) return
     seen.add(msgId)
 
     set({
@@ -385,10 +388,10 @@ export const useAgentStore = create<AgentState>((set, get) => {
 
         // Skip already-seen messages
         if (seen.has(msgId)) continue
-        seen.add(msgId)
 
         // Allow empty content for tool/question/task_progress messages
         if (!content && !msg.tool && !(msg as Record<string, unknown>).taskProgress) continue
+        seen.add(msgId)
 
         messages.push({
           id: msgId,
