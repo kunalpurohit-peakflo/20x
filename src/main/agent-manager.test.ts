@@ -393,6 +393,82 @@ describe('AgentManager worktree setup', () => {
       'gitlab'
     )
   })
+
+  it('falls back to task repo names when fetched repo metadata does not match', async () => {
+    const mockDb = {
+      getTask: vi.fn(() => ({
+        id: 'task-1',
+        title: 'Triaged Task',
+        repos: ['peakflo/20x'],
+        status: TaskStatus.Triaging,
+        session_id: null,
+      })),
+      getSetting: vi.fn((key: string) => {
+        if (key === 'git_provider') return 'github'
+        if (key === 'github_org') return 'peakflo'
+        return null
+      }),
+      getWorkspaceDir: vi.fn(() => '/tmp/workspaces/task-1'),
+    } as unknown as ConstructorParameters<typeof AgentManager>[0]
+
+    const manager = new AgentManager(mockDb)
+    const githubManager = {
+      fetchOrgRepos: vi.fn().mockResolvedValue([{ fullName: 'peakflo/other-repo', defaultBranch: 'develop' }]),
+    }
+    const worktreeManager = {
+      setupWorkspaceForTask: vi.fn().mockResolvedValue('/tmp/workspaces/task-1'),
+    }
+
+    manager.setManagers(githubManager as any, worktreeManager as any)
+
+    const workspaceDir = await (manager as any).setupWorktreeIfNeeded('task-1')
+
+    expect(workspaceDir).toBe('/tmp/workspaces/task-1')
+    expect(worktreeManager.setupWorkspaceForTask).toHaveBeenCalledWith(
+      'task-1',
+      [{ fullName: 'peakflo/20x', defaultBranch: 'main' }],
+      'peakflo',
+      'github'
+    )
+  })
+
+  it('uses configured org when task repo tag omits the org prefix', async () => {
+    const mockDb = {
+      getTask: vi.fn(() => ({
+        id: 'task-1',
+        title: 'Triaged Task',
+        repos: ['20x'],
+        status: TaskStatus.Triaging,
+        session_id: null,
+      })),
+      getSetting: vi.fn((key: string) => {
+        if (key === 'git_provider') return 'github'
+        if (key === 'github_org') return 'peakflo'
+        return null
+      }),
+      getWorkspaceDir: vi.fn(() => '/tmp/workspaces/task-1'),
+    } as unknown as ConstructorParameters<typeof AgentManager>[0]
+
+    const manager = new AgentManager(mockDb)
+    const githubManager = {
+      fetchOrgRepos: vi.fn().mockResolvedValue([]),
+    }
+    const worktreeManager = {
+      setupWorkspaceForTask: vi.fn().mockResolvedValue('/tmp/workspaces/task-1'),
+    }
+
+    manager.setManagers(githubManager as any, worktreeManager as any)
+
+    const workspaceDir = await (manager as any).setupWorktreeIfNeeded('task-1')
+
+    expect(workspaceDir).toBe('/tmp/workspaces/task-1')
+    expect(worktreeManager.setupWorkspaceForTask).toHaveBeenCalledWith(
+      'task-1',
+      [{ fullName: 'peakflo/20x', defaultBranch: 'main' }],
+      'peakflo',
+      'github'
+    )
+  })
 })
 
 describe('AgentManager OS notifications', () => {
