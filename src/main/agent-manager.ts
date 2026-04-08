@@ -178,8 +178,7 @@ export class AgentManager extends EventEmitter {
 
   /**
    * Sets up git worktrees for a task's repos if needed.
-   * Skips for mastermind sessions, triage sessions, tasks without repos,
-   * or when github_org is not configured.
+   * Skips for mastermind sessions or tasks without repos.
    */
   private async setupWorktreeIfNeeded(taskId: string): Promise<string | undefined> {
     if (taskId === 'mastermind-session' || taskId.startsWith('heartbeat-')) return undefined
@@ -187,48 +186,83 @@ export class AgentManager extends EventEmitter {
     if (!this.worktreeManager) return undefined
 
     const gitProvider = this.db.getSetting('git_provider') || 'github'
-    const githubOrg = this.db.getSetting('github_org')
-    if (!githubOrg) return undefined
+    const configuredOrg = this.db.getSetting('github_org')
 
     const task = this.db.getTask(taskId)
     if (!task) return undefined
-    if (task.status === TaskStatus.Triaging) return undefined
     if (!task.repos || task.repos.length === 0) return undefined
 
+    const workspaceDir = this.db.getWorkspaceDir(taskId)
+    const missingRepoFolders = task.repos.some((repo) => {
+      const repoName = repo.split('/').pop() || repo
+      return !existsSync(join(workspaceDir, repoName))
+    })
+
+    // Triage sessions normally should not allocate worktrees, but if the user
+    // starts the real agent before the task status flips out of Triaging and the
+    // repo folders are missing, repair the workspace on demand.
+    if (task.status === TaskStatus.Triaging && !task.session_id && !missingRepoFolders) return undefined
+
     try {
-      console.log(`[AgentManager] setupWorktreeIfNeeded: provider=${gitProvider}, org=${githubOrg}, taskRepos=${task.repos.join(', ')}`)
+      console.log(`[AgentManager] setupWorktreeIfNeeded: provider=${gitProvider}, configuredOrg=${configuredOrg || 'unset'}, taskRepos=${task.repos.join(', ')}`)
 
-      let orgRepos: Array<{ fullName: string; defaultBranch: string }>
-
-      if (gitProvider === 'gitlab' && this.gitlabManager) {
-        orgRepos = await this.gitlabManager.fetchOrgRepos(githubOrg)
-      } else if (this.githubManager) {
-        orgRepos = await this.githubManager.fetchOrgRepos(githubOrg)
-      } else {
+      if (gitProvider === 'gitlab' && !this.gitlabManager) {
+        console.warn(`[AgentManager] No ${gitProvider} manager available, skipping worktree setup`)
+        return undefined
+      }
+      if (gitProvider !== 'gitlab' && !this.githubManager) {
         console.warn(`[AgentManager] No ${gitProvider} manager available, skipping worktree setup`)
         return undefined
       }
 
-      console.log(`[AgentManager] Fetched ${orgRepos.length} org repos, matching against task repos: ${task.repos.join(', ')}`)
-
-      const matched = task.repos
-        .map((name) => orgRepos.find((r) => r.fullName === name))
-        .filter(Boolean) as Array<{ fullName: string; defaultBranch: string }>
-
-      if (matched.length === 0) {
-        console.warn(`[AgentManager] No matching repos found. Task repos: [${task.repos.join(', ')}], Org repos: [${orgRepos.map(r => r.fullName).slice(0, 10).join(', ')}${orgRepos.length > 10 ? '...' : ''}]`)
-        return undefined
+      const reposByOrg = new Map<string, string[]>()
+      for (const repoName of task.repos) {
+        const org = repoName.includes('/') ? repoName.split('/')[0] : configuredOrg
+        if (!org) {
+          console.warn(`[AgentManager] Skipping repo without org and no configured github_org: ${repoName}`)
+          continue
+        }
+        const fullName = repoName.includes('/') ? repoName : `${org}/${repoName}`
+        const existing = reposByOrg.get(org) || []
+        existing.push(fullName)
+        reposByOrg.set(org, existing)
       }
 
-      console.log(`[AgentManager] Matched ${matched.length} repos: ${matched.map(r => r.fullName).join(', ')}`)
+      if (reposByOrg.size === 0) return undefined
 
-      const workspaceDir = await this.worktreeManager.setupWorkspaceForTask(
-        taskId,
-        matched.map((r) => ({ fullName: r.fullName, defaultBranch: r.defaultBranch })),
-        githubOrg,
-        gitProvider
-      )
-      return workspaceDir
+      let resolvedWorkspaceDir: string | undefined
+
+      for (const [org, repoNames] of reposByOrg.entries()) {
+        let orgRepos: Array<{ fullName: string; defaultBranch: string }> = []
+
+        try {
+          if (gitProvider === 'gitlab' && this.gitlabManager) {
+            orgRepos = await this.gitlabManager.fetchOrgRepos(org)
+          } else if (this.githubManager) {
+            orgRepos = await this.githubManager.fetchOrgRepos(org)
+          }
+        } catch (error) {
+          console.warn(`[AgentManager] Failed to fetch repo metadata for org "${org}", falling back to task repo names:`, error)
+        }
+
+        const branchByRepo = new Map(orgRepos.map((repo) => [repo.fullName, repo.defaultBranch]))
+        const reposForSetup = repoNames.map((fullName) => ({
+          fullName,
+          defaultBranch: branchByRepo.get(fullName) || 'main'
+        }))
+
+        console.log(`[AgentManager] Setting up ${reposForSetup.length} repo(s) for org "${org}": ${reposForSetup.map((repo) => repo.fullName).join(', ')}`)
+
+        const workspaceDirForOrg = await this.worktreeManager.setupWorkspaceForTask(
+          taskId,
+          reposForSetup,
+          org,
+          gitProvider
+        )
+        resolvedWorkspaceDir = resolvedWorkspaceDir || workspaceDirForOrg
+      }
+
+      return resolvedWorkspaceDir
     } catch (error) {
       console.error(`[AgentManager] Worktree setup failed for ${gitProvider}:`, error)
       return undefined
