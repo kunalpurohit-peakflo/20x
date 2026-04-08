@@ -50,9 +50,11 @@ vi.mock('./secret-broker', () => ({
 }))
 
 import { mkdir as mkdirAsync, writeFile as writeFileAsync } from 'fs/promises'
+import { existsSync } from 'fs'
 
 const mockedMkdirAsync = vi.mocked(mkdirAsync)
 const mockedWriteFileAsync = vi.mocked(writeFileAsync)
+const mockedExistsSync = vi.mocked(existsSync)
 
 function makeSkillRecord(overrides: Partial<{
   id: string; name: string; description: string; content: string;
@@ -301,6 +303,95 @@ describe('AgentManager skill file paths', () => {
       const result: string = (manager as any).getMemoryFileName('agent-1')
       expect(result).toBe('AGENTS.md')
     })
+  })
+})
+
+describe('AgentManager worktree setup', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockedExistsSync.mockReturnValue(false)
+  })
+
+  it('sets up missing repo folders on start even while task is still triaging for GitHub', async () => {
+    const mockDb = {
+      getTask: vi.fn(() => ({
+        id: 'task-1',
+        title: 'Triaged Task',
+        repos: ['peakflo/20x'],
+        status: TaskStatus.Triaging,
+        session_id: null,
+      })),
+      getSetting: vi.fn((key: string) => {
+        if (key === 'git_provider') return 'github'
+        if (key === 'github_org') return 'peakflo'
+        return null
+      }),
+      getWorkspaceDir: vi.fn(() => '/tmp/workspaces/task-1'),
+    } as unknown as ConstructorParameters<typeof AgentManager>[0]
+
+    const manager = new AgentManager(mockDb)
+    const githubManager = {
+      fetchOrgRepos: vi.fn().mockResolvedValue([{ fullName: 'peakflo/20x', defaultBranch: 'main' }]),
+    }
+    const worktreeManager = {
+      setupWorkspaceForTask: vi.fn().mockResolvedValue('/tmp/workspaces/task-1'),
+    }
+
+    manager.setManagers(githubManager as any, worktreeManager as any)
+
+    const workspaceDir = await (manager as any).setupWorktreeIfNeeded('task-1')
+
+    expect(workspaceDir).toBe('/tmp/workspaces/task-1')
+    expect(githubManager.fetchOrgRepos).toHaveBeenCalledWith('peakflo')
+    expect(worktreeManager.setupWorkspaceForTask).toHaveBeenCalledWith(
+      'task-1',
+      [{ fullName: 'peakflo/20x', defaultBranch: 'main' }],
+      'peakflo',
+      'github'
+    )
+  })
+
+  it('uses GitLab repo discovery when repairing missing repo folders during triage', async () => {
+    const mockDb = {
+      getTask: vi.fn(() => ({
+        id: 'task-1',
+        title: 'Triaged Task',
+        repos: ['peakflo/20x'],
+        status: TaskStatus.Triaging,
+        session_id: null,
+      })),
+      getSetting: vi.fn((key: string) => {
+        if (key === 'git_provider') return 'gitlab'
+        if (key === 'github_org') return 'peakflo'
+        return null
+      }),
+      getWorkspaceDir: vi.fn(() => '/tmp/workspaces/task-1'),
+    } as unknown as ConstructorParameters<typeof AgentManager>[0]
+
+    const manager = new AgentManager(mockDb)
+    const githubManager = {
+      fetchOrgRepos: vi.fn(),
+    }
+    const gitlabManager = {
+      fetchOrgRepos: vi.fn().mockResolvedValue([{ fullName: 'peakflo/20x', defaultBranch: 'main' }]),
+    }
+    const worktreeManager = {
+      setupWorkspaceForTask: vi.fn().mockResolvedValue('/tmp/workspaces/task-1'),
+    }
+
+    manager.setManagers(githubManager as any, worktreeManager as any, gitlabManager as any)
+
+    const workspaceDir = await (manager as any).setupWorktreeIfNeeded('task-1')
+
+    expect(workspaceDir).toBe('/tmp/workspaces/task-1')
+    expect(gitlabManager.fetchOrgRepos).toHaveBeenCalledWith('peakflo')
+    expect(githubManager.fetchOrgRepos).not.toHaveBeenCalled()
+    expect(worktreeManager.setupWorkspaceForTask).toHaveBeenCalledWith(
+      'task-1',
+      [{ fullName: 'peakflo/20x', defaultBranch: 'main' }],
+      'peakflo',
+      'gitlab'
+    )
   })
 })
 

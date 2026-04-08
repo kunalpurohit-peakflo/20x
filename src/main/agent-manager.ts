@@ -192,8 +192,18 @@ export class AgentManager extends EventEmitter {
 
     const task = this.db.getTask(taskId)
     if (!task) return undefined
-    if (task.status === TaskStatus.Triaging && !task.session_id) return undefined
     if (!task.repos || task.repos.length === 0) return undefined
+
+    const workspaceDir = this.db.getWorkspaceDir(taskId)
+    const missingRepoFolders = task.repos.some((repo) => {
+      const repoName = repo.split('/').pop() || repo
+      return !existsSync(join(workspaceDir, repoName))
+    })
+
+    // Triage sessions normally should not allocate worktrees, but if the user
+    // starts the real agent before the task status flips out of Triaging and the
+    // repo folders are missing, repair the workspace on demand.
+    if (task.status === TaskStatus.Triaging && !task.session_id && !missingRepoFolders) return undefined
 
     try {
       console.log(`[AgentManager] setupWorktreeIfNeeded: provider=${gitProvider}, org=${githubOrg}, taskRepos=${task.repos.join(', ')}`)
