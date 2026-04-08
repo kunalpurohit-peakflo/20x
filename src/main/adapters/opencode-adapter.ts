@@ -494,7 +494,28 @@ export class OpencodeAdapter implements CodingAgentAdapter {
       return { type: SessionStatusType.IDLE }
     }
 
-    const sdkType = ocStatus.type || 'idle'
+    const sdkType = (ocStatus.type || 'idle') as string
+    if (sdkType === 'waiting_approval' || sdkType === 'waiting_input' || sdkType === 'waiting_user') {
+      return { type: SessionStatusType.WAITING_APPROVAL }
+    }
+
+    // Check for pending questions via V2 SDK
+    try {
+      const v2 = this.getV2Client(config)
+      const listResult = await v2.question.list({
+        ...(config.workspaceDir && { directory: config.workspaceDir })
+      })
+      if (!listResult.error && listResult.data) {
+        const questions = listResult.data as Array<Record<string, unknown>>
+        const targetQuestion = questions.find((q) => (q.sessionID as string | undefined) === sessionId || (q.sessionId as string | undefined) === sessionId)
+        if (targetQuestion?.id) {
+          return { type: SessionStatusType.WAITING_APPROVAL }
+        }
+      }
+    } catch {
+      // Ignore errors when checking for questions
+    }
+
     const statusType = sdkType.toUpperCase() as keyof typeof SessionStatusType
     return {
       type: SessionStatusType[statusType] ?? SessionStatusType.IDLE,
@@ -812,10 +833,18 @@ export class OpencodeAdapter implements CodingAgentAdapter {
       }
 
       const questions: V2QuestionRequest[] = listResult.data ?? []
-      console.log(`[OpencodeAdapter] Pending questions (${questions.length}):`, questions.map(q => ({ id: q.id, sessionID: q.sessionID, questionCount: q.questions?.length })))
+      console.log(
+        `[OpencodeAdapter] Pending questions (${questions.length}):`,
+        questions.map(q => ({
+          id: q.id,
+          sessionID: q.sessionID,
+          sessionId: (q as unknown as { sessionId?: string }).sessionId,
+          questionCount: q.questions?.length
+        }))
+      )
 
       // Find the question for this session
-      const question = questions.find(q => q.sessionID === sessionId)
+      const question = questions.find(q => q.sessionID === sessionId || (q as unknown as { sessionId?: string }).sessionId === sessionId)
       if (!question?.id) {
         console.warn(`[OpencodeAdapter] No pending question found for session ${sessionId}`)
         return
