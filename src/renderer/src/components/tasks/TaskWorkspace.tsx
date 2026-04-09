@@ -279,9 +279,11 @@ export function TaskWorkspace({
     const repoNames = selectedRepos.map((r) => r.fullName)
     const merged = [...new Set([...task.repos, ...repoNames])]
 
-    // If session is running and there are new repos, setup worktrees immediately
+    // If the task already has a live or persisted coding session, provision the
+    // new repo worktrees immediately so the agent can use them without restart.
     const newRepos = selectedRepos.filter((r) => !task.repos.includes(r.fullName))
-    if (session.sessionId && newRepos.length > 0 && selectedOrg) {
+    const hasActiveOrPersistedSession = !!(session.sessionId || task.session_id)
+    if (hasActiveOrPersistedSession && newRepos.length > 0 && selectedOrg) {
       try {
         setIsSettingUpWorktree(true)
         await worktreeApi.setup(
