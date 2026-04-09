@@ -347,6 +347,21 @@ export function useAgentAutoStart({ tasks, agents, sessions, showToast }: UseAge
           } else if (updatedTask?.agent_id) {
             // Clean up attempts on success
             triageAttemptsRef.current.delete(taskId)
+
+            const assignedAgentId = updatedTask.agent_id
+            const assignedAgent = agents.find((a) => a.id === assignedAgentId)
+            if (!assignedAgent) {
+              showToast(`Triage assigned an unavailable agent for "${updatedTask.title}"`, true)
+              return
+            }
+
+            const maxParallel = assignedAgent.config.max_parallel_sessions || 1
+            const currentRunning = getRunningCount(assignedAgentId)
+            if (currentRunning < maxParallel) {
+              void startTasksForAgent(assignedAgentId, [taskId], assignedAgent)
+            } else {
+              addToQueue(assignedAgentId, taskId)
+            }
           }
         }, 500)
 
@@ -374,7 +389,7 @@ export function useAgentAutoStart({ tasks, agents, sessions, showToast }: UseAge
     })
 
     return unsubscribe
-  }, [isEnabled, tasks, agents, decrementRunningCount, showToast, processNextTask])
+  }, [isEnabled, tasks, agents, decrementRunningCount, showToast, processNextTask, getRunningCount, addToQueue, startTasksForAgent])
 
   // Listen to new task creation — trigger triage for tasks with no agent_id
   useEffect(() => {
