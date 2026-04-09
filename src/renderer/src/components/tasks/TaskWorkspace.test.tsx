@@ -2,12 +2,21 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, act, fireEvent, screen, waitFor, cleanup } from '@testing-library/react'
 import { TaskWorkspace } from './TaskWorkspace'
 import { useAgentStore, SessionStatus } from '@/stores/agent-store'
+import { useSettingsStore } from '@/stores/settings-store'
 import { TaskStatus } from '@/types'
 import type { WorkfloTask, Agent } from '@/types'
 
 vi.mock('@/components/agents/AgentTranscriptPanel', () => ({
   AgentTranscriptPanel: ({ onSend }: { onSend?: (message: string) => void }) => (
     <button data-testid="mock-send" onClick={() => onSend?.('approved')}>send</button>
+  )
+}))
+
+vi.mock('@/components/github/RepoSelectorDialog', () => ({
+  RepoSelectorDialog: ({ open, onConfirm }: { open: boolean; onConfirm: (repos: Array<{ fullName: string; defaultBranch: string }>, org: string) => void }) => (
+    open
+      ? <button data-testid="mock-confirm-repo" onClick={() => onConfirm([{ fullName: 'peakflo/api', defaultBranch: 'main' }], 'peakflo')}>confirm repo</button>
+      : null
   )
 }))
 
@@ -99,10 +108,45 @@ beforeEach(() => {
     error: null,
     sessions: new Map()
   })
+  useSettingsStore.setState({
+    githubOrg: 'peakflo',
+    ghCliStatus: null,
+    glabCliStatus: null,
+    gitProvider: 'github',
+    isLoading: false
+  })
   vi.clearAllMocks()
+  ;(window.electronAPI.settings.getAll as ReturnType<typeof vi.fn>).mockResolvedValue({
+    github_org: 'peakflo',
+    git_provider: 'github'
+  })
 })
 
 describe('TaskWorkspace – stale triage session cleanup', () => {
+  it('sets up worktrees when adding repos to a task with only a persisted session_id', async () => {
+    ;(window.electronAPI.github.checkCli as ReturnType<typeof vi.fn>).mockResolvedValue({ installed: true, authenticated: true })
+    ;(window.electronAPI.gitlab.checkCli as ReturnType<typeof vi.fn>).mockResolvedValue({ installed: false, authenticated: false })
+
+    const task = makeRendererTask({
+      repos: ['peakflo/20x'],
+      status: TaskStatus.AgentWorking,
+      session_id: 'persisted-session-1'
+    })
+
+    renderWorkspace(task)
+
+    fireEvent.click(screen.getAllByRole('button', { name: /add/i })[0])
+    fireEvent.click(await screen.findByTestId('mock-confirm-repo'))
+
+    await waitFor(() => {
+      expect(window.electronAPI.worktree.setup).toHaveBeenCalledWith(
+        task.id,
+        [{ fullName: 'peakflo/api', defaultBranch: 'main' }],
+        'peakflo'
+      )
+    })
+  })
+
   it('removes stale triage session on mount when task is no longer triaging', () => {
     // Simulate a leftover triage session: sessionId set, idle, has messages, but task
     // has already transitioned to NotStarted and has no persisted session_id.
