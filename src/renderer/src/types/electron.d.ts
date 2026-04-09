@@ -323,6 +323,7 @@ interface ElectronAPI {
       email: string
       companies: { id: string; name: string; isPrimary: boolean }[]
     }>
+    listCompanies: () => Promise<{ id: string; name: string; isPrimary: boolean }[]>
     selectTenant: (tenantId: string) => Promise<{
       token: string
       tenant: { id: string; name: string }
@@ -341,6 +342,7 @@ interface ElectronAPI {
     getAuthTokens: () => Promise<{ accessToken: string; refreshToken: string; tenantId: string | null }>
     enableIframeAuth: () => Promise<{ apiUrl: string }>
     disableIframeAuth: () => Promise<void>
+    onSyncComplete: (callback: (data: { success: boolean; syncMs?: number; error?: string }) => void) => () => void
   }
   updater: {
     check: () => Promise<{ success: boolean; version?: string; error?: string }>

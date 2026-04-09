@@ -339,6 +339,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       email: string
       companies: { id: string; name: string; isPrimary: boolean }[]
     }> => ipcRenderer.invoke('enterprise:login', email, password),
+    listCompanies: (): Promise<{ id: string; name: string; isPrimary: boolean }[]> =>
+      ipcRenderer.invoke('enterprise:listCompanies'),
     selectTenant: (tenantId: string): Promise<{
       token: string
       tenant: { id: string; name: string }
@@ -364,7 +366,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     enableIframeAuth: (): Promise<{ apiUrl: string }> =>
       ipcRenderer.invoke('enterprise:enableIframeAuth'),
     disableIframeAuth: (): Promise<void> =>
-      ipcRenderer.invoke('enterprise:disableIframeAuth')
+      ipcRenderer.invoke('enterprise:disableIframeAuth'),
+    onSyncComplete: (callback: (data: { success: boolean; syncMs?: number; error?: string }) => void): (() => void) => {
+      const handler = (_: unknown, data: { success: boolean; syncMs?: number; error?: string }): void => callback(data)
+      ipcRenderer.on('enterprise:syncComplete', handler)
+      return () => ipcRenderer.removeListener('enterprise:syncComplete', handler)
+    }
   },
   updater: {
     check: (): Promise<{ success: boolean; version?: string; error?: string }> =>

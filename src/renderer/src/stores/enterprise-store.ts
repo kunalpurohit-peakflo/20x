@@ -16,6 +16,7 @@ interface EnterpriseState {
   // Auth state
   isAuthenticated: boolean
   isLoading: boolean
+  isSyncing: boolean
   error: string | null
 
   // User info
@@ -27,14 +28,17 @@ interface EnterpriseState {
   // Actions
   login: (email: string, password: string) => Promise<void>
   selectTenant: (tenantId: string) => Promise<void>
+  switchOrg: () => Promise<void>
   logout: () => Promise<void>
   loadSession: () => Promise<void>
   clearError: () => void
+  setSyncing: (syncing: boolean) => void
 }
 
 export const useEnterpriseStore = create<EnterpriseState>((set) => ({
   isAuthenticated: false,
   isLoading: false,
+  isSyncing: false,
   error: null,
   userEmail: null,
   userId: null,
@@ -61,9 +65,11 @@ export const useEnterpriseStore = create<EnterpriseState>((set) => ({
         set({ isLoading: true })
         try {
           await enterpriseApi.selectTenant(tenant.id)
+          // Show "Connected" immediately — sync runs in background
           set({
             isLoading: false,
             isAuthenticated: true,
+            isSyncing: true,
             currentTenant: { id: tenant.id, name: tenant.name },
             availableTenants: result.companies
           })
@@ -86,15 +92,35 @@ export const useEnterpriseStore = create<EnterpriseState>((set) => ({
     set({ isLoading: true, error: null })
     try {
       const result = await enterpriseApi.selectTenant(tenantId)
+      // Show "Connected" immediately — sync runs in background
       set({
         isLoading: false,
         isAuthenticated: true,
+        isSyncing: true,
         currentTenant: result.tenant
       })
     } catch (err) {
       set({
         isLoading: false,
         error: err instanceof Error ? err.message : 'Failed to select organization'
+      })
+    }
+  },
+
+  switchOrg: async () => {
+    set({ isLoading: true, error: null })
+    try {
+      const companies = await enterpriseApi.listCompanies()
+      // Populate availableTenants to trigger the tenant selection UI in the modal.
+      // Keep isAuthenticated and currentTenant so the settings page still shows "Connected".
+      set({
+        isLoading: false,
+        availableTenants: companies
+      })
+    } catch (err) {
+      set({
+        isLoading: false,
+        error: err instanceof Error ? err.message : 'Failed to fetch organizations'
       })
     }
   },
@@ -109,6 +135,7 @@ export const useEnterpriseStore = create<EnterpriseState>((set) => ({
     set({
       isLoading: false,
       isAuthenticated: false,
+      isSyncing: false,
       userEmail: null,
       userId: null,
       currentTenant: null,
@@ -139,5 +166,7 @@ export const useEnterpriseStore = create<EnterpriseState>((set) => ({
     }
   },
 
-  clearError: () => set({ error: null })
+  clearError: () => set({ error: null }),
+
+  setSyncing: (syncing: boolean) => set({ isSyncing: syncing })
 }))
