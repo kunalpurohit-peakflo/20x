@@ -209,12 +209,12 @@ export function TaskBoard() {
 
       {isLoading ? (
         <>
-          <div className="flex gap-4 pb-2">
+          <div className="flex gap-4 pb-2 justify-center">
             {COLUMNS.map((col) => (
               <ColumnHeader key={col.key} column={col} count={0} />
             ))}
           </div>
-          <div className="flex gap-4 pb-2">
+          <div className="flex gap-4 pb-2 justify-center">
             {COLUMNS.map((col) => (
               <div key={col.key} className="min-w-[200px] max-w-[260px] flex-1 space-y-2">
                 {[1, 2].map((i) => (
@@ -236,7 +236,7 @@ export function TaskBoard() {
       ) : (
         <>
           {/* Sticky column headers — pinned when dashboard scrolls */}
-          <div className="flex gap-4 sticky top-0 bg-background z-10 pb-2">
+          <div className="flex gap-4 sticky top-0 bg-background z-10 pb-2 justify-center">
             {COLUMNS.map((col) => (
               <ColumnHeader
                 key={col.key}
@@ -246,7 +246,7 @@ export function TaskBoard() {
             ))}
           </div>
           {/* Card columns */}
-          <div className="flex gap-4 pb-2">
+          <div className="flex gap-4 pb-2 justify-center">
             {COLUMNS.map((col) => (
               <ColumnCards
                 key={col.key}
