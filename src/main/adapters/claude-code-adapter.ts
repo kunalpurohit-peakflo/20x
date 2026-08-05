@@ -195,15 +195,33 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
         return cliJs
       }
 
-      // Parse the .cmd file to extract the JS path
+      // The .cmd shim's directory doesn't always sit next to node_modules
+      // (custom npm prefix, corepack-managed installs) — ask npm directly
+      // for its global node_modules root instead of guessing.
+      try {
+        const { execFile } = await import('child_process')
+        const { promisify } = await import('util')
+        const execFileAsync = promisify(execFile)
+        const { stdout } = await execFileAsync('npm', ['root', '-g'], { shell: true })
+        const globalCliJs = join(stdout.trim(), '@anthropic-ai', 'claude-code', 'cli.js')
+        if (existsSync(globalCliJs)) {
+          console.log(`[ClaudeCodeAdapter] Resolved via npm root -g → ${globalCliJs}`)
+          return globalCliJs
+        }
+      } catch (err) {
+        console.warn('[ClaudeCodeAdapter] npm root -g lookup failed:', err)
+      }
+
+      // Parse the .cmd file to extract the JS path. npm's actual generated
+      // shims use the batch-file-directory token %~dp0 (not %dp0%) — the
+      // old code only matched the latter, so this branch silently failed
+      // and fell back to the unresolved .cmd path, causing `spawn EINVAL`.
       const content = readFileSync(cmdPath, 'utf8')
       const match = content.match(/"[^"]*node(?:\.exe)?"[^"]*"([^"]+\.js)"/)
         || content.match(/node(?:\.exe)?\s+"([^"]+\.js)"/)
         || content.match(/node(?:\.exe)?\s+([^\s]+\.js)/)
       if (match?.[1]) {
-        const resolvedJs = match[1].includes('%dp0%')
-          ? match[1].replace(/%dp0%/g, cmdDir + '\\')
-          : match[1]
+        const resolvedJs = match[1].replace(/%~?dp0%?/g, cmdDir + '\\')
         if (existsSync(resolvedJs)) {
           console.log(`[ClaudeCodeAdapter] Parsed .cmd → ${resolvedJs}`)
           return resolvedJs
