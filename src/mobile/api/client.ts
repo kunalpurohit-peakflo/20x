@@ -74,7 +74,7 @@ export const api = {
       post<Array<{ value: string; label: string }>>(`/api/plugins/${encodeURIComponent(pluginId)}/resolve-options`, { resolverKey, config })
   },
   agents: {
-    list: () => get<unknown[]>('/api/agents'),
+    list: () => get<Array<{ id: string; name: string }>>('/api/agents'),
     get: (id: string) => get<unknown>(`/api/agents/${encodeURIComponent(id)}`)
   },
   skills: {

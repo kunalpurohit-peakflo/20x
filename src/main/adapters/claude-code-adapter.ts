@@ -98,7 +98,18 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
       const whichCmd = isWin ? 'where' : 'which'
       const binaryName = 'claude'
       const { stdout } = await execFileAsync(whichCmd, [binaryName])
-      let found = stdout.trim().split(/\r?\n/)[0]
+      const matches = stdout.trim().split(/\r?\n/).filter(Boolean)
+
+      // On Windows, `where claude` can list npm's extensionless POSIX shim
+      // (for git-bash/WSL) ahead of the `.cmd`/`.exe` wrapper — filesystem
+      // enumeration order, not guaranteed alphabetical. That shim isn't a
+      // native Windows executable, so spawning it directly fails with a
+      // generic "binary exists but failed to launch" error. Prefer a
+      // `.cmd`/`.exe` match when one exists; only fall back to the first
+      // line (may be the POSIX shim) if none does.
+      let found = isWin
+        ? matches.find((m) => /\.(cmd|exe)$/i.test(m)) ?? matches[0]
+        : matches[0]
 
       // On Windows, the SDK spawns the executable directly without shell,
       // so .cmd files fail with EINVAL. Resolve .cmd → the underlying cli.js

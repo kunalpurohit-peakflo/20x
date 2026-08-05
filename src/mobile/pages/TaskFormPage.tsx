@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { TaskStatus, TASK_STATUSES } from '@shared/constants'
 import { useTaskStore } from '../stores/task-store'
 import { cn } from '../lib/utils'
+import { api } from '../api/client'
 import type { Route } from '../App'
 
 // ── Constants (mirrors desktop @/types) ─────────────────────
@@ -129,6 +130,16 @@ export function TaskFormPage({ taskId, onNavigate }: { taskId?: string; onNaviga
   const [autoStartAgent, setAutoStartAgent] = useState(false)
   const [autoCompleteWithoutReview, setAutoCompleteWithoutReview] = useState(false)
 
+  // ── Assignee (configured agents, from desktop) ──────────
+  const [assignee, setAssignee] = useState('')
+  const [agents, setAgents] = useState<{ id: string; name: string }[]>([])
+
+  useEffect(() => {
+    api.agents.list()
+      .then(setAgents)
+      .catch((err) => console.error('Failed to load agents:', err))
+  }, [])
+
   // ── Submit state ────────────────────────────────────────
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
@@ -151,6 +162,7 @@ export function TaskFormPage({ taskId, onNavigate }: { taskId?: string; onNaviga
     setDueDate(existingTask.due_date ? existingTask.due_date.slice(0, 10) : '')
     setLabels(existingTask.labels.join(', '))
     setOutputFields((existingTask.output_fields || []) as OutputField[])
+    setAssignee(existingTask.assignee || '')
 
     // Auto flags
     setAutoStartAgent(existingTask.auto_start_agent)
@@ -176,6 +188,7 @@ export function TaskFormPage({ taskId, onNavigate }: { taskId?: string; onNaviga
       existingTask.priority !== 'medium' ||
       existingTask.due_date ||
       existingTask.labels.length > 0 ||
+      existingTask.assignee ||
       (existingTask.output_fields as OutputField[]).length > 0 ||
       existingTask.is_recurring
     ) {
@@ -208,6 +221,7 @@ export function TaskFormPage({ taskId, onNavigate }: { taskId?: string; onNaviga
       due_date: dueDate ? new Date(dueDate).toISOString() : null,
       labels: parsedLabels,
       output_fields: outputFields,
+      assignee,
       is_recurring: recurringEnabled,
       recurrence_pattern: recurrencePattern,
       auto_start_agent: recurringEnabled && autoStartAgent,
@@ -305,7 +319,7 @@ export function TaskFormPage({ taskId, onNavigate }: { taskId?: string; onNaviga
               <path d="m9 18 6-6-6-6"/>
             </svg>
             Additional fields
-            {!showMore && (type !== 'general' || priority !== 'medium' || dueDate || labels || outputFields.length > 0 || recurringEnabled) && (
+            {!showMore && (type !== 'general' || priority !== 'medium' || dueDate || labels || assignee || outputFields.length > 0 || recurringEnabled) && (
               <span className="text-primary text-[10px]">(has values)</span>
             )}
           </button>
@@ -334,6 +348,19 @@ export function TaskFormPage({ taskId, onNavigate }: { taskId?: string; onNaviga
                     {TASK_PRIORITIES.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
                   </select>
                 </div>
+              </div>
+
+              {/* ── Assignee ──────────────────────────────── */}
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-muted-foreground">Assignee</label>
+                <select
+                  value={assignee}
+                  onChange={(e) => setAssignee(e.target.value)}
+                  className="w-full bg-transparent border border-input rounded-md px-3 py-2 text-sm text-foreground focus:outline-none focus:border-ring"
+                >
+                  <option value="">Unassigned</option>
+                  {agents.map((a) => <option key={a.id} value={a.name}>{a.name}</option>)}
+                </select>
               </div>
 
               {/* ── Status (edit mode only) ───────────────── */}
