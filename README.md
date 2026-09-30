@@ -206,7 +206,7 @@ See [AGENTS.md](./AGENTS.md) for detailed architecture.
 | Icons | Lucide React |
 | Font | Geist |
 | Database | SQLite (better-sqlite3, WAL mode) |
-| Agent SDKs | @opencode-ai/sdk, @anthropic-ai/claude-agent-sdk, @agentclientprotocol/codex-acp |
+| Agent backends | OpenCode SDK, Claude Agent SDK, Codex app server, Cursor ACP |
 | Testing | Vitest + happy-dom |
 
 ## Contributing

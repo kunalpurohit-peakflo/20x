@@ -153,16 +153,16 @@ describe('AgentManager skill file paths', () => {
       expect(AcpAdapter).not.toHaveBeenCalled()
     })
 
-    it('keeps an explicit ACP fallback for Codex agents', () => {
+    it('uses the app server even if the old ACP override is set', () => {
       process.env.CODEX_APP_SERVER = '0'
       const mockDb = createMockDb({ coding_agent: 'codex' })
       manager = new AgentManager(mockDb)
 
       const adapter = (manager as any).getAdapter('agent-1')
 
-      expect(adapter).toBeInstanceOf(AcpAdapter)
-      expect(AcpAdapter).toHaveBeenCalledWith('codex')
-      expect(CodexAppServerAdapter).not.toHaveBeenCalled()
+      expect(adapter).toBeInstanceOf(CodexAppServerAdapter)
+      expect(CodexAppServerAdapter).toHaveBeenCalledOnce()
+      expect(AcpAdapter).not.toHaveBeenCalled()
     })
 
     it('uses ACP for Cursor agents', () => {

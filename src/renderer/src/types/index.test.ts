@@ -3,11 +3,12 @@ import { CLAUDE_MODELS, ClaudeModel, CODEX_MODELS, CodexModel } from './index'
 
 describe('CLAUDE_MODELS', () => {
   it('lists the latest Claude models first in preferred order', () => {
-    expect(CLAUDE_MODELS.slice(0, 5)).toEqual([
+    expect(CLAUDE_MODELS.slice(0, 6)).toEqual([
       { id: ClaudeModel.FABLE_5_1, name: 'Claude Fable 5.1' },
       { id: ClaudeModel.FABLE_5, name: 'Claude Fable 5' },
       { id: ClaudeModel.OPUS_5_5, name: 'Claude Opus 5.5' },
       { id: ClaudeModel.OPUS_5, name: 'Claude Opus 5' },
+      { id: ClaudeModel.SONNET_5_5, name: 'Claude Sonnet 5.5' },
       { id: ClaudeModel.SONNET_5, name: 'Claude Sonnet 5' }
     ])
   })
@@ -28,6 +29,7 @@ describe('CODEX_MODELS', () => {
   it('lists the supported Codex models in preferred order', () => {
     expect(CODEX_MODELS).toEqual([
       { id: CodexModel.GPT_6_ASTRA, name: 'GPT-6 Astra (Recommended)' },
+      { id: CodexModel.GPT_6_1_SOL, name: 'GPT-6.1 Sol' },
       { id: CodexModel.GPT_6_SOL, name: 'GPT-6 Sol' },
       { id: CodexModel.GPT_6_LUNA, name: 'GPT-6 Luna' },
       { id: CodexModel.GPT_5_6_SOL, name: 'GPT-5.6 Sol' },
