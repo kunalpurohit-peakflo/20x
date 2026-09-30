@@ -722,13 +722,8 @@ export class AgentManager extends EventEmitter {
         adapter = new ClaudeCodeAdapter()
         break
       case CodingAgentType.CODEX:
-        if (process.env.CODEX_APP_SERVER === '0') {
-          console.log('[AgentManager] Creating new AcpAdapter for Codex')
-          adapter = new AcpAdapter('codex')
-        } else {
-          console.log('[AgentManager] Creating new CodexAppServerAdapter for Codex')
-          adapter = new CodexAppServerAdapter()
-        }
+        console.log('[AgentManager] Creating new CodexAppServerAdapter for Codex')
+        adapter = new CodexAppServerAdapter()
         break
       case CodingAgentType.CURSOR:
         console.log('[AgentManager] Creating new AcpAdapter for Cursor')
