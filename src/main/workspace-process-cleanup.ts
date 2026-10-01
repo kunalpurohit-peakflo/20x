@@ -572,10 +572,8 @@ function formatGiB(bytes: number): string {
  * The line to log about workspace pressure, or null when there is nothing to
  * say. Pure, so the thresholds are testable without a filesystem.
  *
- * Deliberately REPORTS and does not BOUND. Bounding means deleting a user's
- * checkouts on a rule nobody chose; the retention setting that already exists
- * (`workspace_autocleanup_enabled`) is the place for that decision, and it
- * defaults to off. Turning it on silently is not this change's to make.
+ * Deliberately REPORTS and does not BOUND. Task workspaces hold artifacts
+ * after completion, so disk pressure must not remove them implicitly.
  */
 export function workspacePressureWarning(input: { count: number; disk?: DiskSpace }): string | null {
   const { count, disk } = input
@@ -592,6 +590,6 @@ export function workspacePressureWarning(input: { count: number; disk?: DiskSpac
     const percent = ((disk.freeBytes / disk.totalBytes) * 100).toFixed(0)
     parts.push(`${formatGiB(disk.freeBytes)} free of ${formatGiB(disk.totalBytes)} (${percent}%)`)
   }
-  parts.push('Enable workspace auto-cleanup in Settings')
+  parts.push('Prune idle node_modules in Settings')
   return `${spaceLow ? 'DISK NEARLY FULL. ' : ''}${parts.join('. ')}.`
 }

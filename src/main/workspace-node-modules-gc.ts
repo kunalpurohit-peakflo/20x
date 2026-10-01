@@ -11,9 +11,9 @@ import {
 /**
  * Age-based pruning of idle `node_modules` directories inside task workspaces.
  *
- * Whole-workspace cleanup only handles `completed` tasks, so review-pending and
- * other live workspaces accumulate dependency directories forever (measured:
- * 175 stale `node_modules` holding ~23 GB). Dependencies are regenerable from
+ * Task workspaces are preserved for their artifacts, so dependency directories
+ * can accumulate (measured: 175 stale `node_modules` holding ~23 GB).
+ * Dependencies are regenerable from
  * `package.json`, so deleting just them is safe for every task status — source
  * files, worktrees and review state are left untouched.
  *

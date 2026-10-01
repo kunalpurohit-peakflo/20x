@@ -1017,7 +1017,7 @@ app.whenReady().then(async () => {
   recurrenceScheduler.setOnInstancesCreated(() => {
     void taskAutomationScheduler?.runNow()
   })
-  workspaceCleanupScheduler = new WorkspaceCleanupScheduler(db, worktreeManager)
+  workspaceCleanupScheduler = new WorkspaceCleanupScheduler(db)
 
   // Initialize enterprise auth (gracefully — missing env vars just disable the feature)
   try {

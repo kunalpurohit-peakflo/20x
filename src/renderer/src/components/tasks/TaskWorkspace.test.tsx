@@ -140,6 +140,37 @@ describe('clampTranscriptWidth', () => {
   })
 })
 
+describe('TaskWorkspace completed artifacts', () => {
+  it('stops a completed task session without deleting its workspace and hydrates artifacts on reopen', async () => {
+    const task = makeRendererTask({
+      status: TaskStatus.AgentLearning,
+      session_id: 'learning-session',
+      repos: ['peakflo/20x']
+    })
+    useAgentStore.getState().initSession(task.id, 'learning-session', 'agent-1')
+    const view = renderWorkspace(task)
+
+    view.rerender(
+      <TaskWorkspace
+        task={{ ...task, status: TaskStatus.Completed }}
+        agents={[makeAgent()]}
+        onEdit={noopFn}
+        onDelete={noopFn}
+        onUpdateAttachments={noopFn}
+        onUpdateOutputFields={noopFn}
+        onCompleteTask={noopFn}
+        onAssignAgent={noopFn}
+        onUpdateTask={noopAsync}
+      />
+    )
+
+    await waitFor(() => expect(window.electronAPI.agentSession.stop).toHaveBeenCalledWith('learning-session'))
+    await act(async () => { await Promise.resolve() })
+    expect(window.electronAPI.worktree.cleanup).not.toHaveBeenCalled()
+    expect(window.electronAPI.artifacts.scan).toHaveBeenCalledWith(task.id)
+  })
+})
+
 describe('TaskWorkspace keyboard actions', () => {
   it('starts triage for an unassigned task through the R action', async () => {
     const task = makeRendererTask({ agent_id: null })

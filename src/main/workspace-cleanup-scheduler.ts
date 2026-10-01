@@ -2,8 +2,6 @@ import { BrowserWindow } from 'electron'
 import { existsSync, readdirSync, statSync, rmSync } from 'fs'
 import { join } from 'path'
 import type { DatabaseManager } from './database'
-import type { WorktreeManager } from './worktree-manager'
-import { TaskStatus } from '../shared/constants'
 import { WORKSPACES_DIR, listWorkspaceDirs } from './workspace-paths'
 import { terminateProcessesInWorkspaces, readDiskSpace, workspacePressureWarning } from './workspace-process-cleanup'
 import {
@@ -24,25 +22,22 @@ export interface CleanupResult {
 }
 
 /**
- * WorkspaceCleanupScheduler - Automatic cleanup of old completed task workspaces
+ * WorkspaceCleanupScheduler - Automatic cleanup of orphaned workspaces
  *
  * Runs once daily (every 24 hours). On each tick:
  * 1. Checks if auto-cleanup is enabled via settings
- * 2. Queries completed tasks where `updated_at` is older than the configured retention period
- * 3. Cleans up worktrees and workspace directories for those tasks
- * 4. Also removes orphaned workspace directories (no matching task in DB)
- * 5. Prunes idle `node_modules` directories at any depth, for tasks in ANY status
+ * 2. Removes old orphaned workspace directories (no matching task in DB)
+ * 3. Prunes idle `node_modules` directories at any depth, for tasks in ANY status
  *    (own enable flag + retention, on by default — deps reinstall from package.json)
  *
  * Settings:
  * - `workspace_autocleanup_enabled` — "true"/"false" (default: "false")
- * - `workspace_autocleanup_days` — number of days after completion (default: 7)
+ * - `workspace_autocleanup_days` — age of orphaned directory before removal (default: 7)
  * - `workspace_nodemodules_gc_enabled` — "true"/"false" (default: "true")
  * - `workspace_nodemodules_gc_days` — days of node_modules inactivity before pruning (default: 7)
  */
 export class WorkspaceCleanupScheduler {
   private dbManager: DatabaseManager
-  private worktreeManager: WorktreeManager
   private intervalId: NodeJS.Timeout | null = null
   private mainWindow: BrowserWindow | null = null
   private isRunning = false
@@ -51,9 +46,8 @@ export class WorkspaceCleanupScheduler {
   private readonly CHECK_INTERVAL = 60 * 60 * 1000 // 1 hour
   private readonly DEFAULT_RETENTION_DAYS = 7
 
-  constructor(dbManager: DatabaseManager, worktreeManager: WorktreeManager) {
+  constructor(dbManager: DatabaseManager) {
     this.dbManager = dbManager
-    this.worktreeManager = worktreeManager
   }
 
   start(mainWindow: BrowserWindow): void {
@@ -120,16 +114,13 @@ export class WorkspaceCleanupScheduler {
     try {
       // Idle node_modules pruning has its own flag and schedule: it is safe for
       // every task status (only regenerable deps go), so it runs whether or not
-      // whole-workspace auto-cleanup is enabled.
+      // orphaned-workspace auto-cleanup is enabled.
       await this.runNodeModulesGcAuto()
 
       // Check if auto-cleanup is enabled
       const enabled = this.dbManager.getSetting('workspace_autocleanup_enabled')
       if (enabled !== 'true') {
-        // Auto-cleanup defaults to OFF, and that is exactly the machine where
-        // the count grows without bound — 397 workspaces holding 313 GB on the
-        // one this was found on. Reporting it only inside `doCleanup` would
-        // mean the warning never reached the person who needs it.
+        // Keep disk-pressure reporting even when orphan cleanup is disabled.
         this.reportWorkspaceCount()
         return
       }
@@ -166,23 +157,19 @@ export class WorkspaceCleanupScheduler {
   private async doCleanup(reportProgress: boolean): Promise<{ cleaned: number; errors: string[] }> {
     const retentionDays = this.getRetentionDays()
     const cutoffDate = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000)
-    const org = this.dbManager.getSetting('github_org') || ''
 
     let cleaned = 0
     const errors: string[] = []
 
-    // Phase 1: Clean workspaces for completed tasks past retention
+    // A task workspace contains its artifact registry and files. Keep it for
+    // every status, including completed, review-pending, and agent failures.
     const allTasks = this.dbManager.getTasks()
-    const completedTasks = allTasks.filter(
-      (t) =>
-        t.status === TaskStatus.Completed &&
-        new Date(t.updated_at) < cutoffDate
-    )
-
-    // Count eligible workspaces (ones that actually exist on disk)
-    const eligibleTasks = completedTasks.filter((t) =>
-      existsSync(join(WORKSPACES_DIR, t.id))
-    )
+    if (allTasks.length === 0) {
+      // An unavailable database also reads as an empty task list. Do not infer
+      // that every workspace is orphaned when ownership cannot be verified.
+      this.reportWorkspaceCount()
+      return { cleaned, errors }
+    }
 
     // Count orphaned directories
     let orphanDirs: string[] = []
@@ -205,7 +192,7 @@ export class WorkspaceCleanupScheduler {
       // ignore scan errors for counting
     }
 
-    const total = eligibleTasks.length + orphanDirs.length
+    const total = orphanDirs.length
     let processed = 0
 
     // A process must not outlive its workspace. Removing the directory under a
@@ -217,7 +204,7 @@ export class WorkspaceCleanupScheduler {
       try {
         const killed = await terminateProcessesInWorkspaces({
           workspacesRoot: WORKSPACES_DIR,
-          workspaceIds: [...eligibleTasks.map((t) => t.id), ...orphanDirs]
+          workspaceIds: orphanDirs
         })
         if (killed.length > 0) {
           console.log(`[WorkspaceCleanup] Terminated ${killed.length} process(es) rooted in workspaces being removed`)
@@ -238,41 +225,7 @@ export class WorkspaceCleanupScheduler {
       })
     }
 
-    for (const task of eligibleTasks) {
-      const taskDir = join(WORKSPACES_DIR, task.id)
-
-      if (reportProgress) {
-        this.sendToRenderer('workspace:cleanup-progress', {
-          phase: 'cleaning',
-          current: processed,
-          total,
-          message: `Cleaning "${task.title}"...`
-        })
-      }
-
-      try {
-        if (task.repos.length > 0 && org) {
-          await this.worktreeManager.cleanupTaskWorkspace(
-            task.id,
-            task.repos.map((r) => ({ fullName: r })),
-            org,
-            true
-          )
-        } else {
-          // No repos — just remove the workspace directory
-          rmSync(taskDir, { recursive: true, force: true })
-        }
-        cleaned++
-        console.log(`[WorkspaceCleanup] Cleaned workspace for completed task "${task.title}" (${task.id})`)
-      } catch (err) {
-        const message = `Failed to clean workspace for task ${task.id}: ${err instanceof Error ? err.message : String(err)}`
-        console.error(`[WorkspaceCleanup] ${message}`)
-        errors.push(message)
-      }
-      processed++
-    }
-
-    // Phase 2: Clean orphaned workspace directories (no matching task in DB)
+    // Clean orphaned workspace directories (no matching task in DB).
     for (const name of orphanDirs) {
       const dirPath = join(WORKSPACES_DIR, name)
 
@@ -351,7 +304,7 @@ export class WorkspaceCleanupScheduler {
 
   /**
    * Automatic (scheduled) node_modules pass: own enable flag, at most once per day.
-   * Runs independently of whole-workspace auto-cleanup.
+   * Runs independently of orphaned-workspace auto-cleanup.
    */
   private async runNodeModulesGcAuto(): Promise<void> {
     if (!this.isNodeModulesGcEnabled()) return

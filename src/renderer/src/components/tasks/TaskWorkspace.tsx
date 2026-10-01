@@ -321,26 +321,21 @@ function TaskWorkspaceComponent({
     }
   }, [session.status, fetchTasks])
 
-  // Stop session when task transitions to completed, but keep transcript
+  // Stop the session when a task completes. Its workspace holds the artifact
+  // registry and files, so completion must not clean up worktrees or task files.
   // Uses ref to track previous status — prevents auto-stop on resume of already-completed tasks
   const prevTaskStatusRef = useRef(task?.status)
   useEffect(() => {
     const prevStatus = prevTaskStatusRef.current
     prevTaskStatusRef.current = task?.status
     if (session.sessionId && task?.status === TaskStatus.Completed && prevStatus !== TaskStatus.Completed) {
-      stop()
-        .then(() => {
-          if (task && task.repos.length > 0 && githubOrg) {
-            worktreeApi.cleanup(task.id, task.repos.map((r) => ({ fullName: r })), githubOrg).catch(console.error)
-          }
-        })
-        .catch(console.error)
+      stop().catch(console.error)
     }
     // Clean up triage session when triage completes (Triaging → NotStarted)
     if (prevStatus === TaskStatus.Triaging && task?.status === TaskStatus.NotStarted) {
       removeSession(task.id)
     }
-  }, [task?.status, session.sessionId, stop, task, githubOrg, removeSession])
+  }, [task?.status, session.sessionId, stop, task, removeSession])
 
   // Clean up stale triage session when returning to a task that was triaged while unmounted.
   // If the task is no longer Triaging, has no persisted session_id, but the in-memory session
