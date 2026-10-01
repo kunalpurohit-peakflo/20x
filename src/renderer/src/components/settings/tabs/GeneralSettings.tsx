@@ -596,14 +596,14 @@ const [currentVersion, setCurrentVersion] = useState<string | null>(null)
 
     <SettingsSection
       title="Workspace Auto-Cleanup"
-      description="Automatically clean up workspace files for completed tasks after a configurable retention period"
+      description="Preserve task workspaces and artifacts; clean up old orphaned workspaces and idle dependencies"
     >
       <div className="space-y-4">
         <div className="flex items-center justify-between py-2 border-b border-border">
           <div className="space-y-0.5">
             <Label htmlFor="autoclean-enabled">Enable auto-cleanup</Label>
             <p className="text-xs text-muted-foreground">
-              Automatically remove workspace files for tasks completed more than the configured number of days ago
+              Automatically remove old workspace directories only when their task no longer exists
             </p>
           </div>
           <Switch
@@ -621,7 +621,7 @@ const [currentVersion, setCurrentVersion] = useState<string | null>(null)
           <div className="space-y-0.5">
             <Label htmlFor="autoclean-days">Retention period</Label>
             <p className="text-xs text-muted-foreground">
-              Days to keep workspace files after task completion
+              Days to keep orphaned workspace directories
             </p>
           </div>
           <select
@@ -693,7 +693,7 @@ const [currentVersion, setCurrentVersion] = useState<string | null>(null)
             <div className="space-y-0.5">
               <Label>Manual cleanup</Label>
               <p className="text-xs text-muted-foreground">
-                Run workspace cleanup and idle dependency pruning now
+                Remove old orphaned workspaces and prune idle dependencies now
               </p>
             </div>
             <div className="flex items-center gap-2">

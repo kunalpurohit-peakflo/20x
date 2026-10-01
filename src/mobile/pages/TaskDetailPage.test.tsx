@@ -177,8 +177,8 @@ describe('TaskDetailPage', () => {
     expect(view.queryByRole('dialog')).toBeNull()
   })
 
-  it('switches to the artifacts segment and opens an artifact viewer', () => {
-    const task = makeTask({ id: 'task-1' })
+  it('opens a completed task artifact from the artifacts segment', () => {
+    const task = makeTask({ id: 'task-1', status: 'completed' })
     useTaskStore.setState({ tasks: [task], isLoading: false })
     useArtifactStore.setState({
       artifactsByTask: new Map([['task-1', [{
