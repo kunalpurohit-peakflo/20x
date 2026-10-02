@@ -5,7 +5,8 @@ import { AgentTranscriptPanel } from '@/components/agents/AgentTranscriptPanel'
 import { useAgentStore, SessionStatus } from '@/stores/agent-store'
 import { useAgentSession } from '@/hooks/use-agent-session'
 import { agentApi, settingsApi } from '@/lib/ipc-client'
-import type { Agent } from '@/types'
+import { useMastermindStore } from '@/stores/mastermind-store'
+import { MASTERMIND_AGENT_SETTING } from '@shared/peako'
 
 const MASTERMIND_SESSION_ID = 'mastermind-session'
 
@@ -17,7 +18,7 @@ interface OrchestratorPanelProps {
 }
 
 export function OrchestratorPanel({ onClose }: OrchestratorPanelProps) {
-  const [agents, setAgents] = useState<Agent[]>([])
+  const agents = useMastermindStore((state) => state.agents)
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
   const { start, stop, sendMessage, approve } = useAgentSession(MASTERMIND_SESSION_ID)
   const currentSession = useAgentStore((state) => state.sessions.get(MASTERMIND_SESSION_ID))
@@ -45,28 +46,50 @@ export function OrchestratorPanel({ onClose }: OrchestratorPanelProps) {
     }
   }, [])
 
-  // Load agents on mount
+  // Load agents on mount. The saved choice (shared with Peako) wins over the
+  // default agent, as long as that agent still exists.
   useEffect(() => {
-    agentApi.getAll().then((allAgents) => {
-      setAgents(allAgents)
-      // Select default agent or first available
-      const defaultAgent = allAgents.find((a) => a.is_default) || allAgents[0]
-      if (defaultAgent) {
-        setSelectedAgentId(defaultAgent.id)
+    Promise.all([agentApi.getAll(), settingsApi.get(MASTERMIND_AGENT_SETTING).catch(() => null)]).then(
+      ([allAgents, savedAgentId]) => {
+        useMastermindStore.getState().setAgents(allAgents)
+        const chosen =
+          allAgents.find((a) => a.id === savedAgentId) || allAgents.find((a) => a.is_default) || allAgents[0]
+        if (chosen) {
+          setSelectedAgentId(chosen.id)
+          useMastermindStore.getState().setSelectedAgentId(chosen.id)
+        }
       }
-    })
+    )
   }, [])
+
+  const stopConversation = useCallback(async () => {
+    if (useAgentStore.getState().sessions.get(MASTERMIND_SESSION_ID)?.sessionId) {
+      await stop()
+    }
+    removeSession(MASTERMIND_SESSION_ID)
+  }, [stop, removeSession])
 
   // Switch agent. The new choice is recorded before the old session is
   // stopped, or the warm-up would race in and start the old agent again.
-  const handleAgentChange = async (newAgentId: string) => {
-    selectedAgentIdRef.current = newAgentId
-    setSelectedAgentId(newAgentId)
-    if (currentSession?.sessionId) {
-      await stop()
-      removeSession(MASTERMIND_SESSION_ID)
-    }
-  }
+  const handleAgentChange = useCallback(
+    async (newAgentId: string) => {
+      selectedAgentIdRef.current = newAgentId
+      setSelectedAgentId(newAgentId)
+      useMastermindStore.getState().setSelectedAgentId(newAgentId)
+      void settingsApi.set(MASTERMIND_AGENT_SETTING, newAgentId).catch(() => {})
+      await stopConversation()
+    },
+    [stopConversation]
+  )
+
+  // Peako asks for these through the shared store; this panel stays the owner.
+  useEffect(() => {
+    useMastermindStore.getState().registerActions({
+      changeAgent: handleAgentChange,
+      newConversation: stopConversation
+    })
+    return () => useMastermindStore.getState().registerActions(null)
+  }, [handleAgentChange, stopConversation])
 
   /**
    * Brings up the session, or joins the one already starting.

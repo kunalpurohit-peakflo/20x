@@ -13,6 +13,7 @@ import { useVoiceControl } from '@/hooks/use-voice-control'
 import { useUiRemoteControl } from '@/hooks/use-ui-remote-control'
 import { useRecordingChrome } from '@/hooks/use-recording-chrome'
 import { TopBarVoiceButton } from '@/components/voice/TopBarVoiceButton'
+import { PeakoBridge } from '@/components/peako/PeakoBridge'
 
 // Lazy-load heavy workspace components — only imported when their view is active.
 // This reduces the initial bundle size and speeds up first render significantly.
@@ -485,6 +486,25 @@ export function AppLayout() {
     }, 0)
   }, [setShowOrchestrator, showToast])
 
+  /**
+   * Peako's microphone: always a hands-free conversation with Mastermind, so
+   * each sentence is sent and the answer read aloud. The drawer stays closed;
+   * its composer is mounted either way, and Peako shows the chat.
+   */
+  const togglePeakoVoice = useCallback(() => {
+    const voice = useVoiceStore.getState()
+    if (!selectVoiceReady(voice)) return
+    if (voice.turnId) {
+      void voice.endTurn()
+      return
+    }
+    setActiveComposer(MASTERMIND_COMPOSER_KEY)
+    window.setTimeout(() => {
+      const mode = composerCanSubmit(MASTERMIND_COMPOSER_KEY) ? 'conversation' : 'dictation'
+      void useVoiceStore.getState().toggleTurn(mode)
+    }, 0)
+  }, [])
+
   const commandActions = useMemo(() => ({
     nextTask: () => navigateVisibleTask(1),
     previousTask: () => navigateVisibleTask(-1),
@@ -895,6 +915,9 @@ export function AppLayout() {
 
       {/* Bottom status bar — live agent/task counts + version */}
       <StatusBar />
+
+      {/* Feeds Peako's desktop window; renders nothing. */}
+      <PeakoBridge onToggleVoice={togglePeakoVoice} />
 
       {/* Create Task Dialog — dismiss on outside click */}
       <Dialog open={activeModal === 'create'} onOpenChange={(open) => { if (!open) { closeModal(); clearCreateTaskPrefill() } }}>

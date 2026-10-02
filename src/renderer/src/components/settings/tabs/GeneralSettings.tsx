@@ -10,6 +10,7 @@ import { Select } from '@/components/ui/Select'
 import { OnboardingWizard } from '@/components/onboarding/OnboardingWizard'
 import { settingsApi, mobileApi, updaterApi, worktreeApi, onWorkspaceCleanupProgress } from '@/lib/ipc-client'
 import { MASTERMIND_PREWARM_SETTING } from '@/components/orchestrator/OrchestratorPanel'
+import { PeakoSettings } from './PeakoSettings'
 
 /** Human-readable summary of a cleanup run, or null when there is nothing to report. */
 function describeCleanupOutcome(cleaned: number | undefined, nodeModulesCleaned: number | undefined): string | null {
@@ -346,6 +347,8 @@ const [currentVersion, setCurrentVersion] = useState<string | null>(null)
         </div>
       </div>
     </SettingsSection>
+
+    <PeakoSettings />
 
     <SettingsSection
       title="Connect Phone"

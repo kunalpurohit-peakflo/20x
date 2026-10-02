@@ -43,6 +43,7 @@ import { initCrashLogger } from './crash-logger'
 import { installProcessStreamErrorHandlers } from './process-stream-errors'
 import { getWindowsPathEntries, prependMissingWindowsPaths } from './windows-runtime-paths'
 import { initAnalytics, shutdownAnalytics } from './analytics-service'
+import { PeakoWindowManager } from './peako-window'
 
 /**
  * Validate that a URL is safe to open via shell.openExternal.
@@ -80,6 +81,7 @@ let claudePluginManager: ClaudePluginManager | null = null
 let enterpriseHeartbeatInstance: EnterpriseHeartbeat | null = null
 let enterpriseStateSyncInstance: EnterpriseStateSync | null = null
 let voiceSessionManager: VoiceSessionManager | null = null
+let peakoWindow: PeakoWindowManager | null = null
 let isShuttingDown = false
 
 /**
@@ -365,6 +367,9 @@ function createWindow(): void {
     setInterval(() => {
       mainWindow?.webContents.send('overdue:check')
     }, 60_000)
+
+    // Peako lives as long as the main window, which owns its session.
+    peakoWindow?.sync()
   })
 
   // Force the main window to 100% zoom on first load. Chromium persists page
@@ -485,6 +490,7 @@ function createWindow(): void {
 
   mainWindow.on('closed', () => {
     mainWindow = null
+    peakoWindow?.destroy()
     // A closed window must not keep reporting the screen it last showed.
     setTaskApiUiState(null)
   })
@@ -611,6 +617,17 @@ function buildAppMenu(): void {
   ]
 
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+}
+
+/** Brings the main window to the front, creating it again if it was closed. */
+function showMainWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow()
+    return
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
 }
 
 function createTray(): void {
@@ -1139,6 +1156,23 @@ app.whenReady().then(async () => {
   }
 
   registerIpcHandlers(db, agentManager, githubManager, worktreeManager, syncManager, pluginRegistry, mcpToolCaller, oauthManager, recurrenceScheduler, enterpriseAuth ?? undefined, claudePluginManager, heartbeatScheduler, enterpriseHeartbeatInstance ?? undefined, enterpriseStateSyncInstance ?? undefined, gitlabManager ?? undefined, workspaceCleanupScheduler ?? undefined, voiceSessionManager ?? undefined, taskAutomationScheduler ?? undefined)
+
+  const settingsDb = db
+  peakoWindow = new PeakoWindowManager({
+    getSetting: (key) => settingsDb.getSetting(key),
+    setSetting: (key, value) => settingsDb.setSetting(key, value),
+    getMainWindow: () => mainWindow,
+    showMainWindow,
+    preloadPath: join(__dirname, '../preload/peako.js'),
+    loadPage: (window) => {
+      if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
+        void window.loadURL(`${process.env['ELECTRON_RENDERER_URL']}/peako.html`)
+      } else {
+        void window.loadFile(join(__dirname, '../renderer/peako.html'))
+      }
+    }
+  })
+  peakoWindow.registerIpc()
 
   // ── Media permission handler (design §5.9) ────────────────────────────────
   // Grant the microphone only to the 20x renderer, and only while voice is on.

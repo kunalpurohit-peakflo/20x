@@ -1,0 +1,30 @@
+import { create } from 'zustand'
+import type { Agent } from '@/types'
+
+/**
+ * What the Mastermind drawer shares with Peako's bridge. The drawer stays the
+ * one owner of the session; it registers the actions others may ask for.
+ */
+interface MastermindState {
+  agents: Agent[]
+  selectedAgentId: string | null
+  changeAgent: ((agentId: string) => Promise<void>) | null
+  newConversation: (() => Promise<void>) | null
+  setAgents: (agents: Agent[]) => void
+  setSelectedAgentId: (agentId: string | null) => void
+  registerActions: (actions: {
+    changeAgent: (agentId: string) => Promise<void>
+    newConversation: () => Promise<void>
+  } | null) => void
+}
+
+export const useMastermindStore = create<MastermindState>((set) => ({
+  agents: [],
+  selectedAgentId: null,
+  changeAgent: null,
+  newConversation: null,
+  setAgents: (agents) => set({ agents }),
+  setSelectedAgentId: (selectedAgentId) => set({ selectedAgentId }),
+  registerActions: (actions) =>
+    set({ changeAgent: actions?.changeAgent ?? null, newConversation: actions?.newConversation ?? null })
+}))
