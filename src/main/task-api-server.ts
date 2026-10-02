@@ -250,6 +250,8 @@ const LIST_TASKS_DEFAULT = 50
 const LIST_TASKS_MAX = 200
 const SUMMARY_DESCRIPTION_CHARS = 200
 const OVERVIEW_ITEMS = 10
+const OVERVIEW_ITEMS_MAX = 50
+const DAY_MS = 24 * 3_600_000
 
 /** The fields a model needs to pick a task out of a list. get_task has the rest. */
 export function summarizeTask(task: Record<string, unknown>): Record<string, unknown> {
@@ -285,7 +287,14 @@ type OverviewItem = { task_id: string; title: string; agent: string | null; due_
  * what agents are doing, what is ready, late or next. It replaced four or five
  * calls, each returning whole task records, for the most common question.
  */
-export function buildOverview(db: DatabaseManager, controller: TaskApiAgentController | null, now = new Date()) {
+export function buildOverview(
+  db: DatabaseManager,
+  controller: TaskApiAgentController | null,
+  now = new Date(),
+  options: { finishedSince?: Date; perGroup?: number } = {}
+) {
+  const perGroup = Math.min(Math.max(1, Math.floor(options.perGroup ?? OVERVIEW_ITEMS)), OVERVIEW_ITEMS_MAX)
+  const finishedSince = options.finishedSince ?? new Date(now.getTime() - DAY_MS)
   const agentNames = new Map(db.getAgents().map((agent) => [agent.id, agent.name]))
   const tasks = db.getTasks().filter((task) => !(task.is_recurring && !task.recurrence_parent_id))
   const nowMs = now.getTime()
@@ -300,9 +309,10 @@ export function buildOverview(db: DatabaseManager, controller: TaskApiAgentContr
     overdue: [] as OverviewItem[],
     due_today: [] as OverviewItem[],
     up_next: [] as OverviewItem[],
-    finished_last_24h: [] as OverviewItem[]
+    finished: [] as OverviewItem[]
   }
   let snoozed = 0
+  const finishedAt = new Map<string, number>()
 
   for (const task of tasks) {
     const item: OverviewItem = {
@@ -311,7 +321,8 @@ export function buildOverview(db: DatabaseManager, controller: TaskApiAgentContr
       agent: task.agent_id ? (agentNames.get(task.agent_id) ?? null) : null
     }
     if (task.status === TaskStatus.Completed) {
-      if (nowMs - Date.parse(task.updated_at) <= 24 * 3_600_000) buckets.finished_last_24h.push(item)
+      finishedAt.set(task.id, Date.parse(task.updated_at))
+      if (Date.parse(task.updated_at) >= finishedSince.getTime()) buckets.finished.push(item)
       continue
     }
     const found = controller?.findSessionByTaskId(task.id)
@@ -331,13 +342,22 @@ export function buildOverview(db: DatabaseManager, controller: TaskApiAgentContr
     }
   }
 
+  // Newest first, so a long finished list starts with what just happened.
+  buckets.finished.sort((a, b) => (finishedAt.get(b.task_id) ?? 0) - (finishedAt.get(a.task_id) ?? 0))
+
   const counts: Record<string, number> = { snoozed }
   const lists: Record<string, OverviewItem[]> = {}
   for (const [key, items] of Object.entries(buckets)) {
     counts[key] = items.length
-    lists[key] = items.slice(0, OVERVIEW_ITEMS)
+    lists[key] = items.slice(0, perGroup)
   }
-  return { now: now.toISOString(), counts, ...lists, note: `Lists show at most ${OVERVIEW_ITEMS}; counts are complete.` }
+  return {
+    now: now.toISOString(),
+    finished_since: finishedSince.toISOString(),
+    counts,
+    ...lists,
+    note: `Each list shows at most ${perGroup}; counts are complete. For more, call list_tasks with statuses, updated_after/updated_before and offset.`
+  }
 }
 
 // ── Route handler ──────────────────────────────────────────────
@@ -428,6 +448,10 @@ export async function handleRoute(db: DatabaseManager, route: string, params: Re
         qParams.push(...statuses)
       }
       if (params.open_only === true) query += " AND status != 'completed'"
+      const updatedAfter = typeof params.updated_after === 'string' ? Date.parse(params.updated_after) : NaN
+      const updatedBefore = typeof params.updated_before === 'string' ? Date.parse(params.updated_before) : NaN
+      if (!Number.isNaN(updatedAfter)) { query += ' AND updated_at >= ?'; qParams.push(new Date(updatedAfter).toISOString()) }
+      if (!Number.isNaN(updatedBefore)) { query += ' AND updated_at < ?'; qParams.push(new Date(updatedBefore).toISOString()) }
       if (typeof params.search === 'string' && params.search.trim()) {
         const words = params.search.trim().split(/\s+/).slice(0, 8)
         for (const word of words) {
@@ -455,8 +479,10 @@ export async function handleRoute(db: DatabaseManager, route: string, params: Re
       // description, attachments and output schema.
       const requested = Number(params.limit)
       const limit = Number.isFinite(requested) && requested > 0 ? Math.min(Math.floor(requested), LIST_TASKS_MAX) : LIST_TASKS_DEFAULT
-      query += ' ORDER BY created_at DESC LIMIT ?'
-      qParams.push(limit)
+      // Older tasks are a page further back, not out of reach.
+      const offset = Math.max(0, Math.floor(Number(params.offset) || 0))
+      query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?'
+      qParams.push(limit, offset)
 
       const tasks = rawDb.prepare(query).all(...qParams) as Record<string, unknown>[]
       tasks.forEach(parseTask)
@@ -950,7 +976,14 @@ export async function handleRoute(db: DatabaseManager, route: string, params: Re
     }
 
     case '/get_overview': {
-      return buildOverview(db, agentController)
+      const finishedSince = typeof params.finished_since === 'string' ? Date.parse(params.finished_since) : NaN
+      if (params.finished_since !== undefined && Number.isNaN(finishedSince)) {
+        return { error: 'finished_since must be an ISO date' }
+      }
+      return buildOverview(db, agentController, new Date(), {
+        finishedSince: Number.isNaN(finishedSince) ? undefined : new Date(finishedSince),
+        perGroup: Number(params.per_group) || undefined
+      })
     }
 
     case '/get_recent_activity': {

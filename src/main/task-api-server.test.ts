@@ -1048,3 +1048,35 @@ describe('/get_overview', () => {
     expect(overview.counts.waiting_for_you).toBe(1)
   })
 })
+
+describe('older tasks stay reachable', () => {
+  it('pages back through list_tasks and filters by when a task last changed', async () => {
+    for (let i = 0; i < 12; i++) {
+      const task = db.createTask(makeTask({ title: `Task ${i}` }))!
+      rawDb.prepare('UPDATE tasks SET created_at = ?, updated_at = ? WHERE id = ?')
+        .run(new Date(Date.UTC(2026, 0, i + 1)).toISOString(), new Date(Date.UTC(2026, 0, i + 1)).toISOString(), task.id)
+    }
+    const second = await handleRoute(db, '/list_tasks', { limit: 5, offset: 5 }) as Array<{ title: string }>
+    expect(second.map((t) => t.title)).toEqual(['Task 6', 'Task 5', 'Task 4', 'Task 3', 'Task 2'])
+
+    const january = await handleRoute(db, '/list_tasks', { updated_before: '2026-01-03T00:00:00Z' }) as Array<{ title: string }>
+    expect(january.map((t) => t.title)).toEqual(['Task 1', 'Task 0'])
+  })
+
+  it('reports work finished over a longer window, newest first, with more per group', async () => {
+    const { buildOverview } = await import('./task-api-server')
+    const now = new Date('2026-10-02T12:00:00Z')
+    for (let day = 1; day <= 6; day++) {
+      const task = db.createTask(makeTask({ title: `Done ${day} days ago` }))!
+      db.updateTask(task.id, { status: TaskStatus.Completed })
+      rawDb.prepare('UPDATE tasks SET updated_at = ? WHERE id = ?').run(new Date(now.getTime() - day * 86_400_000 + 1000).toISOString(), task.id)
+    }
+
+    const day = buildOverview(db, null, now) as Record<string, any>
+    expect(day.counts.finished).toBe(1)
+
+    const week = buildOverview(db, null, now, { finishedSince: new Date('2026-09-25T12:00:00Z'), perGroup: 3 }) as Record<string, any>
+    expect(week.counts.finished).toBe(6)
+    expect(week.finished.map((t: { title: string }) => t.title)).toEqual(['Done 1 days ago', 'Done 2 days ago', 'Done 3 days ago'])
+  })
+})

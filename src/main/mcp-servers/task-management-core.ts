@@ -197,15 +197,24 @@ const mastermindTools: Tool[] = [
         has_agent: { type: 'boolean', description: 'Filter tasks with/without assigned agent' },
         labels: { type: 'array', items: { type: 'string' }, description: 'Filter by labels (tasks matching any of these labels)' },
         agent_id: { type: 'string', description: 'Filter by assigned agent ID' },
-        limit: { type: 'number', default: 50, description: 'Max results to return. Default 50, maximum 200.' }
+        updated_after: { type: 'string', description: 'Only tasks changed at or after this ISO date' },
+        updated_before: { type: 'string', description: 'Only tasks changed before this ISO date, for older work' },
+        limit: { type: 'number', default: 50, description: 'Max results to return. Default 50, maximum 200.' },
+        offset: { type: 'number', default: 0, description: 'Skip this many results, to page back to older tasks' }
       }
     }
   },
   {
     name: 'get_overview',
     description:
-      'One-call summary of the whole workspace: what is waiting for the user (approvals), failed, running, ready for review, overdue, due today, up next, and finished in the last 24 hours, with counts and the first few tasks of each. Call this first for "what is going on?", "what needs me?" or "what is pending?".',
-    inputSchema: { type: 'object', properties: {} }
+      'One-call summary of the whole workspace: what is waiting for the user (approvals), failed, running, ready for review, overdue, due today, up next, and what finished since finished_since (default the last 24 hours), with complete counts and the first few tasks of each. Call this first for "what is going on?", "what needs me?" or "what is pending?". For older or longer lists, use list_tasks.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        finished_since: { type: 'string', description: 'ISO date; report tasks finished since then, e.g. a week ago for "what got done this week". Default: 24 hours ago.' },
+        per_group: { type: 'number', description: 'How many tasks to show in each group. Default 10, maximum 50.' }
+      }
+    }
   },
   {
     name: 'create_task',
