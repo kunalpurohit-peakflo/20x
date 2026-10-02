@@ -322,6 +322,12 @@
    badge, column tint and status dot follows the package without touching a
    component. `html:root` outranks the light-mode shade fixes in globals.css. */
 html:root[data-theme-pack] {
+  /* "Thinking" rows are teal in Legacy; in a package they take the learning role. */
+  --color-teal-200: var(--pk-learn-text);
+  --color-teal-300: var(--pk-learn-text);
+  --color-teal-500: var(--pk-learn);
+  --color-teal-600: var(--pk-learn-deep);
+  --color-teal-700: var(--pk-learn-deep);
   --color-amber-200: var(--pk-warn-text);
   --color-amber-300: var(--pk-warn-text);
   --color-amber-400: var(--pk-warn-text);
@@ -604,4 +610,204 @@ html:root[data-theme-pack] {
 :root[data-theme-pack="peako"] button.bg-primary:active:not(:disabled) {
   transform: translateY(2px);
   box-shadow: 0 1px 0 color-mix(in oklab, var(--primary) 60%, #000);
+}
+
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Working screens
+   The screens people sit in: a task's transcript while an agent works, the
+   task list, and the canvas. Components mark what each element is with data
+   attributes (data-part, data-attention, data-task-row, data-panel-type…), so
+   these rules style meaning, not utility classes. Legacy carries no package
+   attribute and is never touched.
+
+   Shared by every package, after what agent tools do best (Conductor,
+   Superset, Cursor's agents window): anything waiting for the user is the
+   loudest thing on screen, and looks the same wherever it appears.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* Attention is its own hot orange, apart from the amber that means "agent
+   working": the two are the states people most need to tell apart. */
+html:root[data-theme-pack] {
+  --pk-attention: #e8590c;
+  --pk-attention-text: #b8430a;
+  --pk-attention-soft: color-mix(in oklab, var(--pk-attention) 12%, var(--card));
+}
+html:root.dark[data-theme-pack] {
+  --pk-attention: #ff7a33;
+  --pk-attention-text: #ffa070;
+  --pk-attention-soft: color-mix(in oklab, var(--pk-attention) 14%, var(--card));
+}
+
+/* The approval card: solid, edged, never see-through. */
+:root[data-theme-pack] [data-attention="approval"]:not([data-task-row]):not([data-canvas-panel]) {
+  background: var(--pk-attention-soft);
+  border-bottom: 1px solid color-mix(in oklab, var(--pk-attention) 35%, transparent);
+  box-shadow: inset 4px 0 0 var(--pk-attention);
+}
+
+/* A task waiting for the user: its own colour, not the learning blue. */
+:root[data-theme-pack] [data-task-row][data-attention="approval"] {
+  box-shadow: inset 3px 0 0 var(--pk-attention);
+  background: color-mix(in oklab, var(--pk-attention) 8%, transparent);
+}
+:root[data-theme-pack] [data-task-row][data-attention="approval"] [data-status-dot] {
+  background: var(--pk-attention);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--pk-attention) 30%, transparent);
+}
+
+/* A canvas panel waiting for the user stands out among many. */
+:root[data-theme-pack] [data-canvas-panel][data-attention="approval"] {
+  outline: 2px solid var(--pk-attention);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 6px color-mix(in oklab, var(--pk-attention) 18%, transparent), var(--shadow-lg);
+}
+
+/* A question from the agent also waits for the user. */
+:root[data-theme-pack] [data-part="question"] {
+  border-color: color-mix(in oklab, var(--pk-attention) 55%, transparent);
+  box-shadow: inset 3px 0 0 var(--pk-attention);
+}
+
+/* Agent answers at full contrast; tool and thinking rows stay secondary. */
+:root[data-theme-pack] [data-part="answer"] {
+  color: var(--foreground);
+}
+/* A failed tool call reads as failed without opening it. */
+:root[data-theme-pack] [data-part="tool"][data-state="error"] > button {
+  color: var(--pk-danger-text);
+  background: color-mix(in oklab, var(--pk-danger) 8%, transparent);
+}
+
+/* ── Calm Desk: for reviewing ───────────────────────────────────────────────
+   Long answers are comfortable to read; the agent's working steps recede
+   until hovered; nothing is cramped. */
+:root[data-theme-pack="calm"] [data-part="answer"] :is(p, li) {
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+:root[data-theme-pack="calm"] [data-part="answer"] {
+  max-width: 76ch;
+  padding-block: 6px;
+}
+:root[data-theme-pack="calm"] [data-part="user"] {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow-xs);
+}
+:root[data-theme-pack="calm"] [data-part="user"] :is(p, li) {
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+:root[data-theme-pack="calm"] [data-part="activity"] {
+  opacity: 0.72;
+  transition: opacity 0.15s ease;
+}
+:root[data-theme-pack="calm"] [data-part="activity"]:hover,
+:root[data-theme-pack="calm"] [data-part="activity"]:focus-within {
+  opacity: 1;
+}
+:root[data-theme-pack="calm"] [data-part="tool"][data-state="error"] {
+  opacity: 1;
+}
+:root[data-theme-pack="calm"] [data-part="question"] {
+  border-radius: 14px;
+}
+:root[data-theme-pack="calm"] [data-task-row] {
+  padding-block: 12px;
+  border-radius: 10px;
+}
+:root[data-theme-pack="calm"] [data-canvas-panel] {
+  box-shadow: var(--shadow-lg);
+}
+
+/* ── Mission Control: for running many agents ──────────────────────────────
+   Dense rows, a log-style activity feed whose rail shows each step's state,
+   and a status edge on every canvas panel so a wall of agents reads at a
+   glance. */
+:root[data-theme-pack="mission"] [data-task-row] {
+  padding-block: 6px;
+  border-radius: 4px;
+}
+:root[data-theme-pack="mission"] [data-part="user"] {
+  border-radius: 4px;
+  border-left: 2px solid var(--primary);
+}
+:root[data-theme-pack="mission"] [data-part="activity"] {
+  border-left-width: 2px;
+  border-left-color: color-mix(in oklab, var(--muted-foreground) 35%, transparent);
+}
+:root[data-theme-pack="mission"] [data-part="tool"] > button,
+:root[data-theme-pack="mission"] [data-part="thinking"] > button {
+  height: 22px;
+  border-radius: 2px;
+}
+:root[data-theme-pack="mission"] [data-part="tool"][data-state="running"] > button {
+  box-shadow: inset 2px 0 0 var(--pk-info);
+  color: var(--foreground);
+}
+:root[data-theme-pack="mission"] [data-part="tool"][data-state="error"] > button {
+  box-shadow: inset 2px 0 0 var(--pk-danger);
+}
+:root[data-theme-pack="mission"] [data-part="question"],
+:root[data-theme-pack="mission"] [data-part="error"],
+:root[data-theme-pack="mission"] [data-part="system"] {
+  border-radius: 4px;
+}
+:root[data-theme-pack="mission"] [data-canvas-panel] {
+  border-radius: 6px;
+}
+:root[data-theme-pack="mission"] [data-canvas-panel] > div {
+  border-radius: 5px;
+}
+:root[data-theme-pack="mission"] [data-canvas-panel][data-task-status] {
+  border-top-width: 3px;
+}
+:root[data-theme-pack="mission"] [data-canvas-panel][data-task-status="agent_working"] { border-top-color: var(--pk-warn); }
+:root[data-theme-pack="mission"] [data-canvas-panel][data-task-status="ready_for_review"] { border-top-color: var(--pk-review); }
+:root[data-theme-pack="mission"] [data-canvas-panel][data-task-status="agent_learning"] { border-top-color: var(--pk-learn); }
+:root[data-theme-pack="mission"] [data-canvas-panel][data-task-status="completed"] { border-top-color: var(--pk-success); }
+
+/* ── Peako World: friendly ─────────────────────────────────────────────────
+   A chat app's shapes: rounded bubbles on both sides, soft cards, and the
+   same chunky, pressable feel as its buttons. */
+:root[data-theme-pack="peako"] [data-part="user"] {
+  border-radius: 18px 18px 6px 18px;
+  background: color-mix(in oklab, var(--primary) 16%, var(--card));
+}
+:root[data-theme-pack="peako"] [data-part="answer"] {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 18px 18px 18px 6px;
+  padding: 10px 14px;
+  max-width: 92%;
+}
+:root[data-theme-pack="peako"] [data-part="answer"] :is(p, li) {
+  line-height: 1.6;
+}
+:root[data-theme-pack="peako"] [data-part="activity"] {
+  border-left: 0;
+  padding-left: 6px;
+}
+:root[data-theme-pack="peako"] [data-part="tool"] > button,
+:root[data-theme-pack="peako"] [data-part="thinking"] > button {
+  border-radius: 999px;
+}
+:root[data-theme-pack="peako"] [data-part="question"] {
+  border-radius: 18px;
+  border-width: 2px;
+}
+:root[data-theme-pack="peako"] [data-attention="approval"]:not([data-task-row]):not([data-canvas-panel]) button {
+  border-radius: 999px;
+}
+:root[data-theme-pack="peako"] [data-task-row] {
+  border-radius: 14px;
+}
+:root[data-theme-pack="peako"] [data-canvas-panel] {
+  border-radius: 20px;
+  border-width: 2px;
+}
+:root[data-theme-pack="peako"] [data-canvas-panel] > div {
+  border-radius: 18px;
 }
