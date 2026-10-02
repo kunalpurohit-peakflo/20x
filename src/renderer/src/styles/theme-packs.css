@@ -1,3 +1,23 @@
+/* Package fonts ship inside the app, like Legacy's. */
+@import "@fontsource/figtree/latin-400.css";
+@import "@fontsource/figtree/latin-500.css";
+@import "@fontsource/figtree/latin-600.css";
+@import "@fontsource/figtree/latin-700.css";
+@import "@fontsource/bricolage-grotesque/latin-600.css";
+@import "@fontsource/bricolage-grotesque/latin-700.css";
+@import "@fontsource/geist-sans/latin-400.css";
+@import "@fontsource/geist-sans/latin-500.css";
+@import "@fontsource/geist-sans/latin-600.css";
+@import "@fontsource/geist-sans/latin-700.css";
+@import "@fontsource/geist-mono/latin-400.css";
+@import "@fontsource/geist-mono/latin-500.css";
+@import "@fontsource/dm-sans/latin-400.css";
+@import "@fontsource/dm-sans/latin-500.css";
+@import "@fontsource/dm-sans/latin-600.css";
+@import "@fontsource/dm-sans/latin-700.css";
+@import "@fontsource/fredoka/latin-500.css";
+@import "@fontsource/fredoka/latin-600.css";
+
 /* ══════════════════════════════════════════════════════════════════════════
    Theme packages
    Each package overrides the design tokens from globals.css, in a light and a
@@ -6,25 +26,6 @@
    over the base :root and .dark blocks regardless of source order.
    ══════════════════════════════════════════════════════════════════════════ */
 
-/* Fonts only download when a package that uses them is active. */
-@font-face { font-family: "Figtree"; font-style: normal; font-weight: 400; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/figtree@latest/latin-400-normal.woff2") format("woff2"); }
-@font-face { font-family: "Figtree"; font-style: normal; font-weight: 500; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/figtree@latest/latin-500-normal.woff2") format("woff2"); }
-@font-face { font-family: "Figtree"; font-style: normal; font-weight: 600; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/figtree@latest/latin-600-normal.woff2") format("woff2"); }
-@font-face { font-family: "Figtree"; font-style: normal; font-weight: 700; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/figtree@latest/latin-700-normal.woff2") format("woff2"); }
-@font-face { font-family: "Bricolage Grotesque"; font-style: normal; font-weight: 600; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/bricolage-grotesque@latest/latin-600-normal.woff2") format("woff2"); }
-@font-face { font-family: "Bricolage Grotesque"; font-style: normal; font-weight: 700; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/bricolage-grotesque@latest/latin-700-normal.woff2") format("woff2"); }
-@font-face { font-family: "Geist"; font-style: normal; font-weight: 400; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/geist-sans@latest/latin-400-normal.woff2") format("woff2"); }
-@font-face { font-family: "Geist"; font-style: normal; font-weight: 500; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/geist-sans@latest/latin-500-normal.woff2") format("woff2"); }
-@font-face { font-family: "Geist"; font-style: normal; font-weight: 600; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/geist-sans@latest/latin-600-normal.woff2") format("woff2"); }
-@font-face { font-family: "Geist"; font-style: normal; font-weight: 700; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/geist-sans@latest/latin-700-normal.woff2") format("woff2"); }
-@font-face { font-family: "Geist Mono"; font-style: normal; font-weight: 400; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/geist-mono@latest/latin-400-normal.woff2") format("woff2"); }
-@font-face { font-family: "Geist Mono"; font-style: normal; font-weight: 500; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/geist-mono@latest/latin-500-normal.woff2") format("woff2"); }
-@font-face { font-family: "DM Sans"; font-style: normal; font-weight: 400; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/dm-sans@latest/latin-400-normal.woff2") format("woff2"); }
-@font-face { font-family: "DM Sans"; font-style: normal; font-weight: 500; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/dm-sans@latest/latin-500-normal.woff2") format("woff2"); }
-@font-face { font-family: "DM Sans"; font-style: normal; font-weight: 600; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/dm-sans@latest/latin-600-normal.woff2") format("woff2"); }
-@font-face { font-family: "DM Sans"; font-style: normal; font-weight: 700; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/dm-sans@latest/latin-700-normal.woff2") format("woff2"); }
-@font-face { font-family: "Fredoka"; font-style: normal; font-weight: 500; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/fredoka@latest/latin-500-normal.woff2") format("woff2"); }
-@font-face { font-family: "Fredoka"; font-style: normal; font-weight: 600; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/fredoka@latest/latin-600-normal.woff2") format("woff2"); }
 
 /* Packages may give headings their own display face; Legacy never does. */
 :root[data-theme-pack] :is(h1, h2, h3) {
@@ -173,9 +174,9 @@
   --r-lg: 8px;
   --r-xl: 10px;
   --r-2xl: 12px;
-  --font-ui: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-ui: "Geist Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   --font-code: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --font-display: "Geist", -apple-system, sans-serif;
+  --font-display: "Geist Sans", -apple-system, sans-serif;
 }
 :root.dark[data-theme-pack="mission"] {
   --background: #0b0e13;
@@ -560,4 +561,47 @@ html:root[data-theme-pack] {
   --pk-learn: #a98bff;
   --pk-learn-text: #c4b0ff;
   --pk-learn-deep: #a98bff;
+}
+
+/* ── Package character ──────────────────────────────────────────────────────
+   Colours alone made the packages look alike. Each one also sets its own type
+   size, labels and surfaces. Legacy is never touched by these rules. */
+
+/* Calm Desk: roomier type and normal tracking. */
+:root[data-theme-pack="calm"],
+:root[data-theme-pack="calm"] body,
+:root[data-theme-pack="calm"] #root {
+  font-size: 13px;
+  letter-spacing: 0;
+}
+
+/* Mission Control: dense, technical. Small uppercase labels become
+   monospace readouts, numbers line up, and chrome is solid, not frosted. */
+:root[data-theme-pack="mission"] body {
+  font-variant-numeric: tabular-nums;
+}
+:root[data-theme-pack="mission"] .uppercase {
+  font-family: var(--font-code);
+  letter-spacing: 0.08em;
+}
+:root[data-theme-pack="mission"] .frost {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  background-color: var(--chrome-solid);
+}
+
+/* Peako World: friendlier type size and chunky, pressable primary buttons. */
+:root[data-theme-pack="peako"],
+:root[data-theme-pack="peako"] body,
+:root[data-theme-pack="peako"] #root {
+  font-size: 13px;
+  letter-spacing: 0;
+}
+:root[data-theme-pack="peako"] button.bg-primary {
+  box-shadow: 0 3px 0 color-mix(in oklab, var(--primary) 60%, #000);
+  transition: transform 0.08s ease, box-shadow 0.08s ease;
+}
+:root[data-theme-pack="peako"] button.bg-primary:active:not(:disabled) {
+  transform: translateY(2px);
+  box-shadow: 0 1px 0 color-mix(in oklab, var(--primary) 60%, #000);
 }

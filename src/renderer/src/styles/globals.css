@@ -1,4 +1,11 @@
 @import "tailwindcss";
+/* Fonts ship inside the app (latin subsets), so the UI looks the same offline
+   or behind a proxy. Legacy uses Inter and JetBrains Mono. */
+@import "@fontsource/inter/latin-400.css";
+@import "@fontsource/inter/latin-500.css";
+@import "@fontsource/inter/latin-600.css";
+@import "@fontsource/inter/latin-700.css";
+@import "@fontsource/jetbrains-mono/latin-400.css";
 @import "./theme-packs.css";
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -212,29 +219,6 @@
   --color-rose-400: #e11d48;
 }
 
-/* ── Web fonts ──────────────────────────────────────────────────────────────
-   Inter (UI) + JetBrains Mono (code / tabular). CDN with strong system
-   fallbacks so the app degrades gracefully offline. */
-@font-face {
-  font-family: "Inter"; font-style: normal; font-weight: 400; font-display: swap;
-  src: url("https://cdn.jsdelivr.net/fontsource/fonts/inter@latest/latin-400-normal.woff2") format("woff2");
-}
-@font-face {
-  font-family: "Inter"; font-style: normal; font-weight: 500; font-display: swap;
-  src: url("https://cdn.jsdelivr.net/fontsource/fonts/inter@latest/latin-500-normal.woff2") format("woff2");
-}
-@font-face {
-  font-family: "Inter"; font-style: normal; font-weight: 600; font-display: swap;
-  src: url("https://cdn.jsdelivr.net/fontsource/fonts/inter@latest/latin-600-normal.woff2") format("woff2");
-}
-@font-face {
-  font-family: "Inter"; font-style: normal; font-weight: 700; font-display: swap;
-  src: url("https://cdn.jsdelivr.net/fontsource/fonts/inter@latest/latin-700-normal.woff2") format("woff2");
-}
-@font-face {
-  font-family: "JetBrains Mono"; font-style: normal; font-weight: 400; font-display: swap;
-  src: url("https://cdn.jsdelivr.net/fontsource/fonts/jetbrains-mono@latest/latin-400-normal.woff2") format("woff2");
-}
 
 /* ── Reset ──────────────────────────────────────────────────────────────── */
 @layer base {
