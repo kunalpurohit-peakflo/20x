@@ -11,6 +11,7 @@ import { OnboardingWizard } from '@/components/onboarding/OnboardingWizard'
 import { settingsApi, mobileApi, updaterApi, worktreeApi, onWorkspaceCleanupProgress } from '@/lib/ipc-client'
 import { MASTERMIND_PREWARM_SETTING } from '@/components/orchestrator/OrchestratorPanel'
 import { PeakoSettings } from './PeakoSettings'
+import { AppearanceSettings } from './AppearanceSettings'
 
 /** Human-readable summary of a cleanup run, or null when there is nothing to report. */
 function describeCleanupOutcome(cleaned: number | undefined, nodeModulesCleaned: number | undefined): string | null {
@@ -280,6 +281,8 @@ const [currentVersion, setCurrentVersion] = useState<string | null>(null)
 
   return (
     <>
+    <AppearanceSettings />
+
     <SettingsSection
       title="Application Preferences"
       description="Configure general application behavior and preferences"

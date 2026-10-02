@@ -1,0 +1,315 @@
+/* ══════════════════════════════════════════════════════════════════════════
+   Theme packages
+   Each package overrides the design tokens from globals.css, in a light and a
+   dark version. "Legacy" has no attribute and keeps the defaults untouched.
+   Selectors carry :root plus the attribute (plus .dark), so they always win
+   over the base :root and .dark blocks regardless of source order.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* Fonts only download when a package that uses them is active. */
+@font-face { font-family: "Figtree"; font-style: normal; font-weight: 400; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/figtree@latest/latin-400-normal.woff2") format("woff2"); }
+@font-face { font-family: "Figtree"; font-style: normal; font-weight: 500; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/figtree@latest/latin-500-normal.woff2") format("woff2"); }
+@font-face { font-family: "Figtree"; font-style: normal; font-weight: 600; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/figtree@latest/latin-600-normal.woff2") format("woff2"); }
+@font-face { font-family: "Figtree"; font-style: normal; font-weight: 700; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/figtree@latest/latin-700-normal.woff2") format("woff2"); }
+@font-face { font-family: "Bricolage Grotesque"; font-style: normal; font-weight: 600; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/bricolage-grotesque@latest/latin-600-normal.woff2") format("woff2"); }
+@font-face { font-family: "Bricolage Grotesque"; font-style: normal; font-weight: 700; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/bricolage-grotesque@latest/latin-700-normal.woff2") format("woff2"); }
+@font-face { font-family: "Geist"; font-style: normal; font-weight: 400; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/geist-sans@latest/latin-400-normal.woff2") format("woff2"); }
+@font-face { font-family: "Geist"; font-style: normal; font-weight: 500; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/geist-sans@latest/latin-500-normal.woff2") format("woff2"); }
+@font-face { font-family: "Geist"; font-style: normal; font-weight: 600; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/geist-sans@latest/latin-600-normal.woff2") format("woff2"); }
+@font-face { font-family: "Geist"; font-style: normal; font-weight: 700; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/geist-sans@latest/latin-700-normal.woff2") format("woff2"); }
+@font-face { font-family: "Geist Mono"; font-style: normal; font-weight: 400; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/geist-mono@latest/latin-400-normal.woff2") format("woff2"); }
+@font-face { font-family: "Geist Mono"; font-style: normal; font-weight: 500; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/geist-mono@latest/latin-500-normal.woff2") format("woff2"); }
+@font-face { font-family: "DM Sans"; font-style: normal; font-weight: 400; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/dm-sans@latest/latin-400-normal.woff2") format("woff2"); }
+@font-face { font-family: "DM Sans"; font-style: normal; font-weight: 500; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/dm-sans@latest/latin-500-normal.woff2") format("woff2"); }
+@font-face { font-family: "DM Sans"; font-style: normal; font-weight: 600; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/dm-sans@latest/latin-600-normal.woff2") format("woff2"); }
+@font-face { font-family: "DM Sans"; font-style: normal; font-weight: 700; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/dm-sans@latest/latin-700-normal.woff2") format("woff2"); }
+@font-face { font-family: "Fredoka"; font-style: normal; font-weight: 500; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/fredoka@latest/latin-500-normal.woff2") format("woff2"); }
+@font-face { font-family: "Fredoka"; font-style: normal; font-weight: 600; font-display: swap; src: url("https://cdn.jsdelivr.net/fontsource/fonts/fredoka@latest/latin-600-normal.woff2") format("woff2"); }
+
+/* Packages may give headings their own display face; Legacy never does. */
+:root[data-theme-pack] :is(h1, h2, h3) {
+  font-family: var(--font-display);
+}
+
+/* ── Calm Desk ─────────────────────────────────────────────────────────── */
+:root[data-theme-pack="calm"] {
+  --background: #f6f7f9;
+  --foreground: #15191f;
+  --card: #ffffff;
+  --card-foreground: #15191f;
+  --popover: #ffffff;
+  --popover-foreground: #15191f;
+  --primary: #1668b0;
+  --primary-foreground: #ffffff;
+  --secondary: #eff1f4;
+  --secondary-foreground: #2c333d;
+  --muted: #eff1f4;
+  --muted-foreground: #5e6672;
+  --accent: #e8ebef;
+  --accent-foreground: #15191f;
+  --destructive: #c4321f;
+  --destructive-foreground: #ffffff;
+  --success: #1e8a5a;
+  --success-foreground: #ffffff;
+  --warning: #f5a524;
+  --warning-foreground: #3a2800;
+  --border: #e4e7ec;
+  --input: #d9dde3;
+  --ring: #1668b0;
+  --sidebar: #eff1f4;
+  --sidebar-foreground: #3d4552;
+  --sidebar-border: #e4e7ec;
+  --sidebar-accent: #ffffff;
+  --sidebar-muted: #e8ebef;
+  --chrome: rgba(246, 247, 249, 0.82);
+  --chrome-solid: #f6f7f9;
+  --canvas-bg: #eef0f3;
+  --canvas-panel: #ffffff;
+  --canvas-chrome: #f6f7f9;
+  --canvas-toolbar: rgba(255, 255, 255, 0.92);
+  --canvas-dot: rgba(20, 30, 50, 0.08);
+  --shadow-xs: 0 1px 2px rgba(20, 30, 50, 0.05);
+  --shadow-sm: 0 1px 2px rgba(20, 30, 50, 0.06), 0 0 0 1px rgba(20, 30, 50, 0.03);
+  --shadow-md: 0 6px 16px -4px rgba(20, 30, 50, 0.1);
+  --shadow-lg: 0 16px 36px -10px rgba(20, 30, 50, 0.16);
+  --shadow-pop: 0 12px 32px -8px rgba(20, 30, 50, 0.18);
+  --r-xs: 6px;
+  --r-sm: 10px;
+  --r-md: 12px;
+  --r-lg: 14px;
+  --r-xl: 18px;
+  --r-2xl: 24px;
+  --font-ui: "Figtree", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-display: "Bricolage Grotesque", "Figtree", -apple-system, sans-serif;
+}
+:root.dark[data-theme-pack="calm"] {
+  --background: #111418;
+  --foreground: #e8ecf1;
+  --card: #1a1e24;
+  --card-foreground: #e8ecf1;
+  --popover: #1a1e24;
+  --popover-foreground: #e8ecf1;
+  --primary: #5aa9f0;
+  --primary-foreground: #06131f;
+  --secondary: #20252c;
+  --secondary-foreground: #e8ecf1;
+  --muted: #1d2228;
+  --muted-foreground: #9aa3ae;
+  --accent: #252b33;
+  --accent-foreground: #e8ecf1;
+  --destructive: #f06a5b;
+  --destructive-foreground: #1a0705;
+  --success: #3cc486;
+  --success-foreground: #06140d;
+  --warning: #f3b562;
+  --warning-foreground: #1a1200;
+  --border: #262b33;
+  --input: #2f353e;
+  --ring: #5aa9f0;
+  --sidebar: #0c0f12;
+  --sidebar-foreground: #c9d0d8;
+  --sidebar-border: #1d2228;
+  --sidebar-accent: #1a1e24;
+  --sidebar-muted: #161a1f;
+  --chrome: rgba(17, 20, 24, 0.78);
+  --chrome-solid: #111418;
+  --canvas-bg: #0d1013;
+  --canvas-panel: #1a1e24;
+  --canvas-chrome: #20252c;
+  --canvas-toolbar: rgba(26, 30, 36, 0.92);
+  --canvas-dot: rgba(255, 255, 255, 0.06);
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 6px 18px -4px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 18px 40px -10px rgba(0, 0, 0, 0.55);
+  --shadow-pop: 0 12px 34px -8px rgba(0, 0, 0, 0.55);
+}
+
+/* ── Mission Control ───────────────────────────────────────────────────── */
+:root[data-theme-pack="mission"] {
+  --background: #f3f5f8;
+  --foreground: #0b1220;
+  --card: #ffffff;
+  --card-foreground: #0b1220;
+  --popover: #ffffff;
+  --popover-foreground: #0b1220;
+  --primary: #0a6fc2;
+  --primary-foreground: #ffffff;
+  --secondary: #e9edf2;
+  --secondary-foreground: #1a2333;
+  --muted: #eef1f5;
+  --muted-foreground: #566273;
+  --accent: #e4e9ef;
+  --accent-foreground: #0b1220;
+  --destructive: #c8333a;
+  --destructive-foreground: #ffffff;
+  --success: #16884f;
+  --success-foreground: #ffffff;
+  --warning: #f5a524;
+  --warning-foreground: #3a2800;
+  --border: #d6dde6;
+  --input: #ccd4de;
+  --ring: #0a6fc2;
+  --sidebar: #e9edf2;
+  --sidebar-foreground: #2a3342;
+  --sidebar-border: #d6dde6;
+  --sidebar-accent: #ffffff;
+  --sidebar-muted: #e1e6ec;
+  --chrome: rgba(243, 245, 248, 0.88);
+  --chrome-solid: #f3f5f8;
+  --canvas-bg: #ebeef2;
+  --canvas-panel: #ffffff;
+  --canvas-chrome: #f3f5f8;
+  --canvas-toolbar: rgba(255, 255, 255, 0.94);
+  --canvas-dot: rgba(11, 18, 32, 0.08);
+  --shadow-xs: none;
+  --shadow-sm: 0 0 0 1px rgba(11, 18, 32, 0.04);
+  --shadow-md: 0 4px 12px -4px rgba(11, 18, 32, 0.12);
+  --shadow-lg: 0 12px 28px -8px rgba(11, 18, 32, 0.18);
+  --shadow-pop: 0 10px 26px -8px rgba(11, 18, 32, 0.2);
+  --r-xs: 3px;
+  --r-sm: 5px;
+  --r-md: 6px;
+  --r-lg: 8px;
+  --r-xl: 10px;
+  --r-2xl: 12px;
+  --font-ui: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-code: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-display: "Geist", -apple-system, sans-serif;
+}
+:root.dark[data-theme-pack="mission"] {
+  --background: #0b0e13;
+  --foreground: #e6edf5;
+  --card: #10161d;
+  --card-foreground: #e6edf5;
+  --popover: #121922;
+  --popover-foreground: #e6edf5;
+  --primary: #3fa9f5;
+  --primary-foreground: #04121f;
+  --secondary: #151c25;
+  --secondary-foreground: #e6edf5;
+  --muted: #131a22;
+  --muted-foreground: #8d9aa8;
+  --accent: #18212b;
+  --accent-foreground: #e6edf5;
+  --destructive: #f2555a;
+  --destructive-foreground: #1a0507;
+  --success: #3dd68c;
+  --success-foreground: #04140c;
+  --warning: #f5a524;
+  --warning-foreground: #1a1204;
+  --border: #1f2833;
+  --input: #263140;
+  --ring: #3fa9f5;
+  --sidebar: #0e1218;
+  --sidebar-foreground: #afbbc8;
+  --sidebar-border: #1c232d;
+  --sidebar-accent: #141b24;
+  --sidebar-muted: #11171e;
+  --chrome: rgba(11, 14, 19, 0.82);
+  --chrome-solid: #0b0e13;
+  --canvas-bg: #080b0f;
+  --canvas-panel: #10161d;
+  --canvas-chrome: #151c25;
+  --canvas-toolbar: rgba(16, 22, 29, 0.94);
+  --canvas-dot: rgba(255, 255, 255, 0.05);
+  --shadow-xs: none;
+  --shadow-sm: 0 0 0 1px rgba(255, 255, 255, 0.02);
+  --shadow-md: 0 6px 16px -6px rgba(0, 0, 0, 0.6);
+  --shadow-lg: 0 16px 36px -10px rgba(0, 0, 0, 0.7);
+  --shadow-pop: 0 12px 30px -8px rgba(0, 0, 0, 0.7);
+}
+
+/* ── Peako World ───────────────────────────────────────────────────────── */
+:root[data-theme-pack="peako"] {
+  --background: #e9f2fd;
+  --foreground: #0f2741;
+  --card: #ffffff;
+  --card-foreground: #0f2741;
+  --popover: #ffffff;
+  --popover-foreground: #0f2741;
+  --primary: #1770c2;
+  --primary-foreground: #ffffff;
+  --secondary: #dce8f7;
+  --secondary-foreground: #0f2741;
+  --muted: #e3eefb;
+  --muted-foreground: #4b6684;
+  --accent: #d7e6f8;
+  --accent-foreground: #0f2741;
+  --destructive: #d9442f;
+  --destructive-foreground: #ffffff;
+  --success: #12a67a;
+  --success-foreground: #ffffff;
+  --warning: #ffc23d;
+  --warning-foreground: #3d2800;
+  --border: #d3e3f5;
+  --input: #c4d7ee;
+  --ring: #1770c2;
+  --sidebar: #dce8f7;
+  --sidebar-foreground: #1f3a5a;
+  --sidebar-border: #cadcf2;
+  --sidebar-accent: #ffffff;
+  --sidebar-muted: #e3eefb;
+  --chrome: rgba(233, 242, 253, 0.86);
+  --chrome-solid: #e9f2fd;
+  --canvas-bg: #e1ecfa;
+  --canvas-panel: #ffffff;
+  --canvas-chrome: #e9f2fd;
+  --canvas-toolbar: rgba(255, 255, 255, 0.92);
+  --canvas-dot: rgba(15, 39, 65, 0.1);
+  --shadow-xs: 0 2px 0 #d3e3f5;
+  --shadow-sm: 0 3px 0 #d3e3f5;
+  --shadow-md: 0 4px 0 #d3e3f5, 0 10px 24px -12px rgba(15, 39, 65, 0.25);
+  --shadow-lg: 0 6px 0 #c9dcf2, 0 14px 30px -10px rgba(15, 39, 65, 0.28);
+  --shadow-pop: 0 4px 0 #c9dcf2, 0 14px 34px -10px rgba(15, 39, 65, 0.3);
+  --r-xs: 8px;
+  --r-sm: 12px;
+  --r-md: 14px;
+  --r-lg: 18px;
+  --r-xl: 22px;
+  --r-2xl: 28px;
+  --font-ui: "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-display: "Fredoka", "DM Sans", -apple-system, sans-serif;
+}
+:root.dark[data-theme-pack="peako"] {
+  --background: #0e1b2c;
+  --foreground: #eaf3ff;
+  --card: #15263b;
+  --card-foreground: #eaf3ff;
+  --popover: #172a41;
+  --popover-foreground: #eaf3ff;
+  --primary: #5fb0ff;
+  --primary-foreground: #04182c;
+  --secondary: #1b3350;
+  --secondary-foreground: #eaf3ff;
+  --muted: #172b44;
+  --muted-foreground: #a7bcd4;
+  --accent: #1e3858;
+  --accent-foreground: #eaf3ff;
+  --destructive: #ff7a6b;
+  --destructive-foreground: #2b0a05;
+  --success: #4cd4a0;
+  --success-foreground: #06301f;
+  --warning: #ffd66b;
+  --warning-foreground: #3a2e0a;
+  --border: #23405f;
+  --input: #2a4a6e;
+  --ring: #5fb0ff;
+  --sidebar: #0a1524;
+  --sidebar-foreground: #cfe0f5;
+  --sidebar-border: #1a3150;
+  --sidebar-accent: #15263b;
+  --sidebar-muted: #12223a;
+  --chrome: rgba(14, 27, 44, 0.84);
+  --chrome-solid: #0e1b2c;
+  --canvas-bg: #0a1524;
+  --canvas-panel: #15263b;
+  --canvas-chrome: #1b3350;
+  --canvas-toolbar: rgba(21, 38, 59, 0.92);
+  --canvas-dot: rgba(255, 255, 255, 0.07);
+  --shadow-xs: 0 2px 0 #08111d;
+  --shadow-sm: 0 3px 0 #08111d;
+  --shadow-md: 0 4px 0 #08111d, 0 10px 24px -12px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 6px 0 #071019, 0 14px 30px -10px rgba(0, 0, 0, 0.55);
+  --shadow-pop: 0 4px 0 #071019, 0 14px 34px -10px rgba(0, 0, 0, 0.6);
+}

@@ -4,8 +4,14 @@ import { PeakoApp } from './PeakoApp'
 import '../styles/globals.css'
 import './peako.css'
 
-// Follow the app's light or dark choice when it changes in the main window.
+// Follow the app's theme package and light or dark choice when the main window changes them.
 window.addEventListener('storage', (event) => {
+  if (event.key === 'ui-theme-pack') {
+    const pack = event.newValue
+    if (pack && pack !== 'legacy') document.documentElement.setAttribute('data-theme-pack', pack)
+    else document.documentElement.removeAttribute('data-theme-pack')
+    return
+  }
   if (event.key !== 'ui-theme') return
   const mode = event.newValue || 'dark'
   const dark = mode === 'dark' || (mode === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
