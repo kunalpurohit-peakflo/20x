@@ -300,7 +300,7 @@ function QuestionMessage({ message, onAnswer, canAnswer, searchQuery }: { messag
   }
 
   return (
-    <div className="rounded-md bg-card border border-primary/30 overflow-hidden">
+    <div data-part="question" className="rounded-md bg-card border border-primary/30 overflow-hidden">
       {questions.map((q, qi) => {
         const hasOptions = q.options && q.options.length > 0
         return (
@@ -505,7 +505,7 @@ function ToolCallMessage({ message, searchQuery }: { message: AgentMessage; sear
   const command = useMemo(() => deriveToolCommand(tool), [tool])
 
   return (
-    <div className="group/tool w-full min-w-0 overflow-hidden">
+    <div data-part="tool" data-state={isError ? 'error' : isRunning ? 'running' : 'done'} className="group/tool w-full min-w-0 overflow-hidden">
       <button
         onClick={() => setExpanded(!expanded)}
         className="flex h-6 w-full items-center gap-2 rounded-sm px-1 text-xs font-mono text-muted-foreground hover:bg-white/5 hover:text-foreground transition-colors"
@@ -558,7 +558,7 @@ function ReasoningMessage({ message, searchQuery }: { message: AgentMessage; sea
   const summary = message.content.split('\n').map((line) => line.trim()).find(Boolean) || 'Thinking'
 
   return (
-    <div className="group/tool w-full min-w-0 overflow-hidden">
+    <div data-part="thinking" className="group/tool w-full min-w-0 overflow-hidden">
       <button
         onClick={() => setExpanded(!expanded)}
         className="flex h-6 w-full items-center gap-2 rounded-sm px-1 text-xs font-mono text-teal-700/90 dark:text-teal-300/80 hover:bg-accent hover:text-teal-700 dark:hover:text-teal-200 transition-colors"
@@ -625,7 +625,7 @@ function ArtifactTranscriptCard({ artifact, onOpen }: { artifact: Artifact; onOp
 
 function ActivityMessageGroup({ messages, searchQuery, artifacts = EMPTY_ARTIFACTS, onOpenArtifact }: { messages: AgentMessage[]; searchQuery?: string; artifacts?: Artifact[]; onOpenArtifact?: (artifact: Artifact) => void }) {
   return (
-    <div className="w-full border-l border-border/30 pl-2 py-0.5">
+    <div data-part="activity" className="w-full border-l border-border/30 pl-2 py-0.5">
       {messages.map((message) => {
         if (message.partType === 'reasoning') {
           return <ReasoningMessage key={message.id} message={message} searchQuery={searchQuery} />
@@ -676,6 +676,7 @@ function MessageBubble({ message, onAnswer, canAnswerQuestion = false, searchQue
   return (
     <div className={`flex gap-2 ${isUser ? 'justify-end' : 'justify-start'} ${!isUser ? 'w-full' : ''}`}>
       <div
+        data-part={isError ? 'error' : isUser ? 'user' : isSystem ? 'system' : 'answer'}
         className={`overflow-hidden min-w-0 ${
           isError
             ? 'w-full text-red-200 border-l border-red-500/40 pl-3 py-1'
@@ -1206,7 +1207,7 @@ export function AgentTranscriptPanel({
   }
 
   return (
-    <div ref={panelRef} tabIndex={-1} className={cn('flex flex-col min-h-0 bg-background border-l border-border relative', className)}>
+    <div ref={panelRef} tabIndex={-1} data-transcript="" className={cn('flex flex-col min-h-0 bg-background border-l border-border relative', className)}>
       {/* Debug copy toast — only visible briefly after copy */}
       {debugCopyToast && (
         <div className="absolute top-12 left-1/2 -translate-x-1/2 z-50 bg-card border border-border rounded-md px-3 py-1.5 text-xs text-foreground shadow-lg animate-in fade-in duration-150">
