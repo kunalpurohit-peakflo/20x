@@ -40,6 +40,7 @@ export function TodayHome() {
   const openCreateWithPrefill = useUIStore((s) => s.openCreateWithPrefill)
   const setSidebarView = useUIStore((s) => s.setSidebarView)
   const [question, setQuestion] = useState('')
+  const assistantName = useMastermindStore((s) => s.assistantName)
   const [answering, setAnswering] = useState<Set<string>>(new Set())
 
   const sessionList = useMemo(
@@ -231,7 +232,7 @@ export function TodayHome() {
           </section>
         </main>
 
-        <aside aria-label="Ask Peako and totals" className="flex min-w-0 flex-col gap-4">
+        <aside aria-label={`Ask ${assistantName} and totals`} className="flex min-w-0 flex-col gap-4">
           <form
             onSubmit={(event) => {
               event.preventDefault()
@@ -240,7 +241,7 @@ export function TodayHome() {
             className="flex flex-col gap-3 rounded-lg border border-border bg-card p-4 shadow-card"
           >
             <label htmlFor="today-ask" className="text-[14px] font-semibold text-foreground">
-              Ask Peako
+              Ask {assistantName}
             </label>
             <textarea
               id="today-ask"
@@ -272,7 +273,7 @@ export function TodayHome() {
               <button
                 type="button"
                 onClick={() => setShowOrchestrator(true)}
-                aria-label="Open the Mastermind chat"
+                aria-label={`Open the ${assistantName} chat`}
                 className="grid h-8 w-8 cursor-pointer place-items-center rounded-md border border-border text-muted-foreground hover:text-foreground"
               >
                 <Mic className="h-4 w-4" />

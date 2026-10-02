@@ -131,7 +131,7 @@ export function PeakoSettings() {
   return (
     <SettingsSection
       title={`${name} on your desktop`}
-      description="Mastermind as a desktop buddy. It floats above other windows; click it to chat, hold a conversation by voice, or drag it anywhere."
+      description="Your assistant for everything in 20x. It floats above other windows; click it to chat, hold a conversation by voice, or drag it anywhere."
     >
       <div className="space-y-4">
         <div className="flex items-center justify-between py-2 border-b border-border">
@@ -176,7 +176,7 @@ export function PeakoSettings() {
             }
           />
           <p className="text-xs text-muted-foreground">
-            The agent {name} and the Mastermind drawer think with. Switching starts a new conversation.
+            The agent {name} thinks with, on the desktop and in its side panel. Switching starts a new conversation.
           </p>
         </div>
 

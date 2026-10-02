@@ -1056,7 +1056,12 @@ export function AgentTranscriptPanel({
       autoScrollRafRef.current = requestAnimationFrame(() => {
         autoScrollRafRef.current = null
         if (!atBottomRef.current) return
-        virtualizer.scrollToIndex(transcriptItems.length - 1, { align: 'end' })
+        // Following the bottom while text streams: one layout read and one
+        // write per frame. scrollToIndex re-reads scrollHeight and retries up
+        // to ten times while the last row is still growing, which forced a
+        // layout on nearly every frame and was most of the streaming cost.
+        const el = scrollRef.current
+        if (el) el.scrollTop = el.scrollHeight
       })
     }
     return () => {

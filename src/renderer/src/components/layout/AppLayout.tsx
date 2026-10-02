@@ -15,6 +15,7 @@ import { useRecordingChrome } from '@/hooks/use-recording-chrome'
 import { TopBarVoiceButton } from '@/components/voice/TopBarVoiceButton'
 import { PeakoBridge } from '@/components/peako/PeakoBridge'
 import { useThemeStore } from '@/stores/theme-store'
+import { useMastermindStore } from '@/stores/mastermind-store'
 import { resolveHomeLayout } from '@shared/theme-packs'
 
 // Lazy-load heavy workspace components — only imported when their view is active.
@@ -85,6 +86,7 @@ export function AppLayout() {
   const canvasPendingTaskId = useUIStore((s) => s.canvasPendingTaskId)
   const showOrchestrator = useUIStore((s) => s.showOrchestrator)
   const homeLayout = useThemeStore((s) => resolveHomeLayout(s.pack, s.layout))
+  const assistantName = useMastermindStore((s) => s.assistantName)
   const setShowOrchestrator = useUIStore((s) => s.setShowOrchestrator)
   const toggleOrchestrator = useUIStore((s) => s.toggleOrchestrator)
   const createTaskPrefill = useUIStore((s) => s.createTaskPrefill)
@@ -796,9 +798,9 @@ export function AppLayout() {
             <Settings className="h-3.5 w-3.5" />
           </button>
           <div className="mx-1 h-3.5 w-px bg-border/70" />
-          {/* Start talking to Mastermind from any view. Hidden until voice is on. */}
+          {/* Start talking to Peako from any view. Hidden until voice is on. */}
           <TopBarVoiceButton />
-          {/* Quieter than the microphone beside it: typing to Mastermind is
+          {/* Quieter than the microphone beside it: typing to Peako is
               the fallback, speaking to it is the invitation. */}
           <Button
             variant={showOrchestrator ? 'default' : 'ghost'}
@@ -807,7 +809,7 @@ export function AppLayout() {
             className="h-7 px-2"
           >
             <MessageSquare className="h-3 w-3" />
-            <span className="text-[11px]">Mastermind</span>
+            <span className="text-[11px]">{assistantName}</span>
           </Button>
         </div>
       </div>
@@ -903,7 +905,7 @@ export function AppLayout() {
           </div>
         </main>
 
-        {/* Mastermind drawer — sits beside the workspace, shifts main content left */}
+        {/* Peako's chat drawer — sits beside the workspace, shifts main content left */}
         <div
           className={`flex-shrink-0 transition-all duration-200 ease-in-out overflow-hidden ${
             showOrchestrator ? 'w-[340px]' : 'w-0'

@@ -18,6 +18,7 @@ interface OrchestratorPanelProps {
 
 export function OrchestratorPanel({ onClose }: OrchestratorPanelProps) {
   const agents = useMastermindStore((state) => state.agents)
+  const assistantName = useMastermindStore((s) => s.assistantName)
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
   const { start, stop, sendMessage, approve } = useAgentSession(MASTERMIND_SESSION_ID)
   const currentSession = useAgentStore((state) => state.sessions.get(MASTERMIND_SESSION_ID))
@@ -214,7 +215,7 @@ export function OrchestratorPanel({ onClose }: OrchestratorPanelProps) {
       {/* Chat interface */}
       {selectedAgentId && (
         <AgentTranscriptPanel
-          title="Mastermind den"
+          title={assistantName}
           messages={currentSession?.messages || []}
           status={currentSession?.status || SessionStatus.IDLE}
           systemStatus={currentSession?.systemStatus}

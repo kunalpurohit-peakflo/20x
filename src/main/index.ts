@@ -495,6 +495,9 @@ function createWindow(): void {
     setTaskApiUiState(null)
   })
 
+  // Peako must stay above this window whenever it comes forward.
+  peakoWindow?.watchMainWindow(mainWindow)
+
   // Set main window for managers
   agentManager?.setMainWindow(mainWindow)
   worktreeManager?.setMainWindow(mainWindow)

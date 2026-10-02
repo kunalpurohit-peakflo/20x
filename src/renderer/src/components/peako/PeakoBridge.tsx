@@ -171,6 +171,7 @@ export function PeakoBridge({ onToggleVoice }: PeakoBridgeProps) {
         .get(PEAKO_SETTING_KEYS.name)
         .then((value) => {
           name = normalizePeakoName(value)
+          useMastermindStore.getState().setAssistantName(name)
           schedule()
         })
         .catch(() => {})
@@ -212,6 +213,7 @@ export function PeakoBridge({ onToggleVoice }: PeakoBridgeProps) {
           return
         case 'rename':
           name = normalizePeakoName(command.name)
+          useMastermindStore.getState().setAssistantName(name)
           window.dispatchEvent(new CustomEvent(PEAKO_SETTINGS_CHANGED_EVENT))
           schedule()
           return

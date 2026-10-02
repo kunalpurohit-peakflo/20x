@@ -1,11 +1,15 @@
 import { create } from 'zustand'
 import type { Agent } from '@/types'
+import { PEAKO_DEFAULT_NAME } from '@shared/peako'
 
 /**
  * What the Mastermind drawer shares with Peako's bridge. The drawer stays the
  * one owner of the session; it registers the actions others may ask for.
  */
 interface MastermindState {
+  /** What the user calls the assistant (default "Peako"); every label uses it. */
+  assistantName: string
+  setAssistantName: (name: string) => void
   agents: Agent[]
   selectedAgentId: string | null
   changeAgent: ((agentId: string) => Promise<void>) | null
@@ -25,6 +29,8 @@ interface MastermindState {
 }
 
 export const useMastermindStore = create<MastermindState>((set) => ({
+  assistantName: PEAKO_DEFAULT_NAME,
+  setAssistantName: (assistantName) => set({ assistantName }),
   agents: [],
   selectedAgentId: null,
   changeAgent: null,

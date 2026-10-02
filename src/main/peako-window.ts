@@ -104,6 +104,10 @@ export class PeakoWindowManager {
   private window: BrowserWindow | null = null
   private layout: PeakoLayout = COLLAPSED
   private mascot: Point | null = null
+  /** Where Peako's window should be. Never read back from the OS: under
+   *  fractional display scaling the reported size is rounded up, and writing
+   *  it back made the window grow on every drag step. */
+  private bounds: Rectangle | null = null
   private lastState: PeakoState | null = null
   private ipcRegistered = false
 
@@ -128,6 +132,7 @@ export class PeakoWindowManager {
   destroy(): void {
     const win = this.window
     this.window = null
+    this.bounds = null
     this.layout = COLLAPSED
     if (win && !win.isDestroyed()) win.destroy()
   }
@@ -169,12 +174,8 @@ export class PeakoWindowManager {
 
     ipcMain.on(PEAKO_CHANNELS.dragMove, (event, x: unknown, y: unknown) => {
       if (!this.isFromPeako(event) || typeof x !== 'number' || typeof y !== 'number') return
-      if (!Number.isFinite(x) || !Number.isFinite(y)) return
-      const win = this.window!
-      const { width, height } = win.getBounds()
-      // setBounds with a fixed size: setPosition alone lets a transparent
-      // window creep larger under fractional display scaling on Windows.
-      win.setBounds({ x: Math.round(x), y: Math.round(y), width, height })
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !this.bounds) return
+      this.place({ ...this.bounds, x: Math.round(x), y: Math.round(y) })
     })
 
     ipcMain.on(PEAKO_CHANNELS.dragEnd, (event) => {
@@ -204,7 +205,6 @@ export class PeakoWindowManager {
     const bounds = this.fitToDisplay(peakoWindowBounds(this.mascot, this.layout))
     this.mascot = peakoMascotOrigin(bounds, this.layout)
 
-    const isMac = process.platform === 'darwin'
     const isWindows = process.platform === 'win32'
     const win = new BrowserWindow({
       ...bounds,
@@ -231,16 +231,9 @@ export class PeakoWindowManager {
       }
     })
     this.window = win
-
-    // 'floating' keeps Peako above normal windows on every platform. On macOS
-    // it must also join every Space and float over full-screen apps; skipping
-    // the process-type change keeps 20x's Dock icon.
-    win.setAlwaysOnTop(true, 'floating')
-    if (isMac) {
-      win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true })
-    } else {
-      win.setVisibleOnAllWorkspaces(true)
-    }
+    this.bounds = bounds
+    this.lockSize(win, bounds)
+    this.keepOnTop()
 
     win.webContents.setWindowOpenHandler(({ url }) => {
       if (/^https?:\/\//i.test(url)) void shell.openExternal(url)
@@ -249,7 +242,10 @@ export class PeakoWindowManager {
     win.webContents.on('will-navigate', (event) => event.preventDefault())
     win.once('ready-to-show', () => {
       // Never steal focus from what the user is doing.
-      if (!win.isDestroyed()) win.showInactive()
+      if (win.isDestroyed()) return
+      win.showInactive()
+      // Some window managers ignore "on top" until the window is shown.
+      this.keepOnTop()
     })
     win.on('closed', () => {
       if (this.window === win) this.window = null
@@ -258,25 +254,69 @@ export class PeakoWindowManager {
     this.deps.loadPage(win)
   }
 
+  /**
+   * Re-applies "on top". On macOS, joining every Space can reset the window
+   * level, and 'floating' sits below full-screen windows, so Peako uses the
+   * screen-saver level there. Called at creation, after showing, and whenever
+   * the main window comes forward or changes full-screen state.
+   */
+  keepOnTop(): void {
+    const win = this.window
+    if (!win || win.isDestroyed()) return
+    if (process.platform === 'darwin') {
+      win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true })
+      win.setAlwaysOnTop(true, 'screen-saver', 1)
+    } else {
+      win.setVisibleOnAllWorkspaces(true)
+      win.setAlwaysOnTop(true, 'screen-saver')
+    }
+    if (win.isVisible()) win.moveTop()
+  }
+
+  /** Keeps Peako above the main window whenever that window comes forward. */
+  watchMainWindow(main: BrowserWindow): void {
+    const reassert = (): void => this.keepOnTop()
+    for (const name of ['focus', 'show', 'restore', 'enter-full-screen', 'leave-full-screen'] as const) {
+      main.on(name as 'focus', reassert)
+    }
+  }
+
+  /** Moves the window to exactly these bounds; the size never drifts. */
+  private place(bounds: Rectangle): void {
+    const win = this.window
+    if (!win || win.isDestroyed()) return
+    this.bounds = bounds
+    win.setBounds(bounds)
+  }
+
+  /** Pins the window to one size, so the OS cannot round it larger. */
+  private lockSize(win: BrowserWindow, bounds: Rectangle): void {
+    win.setMinimumSize(bounds.width, bounds.height)
+    win.setMaximumSize(bounds.width, bounds.height)
+  }
+
   private setExpanded(expanded: boolean): void {
     const win = this.window
-    if (!win || win.isDestroyed() || this.layout.expanded === expanded) return
-    const mascot = peakoMascotOrigin(win.getBounds(), this.layout)
-    const workArea = screen.getDisplayMatching(win.getBounds()).workArea
+    if (!win || win.isDestroyed() || !this.bounds || this.layout.expanded === expanded) return
+    const mascot = peakoMascotOrigin(this.bounds, this.layout)
+    const workArea = screen.getDisplayMatching(this.bounds).workArea
     this.layout = expanded ? choosePeakoLayout(mascot, workArea) : COLLAPSED
     const bounds = clampRect(peakoWindowBounds(mascot, this.layout), workArea)
     this.mascot = peakoMascotOrigin(bounds, this.layout)
-    win.setBounds(bounds)
+    // Unlock first: a window locked at the old size refuses the new one.
+    win.setMinimumSize(1, 1)
+    win.setMaximumSize(10_000, 10_000)
+    this.place(bounds)
+    this.lockSize(win, bounds)
     this.sendToPeako(PEAKO_CHANNELS.layout, this.layout)
     if (expanded) win.focus()
   }
 
   /** Pulls Peako back onto a screen after a drag or a display change, and saves where it is. */
   private settleIntoDisplay(): void {
-    const win = this.window
-    if (!win || win.isDestroyed()) return
-    const bounds = this.fitToDisplay(win.getBounds())
-    win.setBounds(bounds)
+    if (!this.window || this.window.isDestroyed() || !this.bounds) return
+    const bounds = this.fitToDisplay(this.bounds)
+    this.place(bounds)
     this.mascot = peakoMascotOrigin(bounds, this.layout)
     this.deps.setSetting(PEAKO_SETTING_KEYS.position, JSON.stringify(this.mascot))
   }

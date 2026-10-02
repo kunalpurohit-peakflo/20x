@@ -16,6 +16,11 @@ import {
 } from '@/lib/voice-dictation-target'
 import type { VoiceUiContext } from '@shared/voice'
 
+/** How long a finished sentence waits for the user to carry on before it is sent. */
+export const VOICE_SENTENCE_JOIN_MS = 700
+/** The longest a sentence is held while the user keeps talking. */
+export const VOICE_SENTENCE_HOLD_MAX_MS = 8000
+
 /**
  * Connects voice control to the application shell. Mount it once.
  *
@@ -99,10 +104,28 @@ export function useVoiceControl(): void {
       if (!inserted) useVoiceStore.setState({ testTranscript: text.trim() })
     })
 
-    // A conversation stays open: each pause finishes one sentence, the sentence
-    // is sent, and the microphone keeps listening for the next one.
-    const offSegment = voiceApi.onSegment(({ turnId, text }) => {
-      const composer = getActiveComposer()
+    // A conversation stays open: each pause finishes one sentence and the
+    // microphone keeps listening. Sentences are held for a moment before they
+    // are sent, and joined if the user carries on talking, so a thought with a
+    // pause in the middle reaches the agent as one message instead of two that
+    // interrupt each other.
+    let held: { turnId: string; composer: string | null; texts: string[] } | null = null
+    let flushTimer: number | null = null
+    let fallbackTimer: number | null = null
+
+    const clearTimers = () => {
+      if (flushTimer !== null) window.clearTimeout(flushTimer)
+      if (fallbackTimer !== null) window.clearTimeout(fallbackTimer)
+      flushTimer = null
+      fallbackTimer = null
+    }
+
+    const flush = () => {
+      clearTimers()
+      const batch = held
+      held = null
+      if (!batch || batch.texts.length === 0) return
+      const text = batch.texts.join(' ')
       const sent = insertAndSubmit(text)
       if (sent) {
         useVoiceStore.setState((state) => ({
@@ -115,11 +138,33 @@ export function useVoiceControl(): void {
         // The sentence has gone to an agent, so the answer that comes back is
         // the reply to it and may be read aloud. Without this the loop stops
         // after one turn: 20x hears the reply but never speaks the answer.
-        void voiceApi.expectAnswer(turnId, taskIdOfComposer(composer))
+        void voiceApi.expectAnswer(batch.turnId, taskIdOfComposer(batch.composer))
       } else {
         // No composer to send from — show it instead of losing it.
         useVoiceStore.setState({ testTranscript: text })
       }
+    }
+
+    const offSegment = voiceApi.onSegment(({ turnId, text }) => {
+      if (held && held.turnId !== turnId) flush()
+      if (!held) held = { turnId, composer: getActiveComposer(), texts: [] }
+      held.texts.push(text)
+      // The words are queued to send, so the listening bubble starts fresh.
+      useVoiceStore.setState({ partial: '' })
+      clearTimers()
+      flushTimer = window.setTimeout(flush, VOICE_SENTENCE_JOIN_MS)
+    })
+
+    // Words arriving while a sentence is held mean the user is still talking:
+    // wait for the next pause instead, but never hold on for ever.
+    const offPartial = useVoiceStore.subscribe((state, previous) => {
+      if (held && state.partial && state.partial !== previous.partial && flushTimer !== null) {
+        window.clearTimeout(flushTimer)
+        flushTimer = null
+        if (fallbackTimer === null) fallbackTimer = window.setTimeout(flush, VOICE_SENTENCE_HOLD_MAX_MS)
+      }
+      // The microphone closed: send what is held straight away.
+      if (held && previous.turnId && !state.turnId) flush()
     })
 
     return () => {
@@ -127,6 +172,8 @@ export function useVoiceControl(): void {
       offHotkey()
       offDictate()
       offSegment()
+      offPartial()
+      flush()
     }
   }, [toggleTurn])
 }
