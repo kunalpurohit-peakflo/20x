@@ -14,6 +14,7 @@ import {
   setActiveComposer,
   taskIdOfComposer
 } from '@/lib/voice-dictation-target'
+import { isNoise, spokenEcho } from '@/lib/voice-echo'
 import type { VoiceUiContext } from '@shared/voice'
 
 /** How long a finished sentence waits for the user to carry on before it is sent. */
@@ -99,6 +100,10 @@ export function useVoiceControl(): void {
     // microphone button claimed. Without this, every mounted transcript panel
     // would receive the same sentence.
     const offDictate = voiceApi.onDictate(({ text }) => {
+      if (isNoise(text)) {
+        clearActiveComposer()
+        return
+      }
       const inserted = insertDictation(text)
       clearActiveComposer()
       if (!inserted) useVoiceStore.setState({ testTranscript: text.trim() })
@@ -146,6 +151,12 @@ export function useVoiceControl(): void {
     }
 
     const offSegment = voiceApi.onSegment(({ turnId, text }) => {
+      // A cough decoded as "uh", or 20x's own answer heard through the
+      // loudspeaker, is not something the user said and must not be sent.
+      if (isNoise(text) || spokenEcho.isEcho(text)) {
+        console.info('[voice] dropped a sentence that was noise or an echo of the answer', { text })
+        return
+      }
       if (held && held.turnId !== turnId) flush()
       if (!held) held = { turnId, composer: getActiveComposer(), texts: [] }
       held.texts.push(text)
