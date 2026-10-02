@@ -47,3 +47,20 @@ export const THEME_PACKS: ThemePackInfo[] = [
 export function isThemePackId(value: unknown): value is ThemePackId {
   return typeof value === 'string' && THEME_PACKS.some((pack) => pack.id === value)
 }
+
+/** Which home layout to show: the theme package's own, or a fixed one. */
+export type LayoutChoice = 'match' | ThemePackId
+export const LAYOUT_STORAGE_KEY = 'ui-layout'
+
+/** Packages that ship their own home screen; the rest use Legacy's. */
+export const PACKS_WITH_HOME_LAYOUT: ThemePackId[] = ['legacy', 'calm']
+
+export function isLayoutChoice(value: unknown): value is LayoutChoice {
+  return value === 'match' || isThemePackId(value)
+}
+
+/** The home layout actually shown for a package and a layout choice. */
+export function resolveHomeLayout(pack: ThemePackId, choice: LayoutChoice): ThemePackId {
+  const wanted = choice === 'match' ? pack : choice
+  return PACKS_WITH_HOME_LAYOUT.includes(wanted) ? wanted : 'legacy'
+}

@@ -1,8 +1,11 @@
 import { create } from 'zustand'
 import {
   DEFAULT_THEME_PACK,
+  LAYOUT_STORAGE_KEY,
   THEME_PACK_STORAGE_KEY,
+  isLayoutChoice,
   isThemePackId,
+  type LayoutChoice,
   type ThemePackId
 } from '@shared/theme-packs'
 
@@ -40,10 +43,13 @@ interface ThemeState {
   resolved: 'light' | 'dark'
   /** Which theme package styles the app. */
   pack: ThemePackId
+  /** Home layout: follow the package, or a fixed one. */
+  layout: LayoutChoice
   setMode: (mode: ThemeMode) => void
   /** Flip between light and dark, pinning an explicit preference. */
   toggle: () => void
   setPack: (pack: ThemePackId) => void
+  setLayout: (layout: LayoutChoice) => void
 }
 
 function readStorage(key: string): string | null {
@@ -65,6 +71,8 @@ function writeStorage(key: string, value: string): void {
 const initialMode: ThemeMode = (readStorage(STORAGE_KEY) as ThemeMode | null) ?? 'dark'
 const storedPack = readStorage(THEME_PACK_STORAGE_KEY)
 const initialPack: ThemePackId = isThemePackId(storedPack) ? storedPack : DEFAULT_THEME_PACK
+const storedLayout = readStorage(LAYOUT_STORAGE_KEY)
+const initialLayout: LayoutChoice = isLayoutChoice(storedLayout) ? storedLayout : 'match'
 
 export const useThemeStore = create<ThemeState>((set, get) => {
   // Apply immediately (the index.html pre-paint script already set the class to
@@ -85,6 +93,7 @@ export const useThemeStore = create<ThemeState>((set, get) => {
     mode: initialMode,
     resolved,
     pack: initialPack,
+    layout: initialLayout,
     setMode: (mode) => {
       writeStorage(STORAGE_KEY, mode)
       set({ mode, resolved: applyMode(mode) })
@@ -98,6 +107,10 @@ export const useThemeStore = create<ThemeState>((set, get) => {
       writeStorage(THEME_PACK_STORAGE_KEY, pack)
       applyPack(pack)
       set({ pack })
+    },
+    setLayout: (layout) => {
+      writeStorage(LAYOUT_STORAGE_KEY, layout)
+      set({ layout })
     }
   }
 })

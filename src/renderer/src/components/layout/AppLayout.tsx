@@ -14,12 +14,15 @@ import { useUiRemoteControl } from '@/hooks/use-ui-remote-control'
 import { useRecordingChrome } from '@/hooks/use-recording-chrome'
 import { TopBarVoiceButton } from '@/components/voice/TopBarVoiceButton'
 import { PeakoBridge } from '@/components/peako/PeakoBridge'
+import { useThemeStore } from '@/stores/theme-store'
+import { resolveHomeLayout } from '@shared/theme-packs'
 
 // Lazy-load heavy workspace components — only imported when their view is active.
 // This reduces the initial bundle size and speeds up first render significantly.
 const SkillWorkspace = lazy(() => import('@/components/skills/SkillWorkspace').then(m => ({ default: m.SkillWorkspace })))
 const SettingsWorkspace = lazy(() => import('@/components/settings/SettingsWorkspace').then(m => ({ default: m.SettingsWorkspace })))
 const DashboardWorkspace = lazy(() => import('@/components/dashboard/DashboardWorkspace').then(m => ({ default: m.DashboardWorkspace })))
+const TodayHome = lazy(() => import('@/components/dashboard/TodayHome').then(m => ({ default: m.TodayHome })))
 const OrchestratorPanel = lazy(() => import('@/components/orchestrator/OrchestratorPanel').then(m => ({ default: m.OrchestratorPanel })))
 import { useTasks } from '@/hooks/use-tasks'
 import { useUIStore } from '@/stores/ui-store'
@@ -81,6 +84,7 @@ export function AppLayout() {
   const closeDashboardPreview = useUIStore((s) => s.closeDashboardPreview)
   const canvasPendingTaskId = useUIStore((s) => s.canvasPendingTaskId)
   const showOrchestrator = useUIStore((s) => s.showOrchestrator)
+  const homeLayout = useThemeStore((s) => resolveHomeLayout(s.pack, s.layout))
   const setShowOrchestrator = useUIStore((s) => s.setShowOrchestrator)
   const toggleOrchestrator = useUIStore((s) => s.toggleOrchestrator)
   const createTaskPrefill = useUIStore((s) => s.createTaskPrefill)
@@ -875,7 +879,7 @@ export function AppLayout() {
               </Suspense>
             ) : sidebarView === 'dashboard' ? (
               <Suspense fallback={<div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">Loading...</div>}>
-                <DashboardWorkspace />
+                {homeLayout === 'calm' ? <TodayHome /> : <DashboardWorkspace />}
               </Suspense>
             ) : sidebarView === 'skills' ? (
               <Suspense fallback={<div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">Loading...</div>}>
