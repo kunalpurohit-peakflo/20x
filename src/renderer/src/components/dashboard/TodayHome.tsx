@@ -4,10 +4,11 @@ import { useTaskStore } from '@/stores/task-store'
 import { useAgentStore } from '@/stores/agent-store'
 import { useUIStore } from '@/stores/ui-store'
 import { agentSessionApi } from '@/lib/ipc-client'
+import { captureAnalyticsEvent } from '@/lib/analytics'
+import { useMastermindStore } from '@/stores/mastermind-store'
 import { buildTodayModel, greetingFor, needsYouHeadline, type NeedsYouItem } from '@/lib/today-model'
 import { cn } from '@/lib/utils'
 
-const WEEKDAYS = ['M', 'T', 'W', 'T', 'F', 'S', 'S']
 const SECTION_LABEL = 'text-[12px] font-semibold uppercase tracking-[0.06em] text-muted-foreground'
 
 function formatDue(due: string | null): string {
@@ -54,14 +55,12 @@ export function TodayHome() {
   const model = useMemo(() => buildTodayModel(tasks, sessionList), [tasks, sessionList])
   const agentName = (id: string | null) => agents.find((agent) => agent.id === id)?.name ?? 'An agent'
   const now = new Date()
-  const doneThisWeek = model.week.reduce((sum, count) => sum + count, 0)
-  const busiest = Math.max(1, ...model.week)
 
   const askPeako = (text: string) => {
     const message = text.trim()
     if (!message) return
     setShowOrchestrator(true)
-    window.dispatchEvent(new CustomEvent('mastermind-prefill', { detail: { message } }))
+    void useMastermindStore.getState().send?.(message).catch(console.error)
     setQuestion('')
   }
 
@@ -69,6 +68,13 @@ export function TodayHome() {
     setAnswering((prev) => new Set(prev).add(item.sessionId))
     try {
       await agentSessionApi.approve(item.sessionId, approved)
+      captureAnalyticsEvent('agent_approval_responded', {
+        task_id: item.taskId,
+        session_id: item.sessionId,
+        approved,
+        has_message: false,
+        source: 'today_home'
+      })
     } catch (error) {
       console.error('[TodayHome] Failed to answer approval:', error)
     } finally {
@@ -225,7 +231,7 @@ export function TodayHome() {
           </section>
         </main>
 
-        <aside aria-label="Ask Peako and progress" className="flex min-w-0 flex-col gap-4">
+        <aside aria-label="Ask Peako and totals" className="flex min-w-0 flex-col gap-4">
           <form
             onSubmit={(event) => {
               event.preventDefault()
@@ -281,22 +287,21 @@ export function TodayHome() {
             </div>
           </form>
 
-          <section aria-labelledby="today-week" className="flex flex-col gap-3.5 rounded-lg border border-border bg-card p-4 shadow-card">
-            <div className="flex items-baseline justify-between">
-              <h2 id="today-week" className="text-[14px] font-semibold text-foreground">This week</h2>
-              <span className="text-[13px] text-muted-foreground">{doneThisWeek} done</span>
-            </div>
-            <div className="grid h-24 grid-cols-7 items-end gap-2">
-              {model.week.map((count, index) => (
-                <div key={index} className="flex h-full flex-col items-center justify-end gap-1.5" title={`${count} done`}>
-                  <span
-                    className={cn('w-full rounded-sm', index === model.todayIndex ? 'bg-primary' : 'bg-primary/20')}
-                    style={{ height: `${Math.max(4, (count / busiest) * 72)}px`, opacity: index > model.todayIndex ? 0.35 : 1 }}
-                  />
-                  <span className="text-[12px] text-muted-foreground">{WEEKDAYS[index]}</span>
+          <section aria-labelledby="today-glance" className="flex flex-col gap-3 rounded-lg border border-border bg-card p-4 shadow-card">
+            <h2 id="today-glance" className="text-[14px] font-semibold text-foreground">At a glance</h2>
+            <dl className="grid grid-cols-2 gap-3">
+              {[
+                { label: 'Need you', value: model.needsYou.length },
+                { label: 'Running', value: model.running.length },
+                { label: 'Not started', value: model.totals.notStarted },
+                { label: 'Done', value: model.totals.completed }
+              ].map((stat) => (
+                <div key={stat.label} className="flex flex-col gap-0.5 rounded-md bg-muted px-3 py-2.5">
+                  <dt className="text-[12px] text-muted-foreground">{stat.label}</dt>
+                  <dd className="text-[22px] font-semibold tabular-nums text-foreground">{stat.value}</dd>
                 </div>
               ))}
-            </div>
+            </dl>
           </section>
         </aside>
       </div>

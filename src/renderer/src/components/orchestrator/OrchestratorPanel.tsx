@@ -6,9 +6,8 @@ import { useAgentStore, SessionStatus } from '@/stores/agent-store'
 import { useAgentSession } from '@/hooks/use-agent-session'
 import { agentApi, settingsApi } from '@/lib/ipc-client'
 import { useMastermindStore } from '@/stores/mastermind-store'
-import { MASTERMIND_AGENT_SETTING } from '@shared/peako'
+import { MASTERMIND_AGENT_SETTING, MASTERMIND_SESSION_ID } from '@shared/peako'
 
-const MASTERMIND_SESSION_ID = 'mastermind-session'
 
 /** Start the agent at app start, so the first sentence does not wait for it. */
 export const MASTERMIND_PREWARM_SETTING = 'mastermind_prewarm'
@@ -63,6 +62,9 @@ export function OrchestratorPanel({ onClose }: OrchestratorPanelProps) {
   }, [])
 
   const stopConversation = useCallback(async () => {
+    // A start still in flight would re-add the old session after we remove
+    // it, so let it land first and then stop what it started.
+    if (startingRef.current) await startingRef.current.catch(() => {})
     if (useAgentStore.getState().sessions.get(MASTERMIND_SESSION_ID)?.sessionId) {
       await stop()
     }
@@ -81,15 +83,6 @@ export function OrchestratorPanel({ onClose }: OrchestratorPanelProps) {
     },
     [stopConversation]
   )
-
-  // Peako asks for these through the shared store; this panel stays the owner.
-  useEffect(() => {
-    useMastermindStore.getState().registerActions({
-      changeAgent: handleAgentChange,
-      newConversation: stopConversation
-    })
-    return () => useMastermindStore.getState().registerActions(null)
-  }, [handleAgentChange, stopConversation])
 
   /**
    * Brings up the session, or joins the one already starting.
@@ -145,6 +138,20 @@ export function OrchestratorPanel({ onClose }: OrchestratorPanelProps) {
     },
     [ensureSession, sendMessage, approve]
   )
+
+  const answerApproval = useCallback((approved: boolean) => approve(approved), [approve])
+
+  // Peako and the Today home ask for these through the shared store; this
+  // panel stays the one owner of the Mastermind session.
+  useEffect(() => {
+    useMastermindStore.getState().registerActions({
+      changeAgent: handleAgentChange,
+      newConversation: stopConversation,
+      send: handleSendMessage,
+      approve: answerApproval
+    })
+    return () => useMastermindStore.getState().registerActions(null)
+  }, [handleAgentChange, stopConversation, handleSendMessage, answerApproval])
 
   /**
    * Start the agent in the background, before there is anything to say.

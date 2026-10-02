@@ -1,13 +1,16 @@
 import type { AgentMessage } from '@/stores/agent-store'
-import type { PeakoChatMessage, PeakoMood } from '@shared/peako'
+import { MASTERMIND_SESSION_ID, type PeakoChatMessage, type PeakoMood } from '@shared/peako'
 
-export const PEAKO_SESSION_ID = 'mastermind-session'
+export const PEAKO_SESSION_ID = MASTERMIND_SESSION_ID
 /** How long with nothing happening before Peako dozes off. */
 export const PEAKO_SLEEP_AFTER_MS = 30 * 60 * 1000
 /** How long Peako celebrates a finished task. */
 export const PEAKO_PARTY_MS = 6000
 const MAX_MESSAGES = 40
 const MAX_TEXT = 4000
+const MAX_SCANNED_PARTS = 300
+/** Tool states after which a question can no longer be answered. */
+const CLOSED_TOOL_STATES = new Set(['completed', 'cancelled', 'error'])
 
 export interface PeakoMoodInput {
   listening: boolean
@@ -65,7 +68,8 @@ function clip(text: string): string {
  */
 export function toPeakoMessages(messages: AgentMessage[]): PeakoChatMessage[] {
   const out: PeakoChatMessage[] = []
-  for (const message of messages) {
+  // Only the tail can reach the 40 shown, so a long transcript costs the same as a short one.
+  for (const message of messages.slice(-MAX_SCANNED_PARTS)) {
     const partType = message.partType ?? 'text'
     if (message.role === 'user') {
       if (message.content.trim()) out.push({ id: message.id, role: 'user', text: clip(message.content) })
@@ -73,11 +77,12 @@ export function toPeakoMessages(messages: AgentMessage[]): PeakoChatMessage[] {
     }
     if (partType === 'question' && message.tool?.questions?.length) {
       const question = message.tool.questions[0]
+      const open = !CLOSED_TOOL_STATES.has(message.tool.status)
       out.push({
         id: message.id,
         role: 'question',
         text: clip(question.question || question.header || message.content),
-        options: question.options.map((option) => option.label).filter(Boolean).slice(0, 6)
+        options: open ? question.options.map((option) => option.label).filter(Boolean).slice(0, 6) : undefined
       })
       continue
     }

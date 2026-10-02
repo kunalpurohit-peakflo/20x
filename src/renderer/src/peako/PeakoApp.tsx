@@ -85,7 +85,16 @@ export function PeakoApp() {
 function Mascot({ state, expanded, onToggle }: { state: PeakoState; expanded: boolean; onToggle: () => void }) {
   const drag = useRef<{ pointerX: number; pointerY: number; windowX: number; windowY: number; moved: boolean } | null>(null)
   const frame = useRef<number | null>(null)
+  const pendingMove = useRef<{ x: number; y: number } | null>(null)
   const [dragging, setDragging] = useState(false)
+
+  const flushMove = () => {
+    if (frame.current !== null) cancelAnimationFrame(frame.current)
+    frame.current = null
+    const move = pendingMove.current
+    pendingMove.current = null
+    if (move) api.dragMove(move.x, move.y)
+  }
 
   const onPointerDown = (event: PointerEvent<HTMLButtonElement>) => {
     if (event.button !== 0) return
@@ -110,11 +119,8 @@ function Mascot({ state, expanded, onToggle }: { state: PeakoState; expanded: bo
       setDragging(true)
     }
     // One move per frame keeps IPC calm while following the pointer.
-    if (frame.current !== null) cancelAnimationFrame(frame.current)
-    frame.current = requestAnimationFrame(() => {
-      frame.current = null
-      api.dragMove(current.windowX + dx, current.windowY + dy)
-    })
+    pendingMove.current = { x: current.windowX + dx, y: current.windowY + dy }
+    if (frame.current === null) frame.current = requestAnimationFrame(flushMove)
   }
 
   const onPointerUp = () => {
@@ -123,6 +129,8 @@ function Mascot({ state, expanded, onToggle }: { state: PeakoState; expanded: bo
     if (!current) return
     if (current.moved) {
       setDragging(false)
+      // The last move must land before main settles and saves the position.
+      flushMove()
       api.dragEnd()
     } else {
       onToggle()
@@ -217,7 +225,8 @@ function ChatPanel({ state, renaming, setRenaming, onClose }: ChatPanelProps) {
   const logRef = useRef<HTMLDivElement>(null)
   const busy = state.status === 'working'
   const lastMessage = state.messages[state.messages.length - 1]
-  const openQuestion = lastMessage?.role === 'question' ? lastMessage : null
+  const [answeredQuestionId, setAnsweredQuestionId] = useState<string | null>(null)
+  const openQuestion = lastMessage?.role === 'question' && lastMessage.id !== answeredQuestionId ? lastMessage : null
 
   useEffect(() => {
     if (!renaming) inputRef.current?.focus()
@@ -330,7 +339,15 @@ function ChatPanel({ state, renaming, setRenaming, onClose }: ChatPanelProps) {
         {openQuestion?.options && openQuestion.options.length > 0 && (
           <div className="peako-chips">
             {openQuestion.options.map((option) => (
-              <button key={option} type="button" className="peako-chip" onClick={() => submit(option)}>
+              <button
+                key={option}
+                type="button"
+                className="peako-chip"
+                onClick={() => {
+                  setAnsweredQuestionId(openQuestion.id)
+                  submit(option)
+                }}
+              >
                 {option}
               </button>
             ))}
@@ -379,7 +396,7 @@ function ChatPanel({ state, renaming, setRenaming, onClose }: ChatPanelProps) {
                 : `Talk to ${state.name}`
               : 'Turn on voice in Settings → Voice'
           }
-          onClick={() => (state.voice.available ? send({ type: 'voice' }) : send({ type: 'openSettings' }))}
+          onClick={() => (state.voice.available ? send({ type: 'voice' }) : send({ type: 'openSettings', tab: 'voice' }))}
         >
           <MicIcon />
         </button>

@@ -1,10 +1,19 @@
-import { describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { TaskStatus } from '@/types'
 import { buildTodayModel, greetingFor, needsYouHeadline, type TodayTask } from './today-model'
 
 // Thursday 1 October 2026, 09:30 local time.
 const NOW = new Date(2026, 9, 1, 9, 30)
 const day = (offset: number) => new Date(2026, 9, 1 + offset, 12).toISOString()
+
+// The overdue and snooze rules come from lib/utils and read the clock.
+beforeAll(() => {
+  vi.useFakeTimers()
+  vi.setSystemTime(NOW)
+})
+afterAll(() => {
+  vi.useRealTimers()
+})
 
 function task(id: string, status: TaskStatus, extra: Partial<TodayTask> = {}): TodayTask {
   return {
@@ -16,7 +25,6 @@ function task(id: string, status: TaskStatus, extra: Partial<TodayTask> = {}): T
     agent_id: null,
     snoozed_until: null,
     parent_task_id: null,
-    updated_at: day(0),
     ...extra
   }
 }
@@ -30,8 +38,7 @@ describe('buildTodayModel', () => {
         task('r2', TaskStatus.ReadyForReview, { due_date: day(-1) }),
         task('o', TaskStatus.NotStarted, { due_date: day(-2) })
       ],
-      [{ taskId: 'a', sessionId: 's1', status: 'waiting_approval', pendingApproval: { action: 'run tests', description: '' } }],
-      NOW
+      [{ taskId: 'a', sessionId: 's1', status: 'waiting_approval', pendingApproval: { action: 'run tests', description: '' } }]
     )
     expect(model.needsYou.map((item) => `${item.kind}:${item.taskId}`)).toEqual([
       'approval:a',
@@ -52,8 +59,7 @@ describe('buildTodayModel', () => {
         task('hi-late', TaskStatus.NotStarted, { priority: 'high', due_date: day(5) }),
         task('hi-soon', TaskStatus.NotStarted, { priority: 'high', due_date: day(1) })
       ],
-      [],
-      NOW
+      []
     )
     expect(model.running.map((item) => `${item.taskId}:${item.status}`)).toEqual(['w:working', 't:triaging'])
     expect(model.upNext.map((item) => item.taskId)).toEqual(['hi-soon', 'hi-late', 'low'])
@@ -65,25 +71,22 @@ describe('buildTodayModel', () => {
         task('sub', TaskStatus.NotStarted, { parent_task_id: 'p' }),
         task('snoozed', TaskStatus.NotStarted, { snoozed_until: day(1) })
       ],
-      [],
-      NOW
+      []
     )
     expect(model.upNext).toEqual([])
   })
 
-  it('counts completed tasks per day of this week', () => {
+  it('totals not-started and completed top-level tasks', () => {
     const model = buildTodayModel(
       [
-        task('mon', TaskStatus.Completed, { updated_at: day(-3) }),
-        task('thu1', TaskStatus.Completed, { updated_at: day(0) }),
-        task('thu2', TaskStatus.Completed, { updated_at: day(0) }),
-        task('lastweek', TaskStatus.Completed, { updated_at: day(-8) })
+        task('n', TaskStatus.NotStarted),
+        task('c1', TaskStatus.Completed),
+        task('c2', TaskStatus.Completed),
+        task('sub', TaskStatus.Completed, { parent_task_id: 'c1' })
       ],
-      [],
-      NOW
+      []
     )
-    expect(model.todayIndex).toBe(3)
-    expect(model.week).toEqual([1, 0, 0, 2, 0, 0, 0])
+    expect(model.totals).toEqual({ notStarted: 1, completed: 2 })
   })
 })
 

@@ -1,4 +1,5 @@
 import { TaskStatus } from '@/types'
+import { isOverdue, isSnoozed } from '@/lib/utils'
 
 /** The fields the Today home reads from a task. */
 export interface TodayTask {
@@ -10,7 +11,6 @@ export interface TodayTask {
   agent_id: string | null
   snoozed_until: string | null
   parent_task_id: string | null
-  updated_at: string
 }
 
 export interface TodaySession {
@@ -29,40 +29,21 @@ export interface TodayModel {
   needsYou: NeedsYouItem[]
   running: { taskId: string; title: string; status: 'working' | 'triaging'; agentId: string | null }[]
   upNext: { taskId: string; title: string; due: string | null; priority: string }[]
-  /** Tasks finished on each day of the current week, Monday first. */
-  week: number[]
-  /** 0 = Monday … 6 = Sunday. */
-  todayIndex: number
+  /** Totals for the at-a-glance card. Tasks keep no completion date, so no per-day history. */
+  totals: { notStarted: number; completed: number }
 }
 
 const PRIORITY_RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 }
 const UP_NEXT_LIMIT = 6
-
-function startOfDay(date: Date): number {
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()
-}
-
-function isOverdue(due: string | null, now: Date): boolean {
-  return due != null && startOfDay(new Date(due)) < startOfDay(now)
-}
-
-function isSnoozed(until: string | null, now: Date): boolean {
-  return until != null && new Date(until) > now
-}
-
-/** Monday-first index of a date's weekday. */
-function weekdayIndex(date: Date): number {
-  return (date.getDay() + 6) % 7
-}
 
 /**
  * Sorts tasks and sessions into what the Today home shows: what needs the
  * user, what agents are doing, and what comes next. Subtasks and snoozed
  * tasks stay out of the lists.
  */
-export function buildTodayModel(tasks: TodayTask[], sessions: TodaySession[], now = new Date()): TodayModel {
+export function buildTodayModel(tasks: TodayTask[], sessions: TodaySession[]): TodayModel {
   const byId = new Map(tasks.map((task) => [task.id, task]))
-  const visible = tasks.filter((task) => !task.parent_task_id && !isSnoozed(task.snoozed_until, now))
+  const visible = tasks.filter((task) => !task.parent_task_id && !isSnoozed(task.snoozed_until))
   const needsYou: NeedsYouItem[] = []
   const listed = new Set<string>()
 
@@ -81,14 +62,14 @@ export function buildTodayModel(tasks: TodayTask[], sessions: TodaySession[], no
 
   const reviews = visible
     .filter((task) => task.status === TaskStatus.ReadyForReview && !listed.has(task.id))
-    .sort((a, b) => Number(isOverdue(b.due_date, now)) - Number(isOverdue(a.due_date, now)))
+    .sort((a, b) => Number(isOverdue(b.due_date)) - Number(isOverdue(a.due_date)))
   for (const task of reviews) {
-    needsYou.push({ kind: 'review', taskId: task.id, title: task.title, overdue: isOverdue(task.due_date, now), agentId: task.agent_id })
+    needsYou.push({ kind: 'review', taskId: task.id, title: task.title, overdue: isOverdue(task.due_date), agentId: task.agent_id })
     listed.add(task.id)
   }
 
   for (const task of visible) {
-    if (listed.has(task.id) || task.status !== TaskStatus.NotStarted || !isOverdue(task.due_date, now)) continue
+    if (listed.has(task.id) || task.status !== TaskStatus.NotStarted || !isOverdue(task.due_date)) continue
     needsYou.push({ kind: 'overdue', taskId: task.id, title: task.title })
     listed.add(task.id)
   }
@@ -115,17 +96,12 @@ export function buildTodayModel(tasks: TodayTask[], sessions: TodaySession[], no
     .slice(0, UP_NEXT_LIMIT)
     .map((task) => ({ taskId: task.id, title: task.title, due: task.due_date, priority: task.priority }))
 
-  const todayIndex = weekdayIndex(now)
-  const weekStart = startOfDay(now) - todayIndex * 86_400_000
-  const week = [0, 0, 0, 0, 0, 0, 0]
-  for (const task of tasks) {
-    if (task.status !== TaskStatus.Completed) continue
-    const day = startOfDay(new Date(task.updated_at))
-    const index = Math.round((day - weekStart) / 86_400_000)
-    if (index >= 0 && index <= todayIndex) week[index]++
+  const totals = {
+    notStarted: visible.filter((task) => task.status === TaskStatus.NotStarted).length,
+    completed: tasks.filter((task) => task.status === TaskStatus.Completed && !task.parent_task_id).length
   }
 
-  return { needsYou, running, upNext, week, todayIndex }
+  return { needsYou, running, upNext, totals }
 }
 
 /** "Two things need you." for the headline. */

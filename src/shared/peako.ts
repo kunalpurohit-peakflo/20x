@@ -15,6 +15,9 @@ export const PEAKO_SETTING_KEYS = {
   position: 'peako_position'
 } as const
 
+/** The pseudo-task id the Mastermind session runs under (main uses the same literal). */
+export const MASTERMIND_SESSION_ID = 'mastermind-session'
+
 /** The agent Mastermind (and so Peako) runs on. Shared with the drawer. */
 export const MASTERMIND_AGENT_SETTING = 'mastermind_agent_id'
 
@@ -95,7 +98,7 @@ export type PeakoCommand =
   | { type: 'newChat' }
   | { type: 'setAgent'; agentId: string }
   | { type: 'rename'; name: string }
-  | { type: 'openSettings' }
+  | { type: 'openSettings'; tab?: 'general' | 'voice' }
   | { type: 'openApp' }
   | { type: 'hide' }
 
@@ -137,6 +140,8 @@ export function isPeakoCommand(value: unknown): value is PeakoCommand {
       return typeof command.agentId === 'string' && command.agentId.length > 0
     case 'rename':
       return typeof command.name === 'string'
+    case 'openSettings':
+      return command.tab === undefined || command.tab === 'general' || command.tab === 'voice'
     default:
       return true
   }

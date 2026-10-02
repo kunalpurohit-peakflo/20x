@@ -88,8 +88,10 @@ export function PeakoSettings() {
   }
 
   /**
-   * Changing the model never edits an agent your tasks use: the first change
-   * copies the chosen agent into one of Peako's own, and later changes edit that.
+   * Changing the model never edits an agent your tasks use. Peako keeps one
+   * agent of its own: the first change creates it as a copy of the chosen
+   * agent, and every later change rewrites that same agent, so copies never
+   * pile up.
    */
   const saveModel = async () => {
     const nextModel = model.trim()
@@ -98,16 +100,18 @@ export function PeakoSettings() {
     setMessage(null)
     try {
       const ownId = await settingsApi.get(PEAKO_OWN_AGENT_SETTING)
-      let targetId = selected.id
-      if (selected.id === ownId) {
-        await agentApi.update(selected.id, { config: { ...selected.config, model: nextModel } })
+      const own = agents.find((agent) => agent.id === ownId)
+      const fields = {
+        name: `${normalizePeakoName(name)}'s brain`,
+        server_url: selected.server_url,
+        config: { ...selected.config, model: nextModel }
+      }
+      let targetId: string
+      if (own) {
+        await agentApi.update(own.id, fields)
+        targetId = own.id
       } else {
-        const created = await agentApi.create({
-          name: `${normalizePeakoName(name)} (${selected.name})`,
-          server_url: selected.server_url,
-          config: { ...selected.config, model: nextModel },
-          is_default: false
-        })
+        const created = await agentApi.create({ ...fields, is_default: false })
         await settingsApi.set(PEAKO_OWN_AGENT_SETTING, created.id)
         targetId = created.id
       }
@@ -205,7 +209,7 @@ export function PeakoSettings() {
             </Button>
           </div>
           <p className="text-xs text-muted-foreground">
-            Changing it gives {name} its own copy of the agent, so your other agents keep their models.{' '}
+            Changing it gives {name} one agent of its own (shown in Agents as “{name}&apos;s brain”), so your other agents keep their models.{' '}
             <button type="button" className="text-primary hover:underline" onClick={openAgents}>
               More agent options
             </button>

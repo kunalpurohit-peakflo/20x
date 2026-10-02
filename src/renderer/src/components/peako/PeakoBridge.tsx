@@ -129,19 +129,28 @@ export function PeakoBridge({ onToggleVoice }: PeakoBridgeProps) {
       timer = window.setTimeout(publish, PUBLISH_DELAY_MS)
     }
 
+    // Completed tasks are history until a full load has landed; a task event
+    // arriving before the first fetch must not make old work look new.
+    let sawLoading = useTaskStore.getState().isLoading
+    let baselineReady = !sawLoading && useTaskStore.getState().tasks.length > 0
+
     const watchTasks = () => {
-      const tasks = useTaskStore.getState().tasks
+      const { tasks, isLoading } = useTaskStore.getState()
       const completed = new Set(tasks.filter((task) => task.status === TaskStatus.Completed).map((task) => task.id))
-      // The first load is history, not news.
-      if (knownCompleted && tasks.length > 0) {
-        const fresh = tasks.find((task) => completed.has(task.id) && !knownCompleted!.has(task.id))
-        if (fresh) {
-          celebrateUntil = Date.now() + PEAKO_PARTY_MS
-          say(`Done: ${fresh.title}`)
-          window.setTimeout(schedule, PEAKO_PARTY_MS + 50)
-        }
+      if (!baselineReady) {
+        knownCompleted = completed
+        if (isLoading) sawLoading = true
+        else if (sawLoading) baselineReady = true
+        schedule()
+        return
       }
-      if (tasks.length > 0) knownCompleted = completed
+      const fresh = knownCompleted && tasks.find((task) => completed.has(task.id) && !knownCompleted!.has(task.id))
+      if (fresh) {
+        celebrateUntil = Date.now() + PEAKO_PARTY_MS
+        say(`Done: ${fresh.title}`)
+        window.setTimeout(schedule, PEAKO_PARTY_MS + 50)
+      }
+      knownCompleted = completed
       schedule()
     }
 
@@ -182,12 +191,10 @@ export function PeakoBridge({ onToggleVoice }: PeakoBridgeProps) {
           lastActivityAt = Date.now()
           // The drawer's own send path: it starts the session if needed and
           // answers an open question instead of sending a new message.
-          window.dispatchEvent(new CustomEvent('mastermind-prefill', { detail: { message: command.text } }))
+          void useMastermindStore.getState().send?.(command.text).catch(console.error)
           return
         case 'approve':
-          if (mastermind?.sessionId) {
-            void agentSessionApi.approve(mastermind.sessionId, command.approved).catch(console.error)
-          }
+          void useMastermindStore.getState().approve?.(command.approved).catch(console.error)
           return
         case 'stop':
           if (mastermind?.sessionId) void agentSessionApi.abort(mastermind.sessionId).catch(console.error)
@@ -209,7 +216,7 @@ export function PeakoBridge({ onToggleVoice }: PeakoBridgeProps) {
           schedule()
           return
         case 'openSettings':
-          useUIStore.getState().setSettingsTab(SettingsTab.GENERAL)
+          useUIStore.getState().setSettingsTab(command.tab === 'voice' ? SettingsTab.VOICE : SettingsTab.GENERAL)
           useUIStore.getState().openSettings()
           return
         default:

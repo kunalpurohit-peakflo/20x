@@ -111,6 +111,22 @@ describe('toPeakoMessages', () => {
     })
   })
 
+  it('drops the choices once a question is answered or cancelled', () => {
+    const [question] = toPeakoMessages([
+      message({
+        id: 'q',
+        role: 'assistant',
+        partType: 'question',
+        tool: {
+          name: 'question',
+          status: 'completed',
+          questions: [{ header: 'Pick', question: 'Which one?', options: [{ label: 'A', description: '' }] }]
+        }
+      })
+    ])
+    expect(question.options).toBeUndefined()
+  })
+
   it('keeps only the latest 40 messages', () => {
     const many = Array.from({ length: 60 }, (_, i) => message({ id: String(i), role: 'user', content: `m${i}` }))
     const out = toPeakoMessages(many)
