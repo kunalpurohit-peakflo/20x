@@ -1,4 +1,6 @@
 import { finishSessionFeedback, updateTaskFromUser } from './session-feedback'
+import { withPeakoIdentity } from './peako-identity'
+import { PEAKO_SETTING_KEYS } from '../shared/peako'
 import { serverTaskSnapshot } from './workflo-task-sync'
 import { EventEmitter } from 'events'
 import { spawn } from 'child_process'
@@ -929,7 +931,7 @@ export class AgentManager extends EventEmitter {
       workspaceDir: workspaceDir || this.db.getWorkspaceDir(taskId),
       model: agent.config?.model,
       reasoningEffort: agent.config?.reasoning_effort,
-      systemPrompt: baseSystemPrompt,
+      systemPrompt: withPeakoIdentity(taskId, baseSystemPrompt, this.db.getSetting(PEAKO_SETTING_KEYS.name)),
       mcpServers,
       authMethod: agent.config?.auth_method,
       permissionMode: agent.config?.permission_mode,
@@ -1598,7 +1600,7 @@ export class AgentManager extends EventEmitter {
       workspaceDir,
       model: agent.config?.model,
       reasoningEffort: agent.config?.reasoning_effort,
-      systemPrompt: agent.config?.system_prompt,
+      systemPrompt: withPeakoIdentity(taskId, agent.config?.system_prompt, this.db.getSetting(PEAKO_SETTING_KEYS.name)),
       mcpServers,
       authMethod: agent.config?.auth_method,
       permissionMode: agent.config?.permission_mode,
@@ -2892,7 +2894,7 @@ If a PR, deploy, or linked issue should be checked after this task, write \`hear
       workspaceDir,
       model: agent.config?.model,
       reasoningEffort: agent.config?.reasoning_effort,
-      systemPrompt: baseSystemPrompt,
+      systemPrompt: withPeakoIdentity(taskId, baseSystemPrompt, this.db.getSetting(PEAKO_SETTING_KEYS.name)),
       mcpServers,
       authMethod: agent.config?.auth_method,
       permissionMode: agent.config?.permission_mode,
