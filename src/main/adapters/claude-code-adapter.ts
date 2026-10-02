@@ -17,6 +17,7 @@ import type {
   MessagePart,
 } from './coding-agent-adapter'
 import { SessionStatusType, MessagePartType, MessageRole } from './coding-agent-adapter'
+import { pickWindowsWhichMatch, resolveWindowsClaudeShim } from './claude-executable'
 
 type ClaudeSDK = typeof import('@anthropic-ai/claude-agent-sdk')
 type Query = import('@anthropic-ai/claude-agent-sdk').Query
@@ -161,11 +162,17 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
       const whichCmd = isWin ? 'where' : 'which'
       const binaryName = 'claude'
       const { stdout } = await execFileAsync(whichCmd, [binaryName])
-      let found = stdout.trim().split(/\r?\n/)[0]
+      const matches = stdout.trim().split(/\r?\n/).filter(Boolean)
+
+      // On Windows, `where claude` can list npm's extensionless POSIX shim
+      // ahead of the `.cmd`/`.exe` wrapper, and spawning that shim fails —
+      // see pickWindowsWhichMatch. Other platforms keep the first line.
+      let found = isWin ? pickWindowsWhichMatch(matches) : matches[0]
+      if (!found) throw new Error('claude not found on PATH')
 
       // On Windows, the SDK spawns the executable directly without shell,
-      // so .cmd files fail with EINVAL. Resolve .cmd → the underlying cli.js
-      // so the SDK uses `node cli.js` instead.
+      // so .cmd files fail with EINVAL. Resolve .cmd → the underlying
+      // binary/cli.js so the SDK spawns that directly instead.
       if (isWin) {
         found = await this.resolveWindowsCmdToJs(found)
       }
@@ -237,30 +244,11 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
   private async resolveWindowsCmdToJs(cmdPath: string): Promise<string> {
     try {
       const { readFileSync, existsSync } = await import('fs')
-      const { join, dirname } = await import('path')
-
-      // Try the known npm global layout first: same dir as .cmd → node_modules/@anthropic-ai/claude-code/cli.js
-      const cmdDir = dirname(cmdPath)
-      const cliJs = join(cmdDir, 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js')
-      if (existsSync(cliJs)) {
-        console.log(`[ClaudeCodeAdapter] Resolved .cmd → ${cliJs}`)
-        return cliJs
+      const resolved = resolveWindowsClaudeShim(cmdPath, { existsSync, readFileSync })
+      if (resolved !== cmdPath) {
+        console.log(`[ClaudeCodeAdapter] Resolved ${cmdPath} → ${resolved}`)
       }
-
-      // Parse the .cmd file to extract the JS path
-      const content = readFileSync(cmdPath, 'utf8')
-      const match = content.match(/"[^"]*node(?:\.exe)?"[^"]*"([^"]+\.js)"/)
-        || content.match(/node(?:\.exe)?\s+"([^"]+\.js)"/)
-        || content.match(/node(?:\.exe)?\s+([^\s]+\.js)/)
-      if (match?.[1]) {
-        const resolvedJs = match[1].includes('%dp0%')
-          ? match[1].replace(/%dp0%/g, cmdDir + '\\')
-          : match[1]
-        if (existsSync(resolvedJs)) {
-          console.log(`[ClaudeCodeAdapter] Parsed .cmd → ${resolvedJs}`)
-          return resolvedJs
-        }
-      }
+      return resolved
     } catch (err) {
       console.warn(`[ClaudeCodeAdapter] Failed to resolve .cmd to .js:`, err)
     }
