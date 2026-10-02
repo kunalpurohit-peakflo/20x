@@ -108,7 +108,7 @@ export function TodayHome() {
 
           {model.needsYou.length > 0 && (
             <section aria-labelledby="today-needs" className="flex flex-col gap-2.5">
-              <h2 id="today-needs" className="text-[12px] font-semibold uppercase tracking-[0.06em] text-amber-600 dark:text-amber-400">
+              <h2 id="today-needs" className="text-[12px] font-semibold uppercase tracking-[0.06em] text-foreground">
                 Needs you
               </h2>
               {model.needsYou.map((item) => (
@@ -119,7 +119,7 @@ export function TodayHome() {
                   <span
                     className={cn(
                       'grid h-9 w-9 shrink-0 place-items-center rounded-md',
-                      item.kind === 'review' ? 'bg-pink-500/10 text-pink-600 dark:text-pink-400' : 'bg-amber-500/10 text-amber-600 dark:text-amber-400'
+                      item.kind === 'review' ? 'bg-primary/10 text-primary' : 'bg-warning/20 text-foreground'
                     )}
                   >
                     {item.kind === 'review' ? <GitPullRequest className="h-4 w-4" /> : <AlertTriangle className="h-4 w-4" />}
