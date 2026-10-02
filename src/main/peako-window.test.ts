@@ -75,6 +75,20 @@ describe('Peako commands and names', () => {
     expect(isPeakoCommand({ type: 'approve', approved: false })).toBe(true)
     expect(isPeakoCommand({ type: 'setAgent', agentId: 'a1' })).toBe(true)
     expect(isPeakoCommand({ type: 'voice' })).toBe(true)
+    expect(isPeakoCommand({ type: 'focusTask', taskId: 't1' })).toBe(true)
+    expect(isPeakoCommand({ type: 'focusTask', taskId: null })).toBe(true)
+    expect(isPeakoCommand({ type: 'taskSend', taskId: 't1', text: 'Use the staging DB' })).toBe(true)
+    expect(isPeakoCommand({ type: 'taskApprove', taskId: 't1', approved: true })).toBe(true)
+    expect(isPeakoCommand({ type: 'taskStop', taskId: 't1' })).toBe(true)
+    expect(isPeakoCommand({ type: 'openTask', taskId: 't1' })).toBe(true)
+  })
+
+  it('refuses task commands without a task or a message', () => {
+    expect(isPeakoCommand({ type: 'focusTask' })).toBe(false)
+    expect(isPeakoCommand({ type: 'taskSend', taskId: 't1', text: ' ' })).toBe(false)
+    expect(isPeakoCommand({ type: 'taskSend', taskId: '', text: 'hi' })).toBe(false)
+    expect(isPeakoCommand({ type: 'taskApprove', taskId: 't1' })).toBe(false)
+    expect(isPeakoCommand({ type: 'openTask', taskId: 7 })).toBe(false)
   })
 
   it('refuses anything off-schema', () => {

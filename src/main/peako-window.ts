@@ -335,6 +335,7 @@ export class PeakoWindowManager {
         this.sendToMain({ type: 'enabledChanged', enabled: false })
         return
       case 'openSettings':
+      case 'openTask':
         this.deps.showMainWindow()
         this.sendToMain(command)
         return

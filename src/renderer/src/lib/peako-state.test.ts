@@ -6,7 +6,9 @@ import {
   agentModelLabel,
   countSessions,
   derivePeakoMood,
+  findOpenQuestion,
   toPeakoMessages,
+  toPeakoTasks,
   type PeakoMoodInput
 } from './peako-state'
 
@@ -140,5 +142,58 @@ describe('agentModelLabel', () => {
     expect(agentModelLabel({ model: ' claude-sonnet-5 ' })).toBe('claude-sonnet-5')
     expect(agentModelLabel({ model: '' })).toBeNull()
     expect(agentModelLabel(null)).toBeNull()
+  })
+})
+
+describe('toPeakoTasks', () => {
+  const task = (id: string, status: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    title: `Task ${id}`,
+    status,
+    agent_id: 'a1',
+    snoozed_until: null,
+    ...extra
+  })
+  const names = new Map([['a1', 'Backend']])
+
+  it('puts what needs the user first, then running, review, and up next', () => {
+    const tasks = [task('next', 'not_started'), task('review', 'ready_for_review'), task('run', 'agent_working'), task('ask', 'agent_working')]
+    const sessions = new Map([['ask', { taskId: 'ask', status: 'working', pendingApproval: { sessionId: 's' } }]])
+    expect(toPeakoTasks(tasks, sessions, names).map((t) => [t.id, t.group])).toEqual([
+      ['ask', 'needs'],
+      ['run', 'running'],
+      ['review', 'review'],
+      ['next', 'next']
+    ])
+  })
+
+  it('leaves out finished and snoozed work', () => {
+    const later = new Date(Date.now() + 3_600_000).toISOString()
+    const tasks = [task('done', 'completed'), task('later', 'not_started', { snoozed_until: later })]
+    expect(toPeakoTasks(tasks, new Map(), names)).toEqual([])
+  })
+
+  it('names the agent, and says nothing when none is assigned', () => {
+    const tasks = [task('1', 'not_started'), task('2', 'not_started', { agent_id: null })]
+    expect(toPeakoTasks(tasks, new Map(), names).map((t) => t.agentName)).toEqual(['Backend', null])
+  })
+})
+
+describe('findOpenQuestion', () => {
+  const question = (status: string) =>
+    message({
+      id: 'q',
+      role: 'assistant',
+      partType: 'question',
+      tool: { name: 'question', status, questions: [{ question: 'Which DB?', header: '', options: [] }] }
+    } as Partial<AgentMessage> & Pick<AgentMessage, 'id' | 'role'>)
+
+  it('finds a question the agent is still waiting on', () => {
+    expect(findOpenQuestion([message({ id: '1', role: 'user', content: 'go' }), question('running')])?.id).toBe('q')
+  })
+
+  it('ignores a question already answered or closed', () => {
+    expect(findOpenQuestion([question('running'), message({ id: '2', role: 'user', content: 'staging' })])).toBeNull()
+    expect(findOpenQuestion([question('completed')])).toBeNull()
   })
 })

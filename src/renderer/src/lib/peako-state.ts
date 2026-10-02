@@ -1,5 +1,12 @@
 import type { AgentMessage } from '@/stores/agent-store'
-import { MASTERMIND_SESSION_ID, type PeakoChatMessage, type PeakoMood } from '@shared/peako'
+import { isSnoozed } from '@/lib/utils'
+import {
+  MASTERMIND_SESSION_ID,
+  type PeakoChatMessage,
+  type PeakoMood,
+  type PeakoTaskGroup,
+  type PeakoTaskItem
+} from '@shared/peako'
 
 export const PEAKO_SESSION_ID = MASTERMIND_SESSION_ID
 /** How long with nothing happening before Peako dozes off. */
@@ -42,6 +49,69 @@ interface SessionLike {
   taskId: string
   status: string
   pendingApproval: unknown
+}
+
+/** The most tasks Peako lists; the rest are a click away in 20x. */
+export const PEAKO_MAX_TASKS = 80
+
+interface TaskLike {
+  id: string
+  title: string
+  status: string
+  agent_id: string | null
+  snoozed_until?: string | null
+}
+
+const GROUP_ORDER: PeakoTaskGroup[] = ['needs', 'running', 'review', 'next']
+
+/**
+ * Where a task belongs in Peako's list, or null when it is not open work:
+ * finished, or snoozed until later.
+ */
+export function peakoTaskGroup(task: TaskLike, session: SessionLike | undefined): PeakoTaskGroup | null {
+  if (task.status === 'completed') return null
+  if (session?.pendingApproval || session?.status === 'waiting_approval') return 'needs'
+  if (session?.status === 'working') return 'running'
+  if (task.status === 'agent_working' || task.status === 'triaging' || task.status === 'agent_learning') return 'running'
+  if (task.status === 'ready_for_review') return 'review'
+  if (isSnoozed(task.snoozed_until ?? null)) return null
+  return 'next'
+}
+
+/** Open tasks, most urgent group first, keeping the user's own order inside a group. */
+export function toPeakoTasks(
+  tasks: TaskLike[],
+  sessions: ReadonlyMap<string, SessionLike>,
+  agentNames: ReadonlyMap<string, string>
+): PeakoTaskItem[] {
+  const byGroup = new Map<PeakoTaskGroup, PeakoTaskItem[]>(GROUP_ORDER.map((group) => [group, []]))
+  for (const task of tasks) {
+    const group = peakoTaskGroup(task, sessions.get(task.id))
+    if (!group) continue
+    byGroup.get(group)!.push({
+      id: task.id,
+      title: task.title.trim() || 'Untitled task',
+      group,
+      agentName: task.agent_id ? (agentNames.get(task.agent_id) ?? null) : null
+    })
+  }
+  return GROUP_ORDER.flatMap((group) => byGroup.get(group)!).slice(0, PEAKO_MAX_TASKS)
+}
+
+/**
+ * The question an agent is still waiting on, if any: the last question in the
+ * transcript with no user message after it. A reply then answers it instead
+ * of arriving as a new message the agent is not listening for.
+ */
+export function findOpenQuestion(messages: AgentMessage[]): AgentMessage | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]
+    if (message.role === 'user') return null
+    if (message.partType === 'question' && message.tool?.questions?.length) {
+      return CLOSED_TOOL_STATES.has(message.tool.status) ? null : message
+    }
+  }
+  return null
 }
 
 /** Counts task sessions by state. Mastermind's own session is left out. */

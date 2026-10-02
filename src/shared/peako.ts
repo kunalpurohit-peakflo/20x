@@ -67,6 +67,29 @@ export interface PeakoAgentOption {
   model: string | null
 }
 
+/** Where a task sits in Peako's list, most urgent first. */
+export type PeakoTaskGroup = 'needs' | 'running' | 'review' | 'next'
+
+export interface PeakoTaskItem {
+  id: string
+  title: string
+  group: PeakoTaskGroup
+  agentName: string | null
+}
+
+/** The task open in Peako's mini chat. */
+export interface PeakoTaskChat {
+  id: string
+  title: string
+  group: PeakoTaskGroup
+  agentName: string | null
+  /** False when no agent is assigned, so there is nobody to message. */
+  hasAgent: boolean
+  working: boolean
+  messages: PeakoChatMessage[]
+  approval: { action: string; description: string } | null
+}
+
 export interface PeakoState {
   name: string
   mood: PeakoMood
@@ -88,6 +111,10 @@ export interface PeakoState {
   counts: { working: number; waiting: number; failed: number }
   /** A short line Peako says on its own, such as "A task finished". */
   bubble: string | null
+  /** Open tasks, most urgent first, for browsing from Peako. */
+  tasks: PeakoTaskItem[]
+  /** The task open in the mini chat, if any. */
+  taskChat: PeakoTaskChat | null
 }
 
 export type PeakoCommand =
@@ -101,6 +128,13 @@ export type PeakoCommand =
   | { type: 'openSettings'; tab?: 'general' | 'voice' }
   | { type: 'openApp' }
   | { type: 'hide' }
+  /** Opens a task's mini chat; null closes it. */
+  | { type: 'focusTask'; taskId: string | null }
+  | { type: 'taskSend'; taskId: string; text: string }
+  | { type: 'taskApprove'; taskId: string; approved: boolean }
+  | { type: 'taskStop'; taskId: string }
+  /** Shows the task in the 20x window. */
+  | { type: 'openTask'; taskId: string }
 
 /** What the main window receives: Peako's commands plus a few from main itself. */
 export type PeakoMainCommand =
@@ -123,8 +157,16 @@ export function normalizePeakoName(name: string | null | undefined): string {
 }
 
 const COMMAND_TYPES = new Set<PeakoCommand['type']>([
-  'send', 'approve', 'stop', 'voice', 'newChat', 'setAgent', 'rename', 'openSettings', 'openApp', 'hide'
+  'send', 'approve', 'stop', 'voice', 'newChat', 'setAgent', 'rename', 'openSettings', 'openApp', 'hide',
+  'focusTask', 'taskSend', 'taskApprove', 'taskStop', 'openTask'
 ])
+
+const isTaskId = (value: unknown): value is string =>
+  typeof value === 'string' && value.length > 0 && value.length <= 200
+
+function isMessageText(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0 && value.length <= 20_000
+}
 
 /** Structural guard for commands arriving over IPC from the Peako window. */
 export function isPeakoCommand(value: unknown): value is PeakoCommand {
@@ -133,7 +175,16 @@ export function isPeakoCommand(value: unknown): value is PeakoCommand {
   if (typeof command.type !== 'string' || !COMMAND_TYPES.has(command.type as PeakoCommand['type'])) return false
   switch (command.type) {
     case 'send':
-      return typeof command.text === 'string' && command.text.trim().length > 0 && command.text.length <= 20_000
+      return isMessageText(command.text)
+    case 'focusTask':
+      return command.taskId === null || isTaskId(command.taskId)
+    case 'taskSend':
+      return isTaskId(command.taskId) && isMessageText(command.text)
+    case 'taskApprove':
+      return isTaskId(command.taskId) && typeof command.approved === 'boolean'
+    case 'taskStop':
+    case 'openTask':
+      return isTaskId(command.taskId)
     case 'approve':
       return typeof command.approved === 'boolean'
     case 'setAgent':

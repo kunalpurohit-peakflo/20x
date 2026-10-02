@@ -11,7 +11,10 @@ import {
   agentModelLabel,
   countSessions,
   derivePeakoMood,
-  toPeakoMessages
+  findOpenQuestion,
+  peakoTaskGroup,
+  toPeakoMessages,
+  toPeakoTasks
 } from '@/lib/peako-state'
 import { PEAKO_SETTING_KEYS, normalizePeakoName, type PeakoMainCommand, type PeakoState } from '@shared/peako'
 import { SettingsTab, TaskStatus } from '@/types'
@@ -54,6 +57,19 @@ export function PeakoBridge({ onToggleVoice }: PeakoBridgeProps) {
     let bubble: { text: string; until: number } | null = null
     let knownCompleted: Set<string> | null = null
     let knownWaiting = new Set<string>()
+    // The task open in Peako's mini chat. Its transcript is bound only while
+    // it is open, exactly like a task open in the app.
+    let focusedTaskId: string | null = null
+    let releaseFocused: (() => void) | null = null
+
+    const focusTask = (taskId: string | null) => {
+      if (taskId === focusedTaskId) return
+      releaseFocused?.()
+      releaseFocused = null
+      focusedTaskId = taskId && useTaskStore.getState().tasks.some((task) => task.id === taskId) ? taskId : null
+      if (focusedTaskId) releaseFocused = useAgentStore.getState().bindTranscript(focusedTaskId)
+      schedule()
+    }
 
     const say = (text: string) => {
       bubble = { text, until: Date.now() + BUBBLE_MS }
@@ -64,9 +80,29 @@ export function PeakoBridge({ onToggleVoice }: PeakoBridgeProps) {
     const taskTitle = (taskId: string) =>
       useTaskStore.getState().tasks.find((task) => task.id === taskId)?.title ?? 'A task'
 
+    const buildTaskChat = (agentNames: Map<string, string>): PeakoState['taskChat'] => {
+      if (!focusedTaskId) return null
+      const task = useTaskStore.getState().tasks.find((candidate) => candidate.id === focusedTaskId)
+      if (!task) return null
+      const session = useAgentStore.getState().sessions.get(task.id)
+      return {
+        id: task.id,
+        title: task.title.trim() || 'Untitled task',
+        group: peakoTaskGroup(task, session) ?? 'next',
+        agentName: task.agent_id ? (agentNames.get(task.agent_id) ?? null) : null,
+        hasAgent: Boolean(task.agent_id),
+        working: session?.status === SessionStatus.WORKING || Boolean(session?.pendingSend),
+        messages: toPeakoMessages(session?.messages ?? []),
+        approval: session?.pendingApproval
+          ? { action: session.pendingApproval.action, description: session.pendingApproval.description }
+          : null
+      }
+    }
+
     const buildState = (): PeakoState => {
       const now = Date.now()
       const sessions = useAgentStore.getState().sessions
+      const agentNames = new Map(useAgentStore.getState().agents.map((agent) => [agent.id, agent.name]))
       const mastermind = sessions.get(PEAKO_SESSION_ID)
       const voice = useVoiceStore.getState()
       const { agents, selectedAgentId } = useMastermindStore.getState()
@@ -110,7 +146,9 @@ export function PeakoBridge({ onToggleVoice }: PeakoBridgeProps) {
           partial: listening ? voice.partial : ''
         },
         counts,
-        bubble: bubble?.text ?? null
+        bubble: bubble?.text ?? null,
+        tasks: toPeakoTasks(useTaskStore.getState().tasks, sessions, agentNames),
+        taskChat: buildTaskChat(agentNames)
       }
     }
 
@@ -176,6 +214,25 @@ export function PeakoBridge({ onToggleVoice }: PeakoBridgeProps) {
         })
         .catch(() => {})
 
+    /** A message typed in a task's mini chat: an answer if the agent asked something. */
+    const sendToTask = async (taskId: string, text: string) => {
+      const task = useTaskStore.getState().tasks.find((candidate) => candidate.id === taskId)
+      if (!task) return
+      if (!task.agent_id) {
+        say(`Assign an agent to ${task.title} first`)
+        return
+      }
+      const session = useAgentStore.getState().sessions.get(taskId)
+      const question = session?.sessionId ? findOpenQuestion(session.messages) : null
+      if (session?.sessionId && question) {
+        const responseType = question.tool?.name === 'permission' ? 'permission' : 'question'
+        await agentSessionApi.approve(session.sessionId, true, text, responseType, question.tool?.requestId)
+        return
+      }
+      // Main resumes the task's session, or starts one, when none is live.
+      await agentSessionApi.sendByTaskId(taskId, text)
+    }
+
     const handleCommand = (command: PeakoMainCommand) => {
       const mastermind = useAgentStore.getState().sessions.get(PEAKO_SESSION_ID)
       switch (command.type) {
@@ -216,6 +273,30 @@ export function PeakoBridge({ onToggleVoice }: PeakoBridgeProps) {
           useMastermindStore.getState().setAssistantName(name)
           window.dispatchEvent(new CustomEvent(PEAKO_SETTINGS_CHANGED_EVENT))
           schedule()
+          return
+        case 'focusTask':
+          focusTask(command.taskId)
+          return
+        case 'taskSend':
+          lastActivityAt = Date.now()
+          void sendToTask(command.taskId, command.text).catch((err) => {
+            console.error('[peako] message to task failed', err)
+            say('That message did not go through')
+          })
+          return
+        case 'taskApprove': {
+          const approval = useAgentStore.getState().sessions.get(command.taskId)?.pendingApproval
+          if (approval) void agentSessionApi.approve(approval.sessionId, command.approved).catch(console.error)
+          return
+        }
+        case 'taskStop': {
+          const sessionId = useAgentStore.getState().sessions.get(command.taskId)?.sessionId
+          if (sessionId) void agentSessionApi.abort(sessionId).catch(console.error)
+          return
+        }
+        case 'openTask':
+          useUIStore.getState().setSidebarView('tasks')
+          useTaskStore.getState().selectTask(command.taskId)
           return
         case 'openSettings':
           useUIStore.getState().setSettingsTab(command.tab === 'voice' ? SettingsTab.VOICE : SettingsTab.GENERAL)
@@ -260,6 +341,7 @@ export function PeakoBridge({ onToggleVoice }: PeakoBridgeProps) {
       window.removeEventListener(PEAKO_SETTINGS_CHANGED_EVENT, handleSettingsChanged)
       window.clearInterval(tick)
       if (timer !== null) window.clearTimeout(timer)
+      releaseFocused?.()
     }
   }, [])
 
