@@ -4,6 +4,9 @@
  */
 
 import type { ReasoningEffort } from '../../shared/reasoning-effort'
+import type { ProviderUsageLimits, ProviderUsageLimitsUpdate, UsageProvider } from '../../shared/usage'
+import type { UsageBucket } from '../usage/usage-normalize'
+import type { DiscreteUsageItem } from '../usage/usage-store'
 
 export enum SessionStatusType {
   IDLE = 'idle',
@@ -122,6 +125,50 @@ export interface MessagePart {
     usage?: { total_tokens: number; tool_uses: number; duration_ms: number }
   }
 }
+
+/**
+ * Cumulative token usage observed on a provider session (Claude Code, Codex).
+ * Adapters report the provider's running totals as-is; the usage tracker turns
+ * them into per-turn deltas against the last persisted totals for the session.
+ */
+export interface AdapterCumulativeUsageReport {
+  kind?: 'cumulative'
+  provider: UsageProvider
+  /** Provider session / thread id the totals belong to. */
+  providerSessionId: string
+  taskId?: string
+  agentId?: string
+  /**
+   * True when this app created the provider session, so every token in its
+   * running totals was consumed here. False for resumed sessions: if no
+   * baseline was persisted for them yet (e.g. they predate usage tracking),
+   * the first reading only establishes the baseline instead of attributing
+   * the session's whole history to the current turn.
+   */
+  newSession: boolean
+  buckets: UsageBucket[]
+}
+
+/**
+ * Discrete usage items (OpenCode / Pi assistant messages, Cursor turns). Each
+ * item carries a stable `sourceKey`; the tracker stores each key once, so
+ * adapters may safely re-report items (repeated events, history replays).
+ */
+export interface AdapterDiscreteUsageReport {
+  kind: 'discrete'
+  provider: UsageProvider
+  providerSessionId?: string
+  taskId?: string
+  agentId?: string
+  items: DiscreteUsageItem[]
+}
+
+export type AdapterUsageReport = AdapterCumulativeUsageReport | AdapterDiscreteUsageReport
+
+/** Subscription plan-limit signal from a provider runtime. */
+export type AdapterUsageLimitsEvent =
+  | { kind: 'update'; provider: UsageProvider; update: ProviderUsageLimitsUpdate }
+  | { kind: 'snapshot'; limits: ProviderUsageLimits }
 
 export interface MessagePayload {
   content: string
@@ -312,4 +359,22 @@ export interface CodingAgentAdapter {
    * continuous polling loop.
    */
   onDataAvailable?: (sessionId: string) => void
+
+  /**
+   * Optional callback set by agent-manager. Adapters whose provider reports
+   * token usage call it with cumulative totals (typically once per turn).
+   */
+  onUsage?: (report: AdapterUsageReport) => void
+
+  /**
+   * Optional callback set by agent-manager. Adapters whose provider reports
+   * subscription plan limits call it with full snapshots or sparse updates.
+   */
+  onUsageLimits?: (event: AdapterUsageLimitsEvent) => void
+
+  /**
+   * Read the provider's current subscription plan limits on demand.
+   * Returns null when the adapter cannot read limits at all.
+   */
+  probeUsageLimits?(): Promise<ProviderUsageLimits | null>
 }
