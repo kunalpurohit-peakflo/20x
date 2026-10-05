@@ -12,6 +12,7 @@ import { useUIStore } from '@/stores/ui-store'
 import { useTaskStore } from '@/stores/task-store'
 import { useDrawingStore } from '@/stores/drawing-store'
 import type { DrawingTool } from './drawing/types'
+import { unionBox } from './drawing/figure-geometry'
 import { DrawingLayer, pasteImageAt } from './drawing/DrawingLayer'
 import { DrawingToolbar } from './drawing/DrawingToolbar'
 import { DrawingProperties } from './drawing/DrawingProperties'
@@ -19,7 +20,7 @@ import { CanvasPanel } from './CanvasPanel'
 import { CanvasConnections } from './CanvasConnections'
 import { CanvasContextMenu } from './CanvasContextMenu'
 import { CanvasMinimap } from './CanvasMinimap'
-import { ArrowDown, ArrowDownLeft, ArrowDownRight, ArrowLeft, ArrowRight, ArrowUp, ArrowUpLeft, ArrowUpRight, Move, ZoomIn, ZoomOut, RotateCcw, Plus } from 'lucide-react'
+import { ArrowDown, ArrowDownLeft, ArrowDownRight, ArrowLeft, ArrowRight, ArrowUp, ArrowUpLeft, ArrowUpRight, Move, ZoomIn, ZoomOut, RotateCcw, Maximize2, Plus } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import { TaskStatus } from '@/types'
 import { getCanvasTaskStatusStyle, shouldPulseCanvasTaskStatusTransition } from './canvas-status-style'
@@ -33,7 +34,8 @@ function isPanelVisible(
   panel: CanvasPanelData,
   viewport: Viewport,
   containerWidth: number,
-  containerHeight: number
+  containerHeight: number,
+  wasVisible = false
 ): boolean {
   // Keep only lightweight shells mounted until the first measurement. Assuming
   // everything is visible here briefly mounted and hydrated every transcript
@@ -41,7 +43,9 @@ function isPanelVisible(
   if (!containerWidth || !containerHeight) return false
 
   // Visible region in canvas coordinates
-  const margin = 200 // generous margin to avoid flickering at edges
+  // A panel that was already live gets a wider exit margin. Small zoom
+  // reversals near an edge then cannot repeatedly unmount its task tree.
+  const margin = wasVisible ? 400 : 200
   const visibleLeft = -viewport.x / viewport.zoom - margin
   const visibleTop = -viewport.y / viewport.zoom - margin
   const visibleRight = visibleLeft + containerWidth / viewport.zoom + margin * 2
@@ -66,6 +70,9 @@ const GRID_SIZE = 40
  * store this long after the last wheel event.
  */
 const WHEEL_IDLE_MS = 150
+// Keep the compositor layer briefly after a wheel pause. Repeated promotion
+// of a canvas full of task content can visibly flash on the next zoom event.
+const LAYER_RELEASE_MS = 300
 
 /** Drawing tool shortcuts (plain keypresses, guarded by isInputFocused). */
 const TOOL_SHORTCUTS: Record<string, DrawingTool> = {
@@ -301,6 +308,7 @@ export function InfiniteCanvas() {
 
   // Track container size for viewport visibility culling
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 })
+  const visiblePanelIdsRef = useRef(new Set<string>())
   // Measure before child passive effects run. This prevents the initial
   // zero-size fallback from hydrating every canvas transcript for one frame
   // before off-screen culling becomes active.
@@ -322,12 +330,15 @@ export function InfiniteCanvas() {
   const visiblePanelIds = useMemo(() => {
     const set = new Set<string>()
     for (const p of panels) {
-      if (isPanelVisible(p, viewport, containerSize.width, containerSize.height)) {
+      if (isPanelVisible(p, viewport, containerSize.width, containerSize.height, visiblePanelIdsRef.current.has(p.id))) {
         set.add(p.id)
       }
     }
     return set
   }, [panels, viewport, containerSize])
+  useLayoutEffect(() => {
+    visiblePanelIdsRef.current = visiblePanelIds
+  }, [visiblePanelIds])
 
   // The selected task panel is never frozen: its TaskWorkspace must stay
   // mounted (though possibly off-screen) so the global task shortcuts keep
@@ -430,31 +441,6 @@ export function InfiniteCanvas() {
   // component knows. A caller without an element (an agent tool, a voice
   // command) leaves the intent in the store and it is carried out here.
   const pendingViewCommand = useCanvasStore((s) => s.pendingViewCommand)
-  useEffect(() => {
-    if (!pendingViewCommand) return
-    useCanvasStore.getState().clearViewCommand()
-
-    const rect = containerRef.current?.getBoundingClientRect()
-    if (!rect) return
-
-    switch (pendingViewCommand.kind) {
-      case 'fit_all':
-        fitToContent(rect.width, rect.height)
-        return
-      case 'reset':
-        resetViewport()
-        return
-      case 'zoom':
-        zoomTo(pendingViewCommand.zoom, rect.width / 2, rect.height / 2)
-        return
-      case 'focus_task': {
-        const target = useCanvasStore
-          .getState()
-          .panels.find((p) => p.type === 'task' && p.refId === pendingViewCommand.taskId)
-        if (target) focusPanel(target.id, rect.width, rect.height)
-      }
-    }
-  }, [pendingViewCommand, fitToContent, resetViewport, zoomTo, focusPanel])
 
   // ── Consume pending app from "Open in Canvas" button ────
   useEffect(() => {
@@ -509,6 +495,7 @@ export function InfiniteCanvas() {
   const gestureActiveRef = useRef(false)
   const viewportDirtyRef = useRef(false)
   const wheelIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const layerReleaseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const pendingPanRef = useRef({ dx: 0, dy: 0 })
   const pendingZoomRef = useRef<{ deltaY: number; clientX: number; clientY: number; rect: DOMRect } | null>(null)
@@ -554,6 +541,10 @@ export function InfiniteCanvas() {
   })
 
   const beginGesture = useCallback(() => {
+    if (layerReleaseTimerRef.current != null) {
+      clearTimeout(layerReleaseTimerRef.current)
+      layerReleaseTimerRef.current = null
+    }
     if (gestureActiveRef.current) return
     gestureActiveRef.current = true
     // Promote the layer for the duration of the gesture only — a permanent
@@ -585,6 +576,7 @@ export function InfiniteCanvas() {
 
   /** End the gesture and commit the live viewport to the store (once). */
   const commitViewport = useCallback(() => {
+    const wasGestureActive = gestureActiveRef.current
     if (wheelIdleTimerRef.current != null) {
       clearTimeout(wheelIdleTimerRef.current)
       wheelIdleTimerRef.current = null
@@ -594,14 +586,47 @@ export function InfiniteCanvas() {
       flushViewportUpdate()
     }
     gestureActiveRef.current = false
-    const layer = transformLayerRef.current
-    if (layer) layer.style.willChange = ''
+    if (wasGestureActive) {
+      const layer = transformLayerRef.current
+      if (layerReleaseTimerRef.current != null) clearTimeout(layerReleaseTimerRef.current)
+      layerReleaseTimerRef.current = setTimeout(() => {
+        if (layer) layer.style.willChange = ''
+        layerReleaseTimerRef.current = null
+      }, LAYER_RELEASE_MS)
+    }
 
     if (!viewportDirtyRef.current) return
     viewportDirtyRef.current = false
     // Store remains the source of truth at rest (and scheduleSave persists it).
     useCanvasStore.getState().setViewport(liveViewportRef.current)
   }, [flushViewportUpdate])
+
+  useEffect(() => {
+    if (!pendingViewCommand) return
+    useCanvasStore.getState().clearViewCommand()
+    commitViewport()
+
+    const rect = containerRef.current?.getBoundingClientRect()
+    if (!rect) return
+
+    switch (pendingViewCommand.kind) {
+      case 'fit_all':
+        fitToContent(rect.width, rect.height)
+        return
+      case 'reset':
+        resetViewport()
+        return
+      case 'zoom':
+        zoomTo(pendingViewCommand.zoom, rect.width / 2, rect.height / 2)
+        return
+      case 'focus_task': {
+        const target = useCanvasStore
+          .getState()
+          .panels.find((p) => p.type === 'task' && p.refId === pendingViewCommand.taskId)
+        if (target) focusPanel(target.id, rect.width, rect.height)
+      }
+    }
+  }, [pendingViewCommand, fitToContent, resetViewport, zoomTo, focusPanel, commitViewport])
 
   const scheduleViewportUpdate = useCallback(() => {
     if (viewportRafRef.current != null) return
@@ -630,6 +655,15 @@ export function InfiniteCanvas() {
     [commitViewport, containerSize, zoomTo]
   )
 
+  const fitCanvas = useCallback(() => {
+    commitViewport()
+    const box = unionBox(useDrawingStore.getState().objects)
+    const figureBounds = box
+      ? { minX: box.x, minY: box.y, maxX: box.x + box.width, maxY: box.y + box.height }
+      : undefined
+    fitToContent(containerSize.width, containerSize.height, figureBounds)
+  }, [commitViewport, containerSize, fitToContent])
+
   const queuePan = useCallback(
     (dx: number, dy: number) => {
       pendingPanRef.current.dx += dx
@@ -652,6 +686,7 @@ export function InfiniteCanvas() {
     return () => {
       if (viewportRafRef.current != null) cancelAnimationFrame(viewportRafRef.current)
       if (wheelIdleTimerRef.current != null) clearTimeout(wheelIdleTimerRef.current)
+      if (layerReleaseTimerRef.current != null) clearTimeout(layerReleaseTimerRef.current)
     }
   }, [])
 
@@ -856,7 +891,10 @@ export function InfiniteCanvas() {
         e.preventDefault()
         zoomStep(1 / 1.2)
       }
-      if (e.code === 'Digit0' && (e.ctrlKey || e.metaKey) && !isInputFocused) {
+      if (e.code === 'Digit0' && (e.ctrlKey || e.metaKey) && e.shiftKey && !isInputFocused) {
+        e.preventDefault()
+        fitCanvas()
+      } else if (e.code === 'Digit0' && (e.ctrlKey || e.metaKey) && !isInputFocused) {
         e.preventDefault()
         commitViewport()
         resetViewport()
@@ -958,7 +996,7 @@ export function InfiniteCanvas() {
       window.removeEventListener('keyup', handleKeyUp)
       window.removeEventListener('blur', handleBlur)
     }
-  }, [zoomStep, resetViewport, focusedPanelIndex, commitViewport, setConnectingFromId])
+  }, [zoomStep, fitCanvas, resetViewport, focusedPanelIndex, commitViewport, setConnectingFromId])
 
   const zoomPercent = Math.round(viewport.zoom * 100)
 
@@ -1017,7 +1055,7 @@ export function InfiniteCanvas() {
             <CanvasPanel
               key={panel.id}
               panel={panel}
-              zoom={viewport.zoom}
+              commitPendingViewport={commitViewport}
               frozen={!visiblePanelIds.has(panel.id) && !(panel.type === 'task' && panel.id === selectedPanelId)}
             />
           ))}
@@ -1059,6 +1097,7 @@ export function InfiniteCanvas() {
               className="canvas-status-jump-popup flex h-9 w-9 items-center justify-center rounded-full border border-white/20 text-white shadow-lg backdrop-blur-sm"
               onClick={(e) => {
                 e.stopPropagation()
+                commitViewport()
                 focusPanel(highlight.panelId, containerSize.width, containerSize.height)
                 setStatusHighlights((current) => current.filter((item) => item.id !== highlight.id))
               }}
@@ -1098,10 +1137,22 @@ export function InfiniteCanvas() {
           variant="ghost"
           size="sm"
           className="h-7 w-7 p-0"
-          onClick={resetViewport}
+          onClick={() => {
+            commitViewport()
+            resetViewport()
+          }}
           title="Reset view (Ctrl+0)"
         >
           <RotateCcw className="h-3.5 w-3.5" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 w-7 p-0"
+          onClick={fitCanvas}
+          title="Fit all content (Ctrl+Shift+0)"
+        >
+          <Maximize2 className="h-3.5 w-3.5" />
         </Button>
       </div>
 
@@ -1142,6 +1193,7 @@ export function InfiniteCanvas() {
       <CanvasMinimap
         containerWidth={containerSize.width}
         containerHeight={containerSize.height}
+        commitPendingViewport={commitViewport}
       />
 
       {/* ── Drawing: toolbar (bottom-center) + selection properties (top-center) ──
