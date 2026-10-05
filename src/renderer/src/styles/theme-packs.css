@@ -811,3 +811,126 @@ html:root.dark[data-theme-pack] {
 :root[data-theme-pack="peako"] [data-canvas-panel] > div {
   border-radius: 18px;
 }
+
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Finish and motion
+   Small, quiet polish on the working screens, plus motion that answers what
+   the user does: opening a row, a dialog, a status that changed. The one
+   unprompted movement is the approval card arriving, because it is the one
+   thing on screen that needs the user.
+
+   Rules for motion here: transform and opacity only (colour and shadow on
+   state changes), 110–220 ms, no loops, nothing on transcript rows as they
+   mount (the list is virtualised, so mount animations would replay on every
+   scroll and streamed update), and none at all under reduced motion.
+   Legacy carries no package attribute and gets none of this.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* Each package sets the pace of every existing hover and colour transition
+   through Tailwind's defaults, plus its own entrance timing. */
+:root[data-theme-pack="calm"] {
+  --pk-dur: 190ms;
+  --pk-dur-enter: 220ms;
+  --pk-ease: cubic-bezier(0.25, 0.8, 0.3, 1);
+  --pk-ease-enter: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+:root[data-theme-pack="mission"] {
+  --pk-dur: 110ms;
+  --pk-dur-enter: 140ms;
+  --pk-ease: cubic-bezier(0.3, 0, 0.2, 1);
+  --pk-ease-enter: cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+:root[data-theme-pack="peako"] {
+  --pk-dur: 170ms;
+  --pk-dur-enter: 220ms;
+  --pk-ease: cubic-bezier(0.25, 0.8, 0.3, 1);
+  --pk-ease-enter: cubic-bezier(0.34, 1.45, 0.64, 1);
+}
+:root[data-theme-pack] {
+  --default-transition-duration: var(--pk-dur);
+  --default-transition-timing-function: var(--pk-ease);
+}
+
+/* An error message shares the failed tool row's soft red, so the failure and
+   its explanation read as one incident. */
+:root[data-theme-pack] [data-part="error"] {
+  background: color-mix(in oklab, var(--pk-danger) 7%, transparent);
+  border-left-color: var(--pk-danger);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  padding-right: 12px;
+}
+
+/* A question's heading takes the attention colour of its edge. */
+:root[data-theme-pack] [data-part="question"] .text-primary {
+  color: var(--pk-attention-text);
+}
+
+/* Keyboard focus is visible on the rows people move through. */
+:root[data-theme-pack] :is([data-task-row], [data-part="tool"] > button, [data-part="thinking"] > button, [data-part="question"] button):focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+/* Mission Control: the selected task carries a cursor edge, like a log. */
+:root[data-theme-pack="mission"] [data-task-row][aria-current="true"]:not([data-attention]) {
+  box-shadow: inset 2px 0 0 var(--primary);
+}
+
+/* Peako World: answer options are soft and round, like its buttons. */
+:root[data-theme-pack="peako"] [data-part="question"] button {
+  border-radius: 12px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes pk-arrive {
+    from { opacity: 0; transform: translateY(-6px); }
+    to { opacity: 1; transform: none; }
+  }
+  @keyframes pk-reveal {
+    from { opacity: 0; transform: translateY(-3px); }
+    to { opacity: 1; transform: none; }
+  }
+  @keyframes pk-fade {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @keyframes pk-settle {
+    from { opacity: 0; scale: 0.97; }
+    to { opacity: 1; scale: 1; }
+  }
+
+  /* The approval card arrives: the one movement that asks for the user. */
+  :root[data-theme-pack] [data-attention="approval"]:not([data-task-row]):not([data-canvas-panel]) {
+    animation: pk-arrive var(--pk-dur-enter) var(--pk-ease-enter) backwards;
+  }
+
+  /* Opening a tool or thinking row: its details fade in under the header.
+     Expanded state is local, so this only plays when the user opens it. */
+  :root[data-theme-pack] :is([data-part="tool"], [data-part="thinking"]) > button + div {
+    animation: pk-reveal var(--pk-dur-enter) var(--pk-ease) backwards;
+  }
+
+  /* Dialogs settle into place, over a backdrop that fades in. `scale` is its
+     own property, so the dialog's centring translate is untouched. */
+  :root[data-theme-pack] :is([role="dialog"], [role="alertdialog"])[data-state="open"] {
+    animation: pk-settle var(--pk-dur-enter) var(--pk-ease-enter) backwards;
+  }
+  :root[data-theme-pack] [data-state="open"]:has(+ :is([role="dialog"], [role="alertdialog"])) {
+    animation: pk-fade var(--pk-dur-enter) var(--pk-ease) backwards;
+  }
+
+  /* A status change fades the dot to its new colour instead of snapping. */
+  :root[data-theme-pack] [data-status-dot] {
+    transition: background-color var(--pk-dur-enter) var(--pk-ease), box-shadow var(--pk-dur-enter) var(--pk-ease);
+  }
+
+  /* Peako World: rows and answer options press in, like its buttons. */
+  :root[data-theme-pack="peako"] :is([data-task-row], [data-part="question"] button:not(:disabled)) {
+    transition-property: color, background-color, border-color, box-shadow, transform;
+  }
+  :root[data-theme-pack="peako"] :is([data-task-row], [data-part="question"] button:not(:disabled)):active {
+    transform: translateY(1px) scale(0.995);
+    transition-duration: 60ms;
+  }
+}
