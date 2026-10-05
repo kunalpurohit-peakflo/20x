@@ -1,4 +1,5 @@
 import type { BrowserRecordingManifest } from '@shared/browser-recording'
+import type { BrowserImportRequest, BrowserImportResult, BrowserImportSource } from '@shared/browser-session-import'
 import type { UiCommand } from '@shared/ui-commands'
 import type { PeakoCommand, PeakoLayout, PeakoMainCommand, PeakoState } from '@shared/peako'
 import type {
@@ -37,6 +38,7 @@ import type {
   HeartbeatLog
 } from './index'
 import type { PullRequestDetails } from '@shared/artifacts'
+import type { HarnessInstanceView } from '@shared/harness-instances'
 import type { ArtifactApi } from '@shared/artifacts'
 import type {
   VoiceActionOutcome,
@@ -252,6 +254,12 @@ interface ElectronAPI {
     update: (id: string, data: UpdateAgentDTO) => Promise<Agent | undefined>
     delete: (id: string) => Promise<boolean>
   }
+  harnessInstances: {
+    list: () => Promise<HarnessInstanceView[]>
+    create: (data: { harness_type: 'claude-code' | 'codex'; label: string; home_path: string }) => Promise<HarnessInstanceView>
+    update: (id: string, data: { label?: string; home_path?: string }) => Promise<HarnessInstanceView | undefined>
+    delete: (id: string) => Promise<boolean>
+  }
   agentSession: {
     start: (agentId: string, taskId: string, workspaceDir?: string, skipInitialPrompt?: boolean) => Promise<AgentSessionStartResult>
     resume: (agentId: string, taskId: string, ocSessionId: string) => Promise<AgentSessionStartResult & { ended?: boolean }>
@@ -303,6 +311,7 @@ interface ElectronAPI {
     set: (key: string, value: string) => Promise<void>
     getAll: () => Promise<Record<string, string>>
   }
+  pushTest: () => Promise<{ success: boolean; sent: number }>
   env: {
     get: (key: string) => Promise<string | null>
   }
@@ -502,6 +511,17 @@ interface ElectronAPI {
   onTranscriptChanged: (callback: (event: TranscriptChangedEvent) => void) => () => void
   onAgentStatus: (callback: (event: AgentStatusEvent) => void) => () => void
   onAgentApproval: (callback: (event: AgentApprovalRequest) => void) => () => void
+  usage: {
+    getLimits: () => Promise<import('@shared/usage').ProviderUsageLimits[]>
+    refreshLimits: (options?: { force?: boolean }) => Promise<import('@shared/usage').UsageLimitsRefreshResult>
+    getSummary: (query?: import('@shared/usage').UsageSummaryQuery) => Promise<import('@shared/usage').UsageSummary | null>
+    setCursorKeychainAccess: (enabled: boolean) => Promise<import('@shared/usage').UsageLimitsRefreshResult>
+    getLimitRecovery: (taskId: string) => Promise<import('@shared/usage-limit-recovery').UsageLimitRecovery | null>
+    setLimitRecoveryAutoResume: (taskId: string, autoResume: boolean) => Promise<import('@shared/usage-limit-recovery').UsageLimitRecovery | null>
+  }
+  onUsageLimitRecoveryUpdated: (callback: (recovery: import('@shared/usage-limit-recovery').UsageLimitRecovery) => void) => () => void
+  onUsageLimitsUpdated: (callback: (limits: import('@shared/usage').ProviderUsageLimits) => void) => () => void
+  onUsageRecorded: (callback: (records: import('@shared/usage').TokenUsageRecord[]) => void) => () => void
   onAgentIncompatibleSession: (callback: (event: { taskId: string; agentId: string; error: string }) => void) => () => void
   onTaskUpdated: (callback: (event: { taskId: string; updates: Partial<WorkfloTask> }) => void) => () => void
   onTaskSourceActionFailed: (callback: (event: { taskId: string; taskTitle: string; error: string }) => void) => () => void
@@ -519,6 +539,9 @@ interface ElectronAPI {
     onCommand: (callback: (command: PeakoMainCommand) => void) => () => void
   }
   browser: {
+    listImportSources: () => Promise<BrowserImportSource[]>
+    importSessions: (input: BrowserImportRequest) => Promise<BrowserImportResult>
+    clearImportedSessions: () => Promise<number>
     startRecording: (panelId: string, title?: string) => Promise<{ ok: true; recording: BrowserRecordingManifest } | { error: string }>
     stopRecording: (panelId: string) => Promise<{ ok: true; recording: BrowserRecordingManifest } | { error: string }>
     recordingStatus: (panelId: string) => Promise<{ recording: BrowserRecordingManifest | null }>

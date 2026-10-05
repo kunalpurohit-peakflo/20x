@@ -672,6 +672,17 @@ describe('Durable transcript — timestamp provenance', () => {
 })
 
 describe('Durable transcript — rev cursor + delta (event-sourced)', () => {
+  it('answers the global max rev and the snapshot order from indexes, not table scans', () => {
+    // Every streamed write batch reads MAX(rev) across all tasks; without an
+    // index that is a scan of the whole transcript table.
+    const rawDb = (db as unknown as { db: import('better-sqlite3').Database }).db
+    const plan = (sql: string): string => (rawDb.prepare(`EXPLAIN QUERY PLAN ${sql}`).all() as Array<{ detail: string }>)
+      .map((row) => row.detail).join(' | ')
+    expect(plan('SELECT COALESCE(MAX(rev), 0) AS m FROM transcript_parts')).toContain('idx_transcript_parts_rev')
+    expect(plan("SELECT * FROM transcript_parts WHERE task_id = 't1' ORDER BY created_at ASC, seq ASC"))
+      .not.toContain('TEMP B-TREE')
+  })
+
   it('assigns a global monotonic rev on insert and bumps it on content update', () => {
     const r1 = db.upsertTranscriptParts('t1', [{ id: 'a', role: 'user', content: 'hi' }])
     const r2 = db.upsertTranscriptParts('t1', [{ id: 'b', role: 'assistant', content: 'yo' }])
@@ -787,5 +798,131 @@ describe('transcript_parts.rev migration on a legacy DB (no rev column)', () => 
     ).not.toThrow()
     const after = (rawDb.prepare('SELECT COALESCE(MAX(rev),0) AS m FROM transcript_parts').get() as { m: number }).m
     expect(after).toBe(before)
+  })
+})
+
+describe('Context handoff marker on agent reassignment', () => {
+  const key = (taskId: string) => `context-handoff:${taskId}`
+  // createTask does not store agent_id; assignment is an update, as in the app.
+  const assigned = (agentId: string) => {
+    const task = db.createTask(makeTask())!
+    db.updateTask(task.id, { agent_id: agentId })
+    return task
+  }
+
+  it('records the agent a task left once it has a transcript', () => {
+    const first = db.createAgent(makeAgent({ name: 'First' }))!
+    const second = db.createAgent(makeAgent({ name: 'Second' }))!
+    const task = assigned(first.id)
+    db.upsertTranscriptParts(task.id, [{ id: 'p1', role: 'user', content: 'hello' }])
+
+    db.updateTask(task.id, { agent_id: second.id })
+
+    expect(JSON.parse(db.getSetting(key(task.id))!)).toMatchObject({ fromAgentId: first.id })
+  })
+
+  it('records nothing for a task without a transcript', () => {
+    const first = db.createAgent(makeAgent({ name: 'First' }))!
+    const second = db.createAgent(makeAgent({ name: 'Second' }))!
+    const task = assigned(first.id)
+
+    db.updateTask(task.id, { agent_id: second.id })
+
+    expect(db.getSetting(key(task.id))).toBeUndefined()
+  })
+
+  it('keeps the original agent when the task passes through unassigned', () => {
+    const first = db.createAgent(makeAgent({ name: 'First' }))!
+    const second = db.createAgent(makeAgent({ name: 'Second' }))!
+    const task = assigned(first.id)
+    db.upsertTranscriptParts(task.id, [{ id: 'p1', role: 'user', content: 'hello' }])
+
+    db.updateTask(task.id, { agent_id: null })
+    db.updateTask(task.id, { agent_id: second.id })
+
+    expect(JSON.parse(db.getSetting(key(task.id))!)).toMatchObject({ fromAgentId: first.id })
+  })
+
+  it('keeps the first agent through several reassignments before the handoff is delivered', () => {
+    const first = db.createAgent(makeAgent({ name: 'First' }))!
+    const second = db.createAgent(makeAgent({ name: 'Second' }))!
+    const third = db.createAgent(makeAgent({ name: 'Third' }))!
+    const task = assigned(first.id)
+    db.upsertTranscriptParts(task.id, [{ id: 'p1', role: 'user', content: 'hello' }])
+
+    db.updateTask(task.id, { agent_id: second.id })
+    db.updateTask(task.id, { agent_id: third.id })
+
+    expect(JSON.parse(db.getSetting(key(task.id))!)).toMatchObject({ fromAgentId: first.id, announced: false })
+  })
+
+  it('keeps the session id when the task is reassigned to another harness, until the new session replaces it', () => {
+    const first = db.createAgent(makeAgent({ name: 'First', config: { coding_agent: 'claude-code' } }))!
+    const second = db.createAgent(makeAgent({ name: 'Second', config: { coding_agent: 'codex' } }))!
+    const task = assigned(first.id)
+    db.upsertTranscriptParts(task.id, [{ id: 'p1', role: 'user', content: 'hello' }])
+    db.updateTask(task.id, { session_id: 'backend-session-1' })
+
+    const updated = db.updateTask(task.id, { agent_id: second.id })
+
+    // Never dropped before the context has been carried: the handoff is planned at resume time.
+    expect(updated?.session_id).toBe('backend-session-1')
+    expect(JSON.parse(db.getSetting(key(task.id))!)).toMatchObject({ fromAgentId: first.id, announced: false })
+  })
+
+  it('records a marker for a reassignment of a task that has a session but no transcript yet', () => {
+    const first = db.createAgent(makeAgent({ name: 'First', config: { coding_agent: 'codex' } }))!
+    const second = db.createAgent(makeAgent({ name: 'Second', config: { coding_agent: 'codex' } }))!
+    const task = assigned(first.id)
+    db.updateTask(task.id, { session_id: 'thread-1' })
+
+    db.updateTask(task.id, { agent_id: second.id })
+
+    expect(JSON.parse(db.getSetting(key(task.id))!)).toMatchObject({ fromAgentId: first.id })
+  })
+
+  it('keeps the session when the task moves to another agent of the same harness', () => {
+    const first = db.createAgent(makeAgent({ name: 'First', config: { coding_agent: 'claude-code' } }))!
+    const second = db.createAgent(makeAgent({ name: 'Second', config: { coding_agent: 'claude-code', model: 'other' } }))!
+    const task = assigned(first.id)
+    db.upsertTranscriptParts(task.id, [{ id: 'p1', role: 'user', content: 'hello' }])
+    db.updateTask(task.id, { session_id: 'backend-session-1' })
+
+    const updated = db.updateTask(task.id, { agent_id: second.id })
+
+    expect(updated?.session_id).toBe('backend-session-1')
+    expect(updated?.agent_id).toBe(second.id)
+    // The marker is still written, so a failed native resume can fall back to the handoff.
+    expect(JSON.parse(db.getSetting(key(task.id))!)).toMatchObject({ fromAgentId: first.id, announced: false })
+  })
+
+  it('keeps the session id when the task is unassigned', () => {
+    const first = db.createAgent(makeAgent({ name: 'First', config: { coding_agent: 'claude-code' } }))!
+    const task = assigned(first.id)
+    db.updateTask(task.id, { session_id: 'backend-session-1' })
+
+    const updated = db.updateTask(task.id, { agent_id: null })
+
+    expect(updated?.session_id).toBe('backend-session-1')
+  })
+
+  it('keeps the session when the agent does not change', () => {
+    const first = db.createAgent(makeAgent({ name: 'First' }))!
+    const task = assigned(first.id)
+    db.updateTask(task.id, { session_id: 'backend-session-1' })
+
+    const updated = db.updateTask(task.id, { title: 'Renamed', agent_id: first.id })
+
+    expect(updated?.session_id).toBe('backend-session-1')
+  })
+
+  it('does not record a change when the same agent is assigned again', () => {
+    const first = db.createAgent(makeAgent({ name: 'First' }))!
+    const task = assigned(first.id)
+    db.upsertTranscriptParts(task.id, [{ id: 'p1', role: 'user', content: 'hello' }])
+
+    db.updateTask(task.id, { agent_id: first.id })
+
+    expect(db.getSetting(key(task.id))).toBeUndefined()
   })
 })

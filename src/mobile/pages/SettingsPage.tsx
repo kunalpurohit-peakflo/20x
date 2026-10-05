@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from 'react'
 import { api } from '../api/client'
 import type { Route } from '../App'
+import { SubscriptionUsageSection } from '../components/SubscriptionUsageSection'
+import { PushSettings } from '../components/PushSettings'
 
 interface TaskSource {
   id: string
@@ -103,6 +105,14 @@ export function SettingsPage({ onNavigate }: SettingsPageProps) {
             <button onClick={() => setError(null)} className="ml-2 font-bold">x</button>
           </div>
         )}
+
+        <SubscriptionUsageSection />
+        <PushSettings />
+
+        <div className="rounded-md border border-border/30 p-3">
+          <h2 className="text-sm font-semibold">Browser sessions</h2>
+          <p className="mt-1 text-xs text-muted-foreground">In the desktop app, open a browser page and select Import session beside Record.</p>
+        </div>
 
         {/* Task Sources Section */}
         <div>

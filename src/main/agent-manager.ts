@@ -9,7 +9,7 @@ import { existsSync, copyFileSync, mkdirSync, readFileSync, readdirSync, statSyn
 import { mkdir, writeFile } from 'fs/promises'
 import { Notification, powerSaveBlocker } from 'electron'
 import type { BrowserWindow } from 'electron'
-import type { DatabaseManager, AgentMcpServerEntry, McpServerRecord, McpServerSource, OutputFieldRecord, SecretRecord, SkillRecord, TaskRecord } from './database'
+import type { AgentRecord, CreateHarnessInstanceData, DatabaseManager, UpdateHarnessInstanceData, AgentMcpServerEntry, McpServerRecord, McpServerSource, OutputFieldRecord, SecretRecord, SkillRecord, TaskRecord } from './database'
 import { TaskStatus, SessionStatus } from '../shared/constants'
 import type { WorktreeManager } from './worktree-manager'
 import type { GitHubManager } from './github-manager'
@@ -28,9 +28,46 @@ import { randomUUID } from 'crypto'
 import { registerSecretSession, unregisterSecretSession, getSecretBrokerPort, writeSecretShellWrapper } from './secret-broker'
 import { registerMcpProxyTarget, getMcpAuthProxyPort } from './mcp-auth-proxy'
 import { analytics } from './analytics-service'
+import { UsageTracker, type UsageLimitsProbeTarget } from './usage/usage-tracker'
+import { agentInstanceId, harnessInstanceDisplayName, harnessTypeLabel, harnessTypeOf, defaultHarnessInstanceId, isDefaultHarnessInstanceId, isHarnessType, type HarnessInstanceView, type HarnessType } from '../shared/harness-instances'
+import { instanceHomeError, instanceHomeFor, linkSharedHistory, normalizeHomePath, realHomeFor } from './harness-instances'
+import { CURSOR_KEYCHAIN_ACCESS_SETTING } from './usage/cursor-limits'
+import { UsageLimitRecoveryScheduler, UsageLimitRecoveryStore } from './usage/usage-limit-recovery'
+import {
+  AUTO_RESUME_LIMITED_TASKS_SETTING,
+  LIMIT_RECOVERY_CONTINUE_MESSAGE,
+  USAGE_LIMIT_RECOVERY_UPDATED_CHANNEL,
+  isAutoResumeSettingEnabled,
+  type UsageLimitRecovery
+} from '../shared/usage-limit-recovery'
+import { isUsageProvider } from '../shared/usage'
+import {
+  USAGE_LIMITS_UPDATED_CHANNEL,
+  USAGE_RECORDED_CHANNEL,
+  type ProviderUsageLimits,
+  type UsageLimitsRefreshResult,
+  type UsageProvider,
+  type UsageSummary,
+  type UsageSummaryQuery
+} from '../shared/usage'
 import { inspectTaskArtifact } from './artifacts'
+import {
+  buildContextHandoff,
+  CONTEXT_HANDOFF_BUDGET_SETTING,
+  CONTEXT_HANDOFF_DEFAULT_TOKEN_BUDGET,
+  CONTEXT_HANDOFF_SEPARATOR,
+  contextHandoffSettingKey,
+  harnessLabel,
+  parseContextHandoffMarker,
+  planContinuation,
+  type ContextHandoffResult,
+  type ContinuationAgent,
+  type ContinuationPlan
+} from './context-handoff'
 import { ArtifactType, pullRequestUrlFromTool, type Artifact } from '../shared/artifacts'
 import { buildSystemMessage, computeDeliveryId, SystemMessageOrigin } from '../shared/system-authority'
+import { sendMobilePush } from './mobile-push'
+import { AgentPushEvents, type QuestionPart } from './agent-push-events'
 
 // Coding agent backend type enum
 enum CodingAgentType {
@@ -39,6 +76,16 @@ enum CodingAgentType {
   CODEX = 'codex',
   CURSOR = 'cursor',
   PI = 'pi'
+}
+
+/** Handoff block ready to send with the next prompt of a session. */
+interface PreparedContextHandoff {
+  block: string
+  carried: number
+  omitted: number
+  previousAgentName: string
+  /** False when the transcript note was already shown for this handoff. */
+  announce: boolean
 }
 
 const ARTIFACT_WORKSPACE_INSTRUCTIONS = `
@@ -115,6 +162,43 @@ interface AgentSession {
    * the brief via get_task — keep the full description in system instead.
    */
   taskContextMode?: 'full' | 'lean'
+  /**
+   * Set when the session was resumed natively under a different harness
+   * instance and the task's handoff marker is still pending. Cleared when the
+   * first prompt is accepted (marker removed) or replaced by a handoff.
+   */
+  nativeResumeAwaitingAck?: boolean
+  /** The first prompt sent after a native resume, kept so it can be resent with a handoff. */
+  nativeResumeFirstPrompt?: { message: string; attachments?: MessageAttachmentRef[] }
+}
+
+/** The harness instance an agent runs under, as the manager sees it. */
+interface ResolvedHarnessInstance {
+  id: string
+  harness: HarnessType
+  /**
+   * Home directory the instance runs in (CLAUDE_CONFIG_DIR / CODEX_HOME). Undefined
+   * for the default instance, which sets no override, so the environment the app
+   * started with (including any inherited CLAUDE_CONFIG_DIR / CODEX_HOME) applies.
+   */
+  home: string | undefined
+  label: string
+  /** False when the instance keeps its own session history, so sessions cannot be resumed from elsewhere. */
+  shareable: boolean
+  isDefault: boolean
+}
+
+/** Errors that mean the backend no longer has the session a resume points at. */
+const SESSION_GONE_MARKERS = [
+  'INCOMPATIBLE_SESSION_ID',
+  'No conversation found',
+  'SESSION_FILE_NOT_FOUND',
+  'Session no longer exists on server'
+]
+
+export function isSessionGoneMessage(message: unknown): boolean {
+  if (typeof message !== 'string') return false
+  return SESSION_GONE_MARKERS.some((marker) => message.includes(marker))
 }
 
 function normalizeUrlPath(pathname: string): string {
@@ -256,6 +340,14 @@ export class AgentManager extends EventEmitter {
   private db: DatabaseManager
   private mainWindow: BrowserWindow | null = null
   private adapters: Map<string, CodingAgentAdapter> = new Map()  // Adapter instances
+  /** Subscription usage tracker; created lazily (undefined = not yet, null = unavailable). */
+  private usageTracker: UsageTracker | null | undefined = undefined
+  /** Whether each stored harness instance shares session history with the default home. Set on create, update and startup. */
+  private instanceSharing = new Map<string, boolean>()
+  /** Continues tasks after a usage-limit reset; created lazily (null = unavailable). */
+  private limitRecovery: UsageLimitRecoveryScheduler | null | undefined = undefined
+  /** Tasks whose continuation is being dispatched by the recovery scheduler (not a user message). */
+  private limitRecoveryDispatching = new Set<string>()
   private worktreeManager: WorktreeManager | null = null
   private githubManager: GitHubManager | null = null
   private gitlabManager: GitLabManager | null = null
@@ -361,6 +453,7 @@ export class AgentManager extends EventEmitter {
 
   // Track last sent status per session to detect transitions for OS notifications
   private lastSentStatus: Map<string, string> = new Map()
+  private pushEvents = new AgentPushEvents()
 
   /**
    * Maximum total characters allowed in partContentLengths values per session.
@@ -705,10 +798,16 @@ export class AgentManager extends EventEmitter {
     const backendType = (agent.config?.coding_agent as string) || CodingAgentType.OPENCODE
     console.log('[AgentManager] getAdapter - backendType:', backendType)
 
+    // Each subscription login gets its own adapter: the adapter's process and
+    // environment (CODEX_HOME / CLAUDE_CONFIG_DIR) belong to that login, so two
+    // instances of one harness can run in parallel.
+    const instance = this.resolveAgentInstance(agent)
+    const cacheKey = this.adapterCacheKey(backendType, instance?.id)
+
     // Return cached adapter
-    if (this.adapters.has(backendType)) {
-      console.log('[AgentManager] getAdapter - returning cached adapter for', backendType)
-      return this.adapters.get(backendType)!
+    if (this.adapters.has(cacheKey)) {
+      console.log('[AgentManager] getAdapter - returning cached adapter for', cacheKey)
+      return this.adapters.get(cacheKey)!
     }
 
     // Create new adapter
@@ -720,12 +819,12 @@ export class AgentManager extends EventEmitter {
         adapter = new OpencodeAdapter(this.db)
         break
       case CodingAgentType.CLAUDE_CODE:
-        console.log('[AgentManager] Creating new ClaudeCodeAdapter')
-        adapter = new ClaudeCodeAdapter()
+        console.log('[AgentManager] Creating new ClaudeCodeAdapter for', instance?.id ?? 'default')
+        adapter = new ClaudeCodeAdapter({ harnessHome: instance?.home })
         break
       case CodingAgentType.CODEX:
-        console.log('[AgentManager] Creating new CodexAppServerAdapter for Codex')
-        adapter = new CodexAppServerAdapter()
+        console.log('[AgentManager] Creating new CodexAppServerAdapter for', instance?.id ?? 'default')
+        adapter = new CodexAppServerAdapter({ harnessHome: instance?.home })
         break
       case CodingAgentType.CURSOR:
         console.log('[AgentManager] Creating new AcpAdapter for Cursor')
@@ -740,9 +839,333 @@ export class AgentManager extends EventEmitter {
         return null
     }
 
-    this.adapters.set(backendType, adapter)
-    console.log('[AgentManager] Cached adapter for', backendType)
+    this.wireUsageTracking(adapter, instance?.id ?? defaultHarnessInstanceId(backendType))
+    this.adapters.set(cacheKey, adapter)
+    console.log('[AgentManager] Cached adapter for', cacheKey)
     return adapter
+  }
+
+  private adapterCacheKey(backendType: string, instanceId?: string): string {
+    return instanceId ? `${backendType}:${instanceId}` : backendType
+  }
+
+  /**
+   * Drops the cached adapters of a harness instance, after its home directory
+   * changed or it was removed. Running sessions keep the adapter they started with.
+   */
+  forgetHarnessInstanceAdapters(instanceId: string): void {
+    for (const key of Array.from(this.adapters.keys())) {
+      if (key.endsWith(`:${instanceId}`)) this.adapters.delete(key)
+    }
+  }
+
+  /**
+   * The harness instance an agent runs under. Null for agents that have no
+   * subscription login (API-key agents, harnesses without instances). Reads only
+   * in-memory records, so resolving an instance does no filesystem work.
+   */
+  private resolveAgentInstance(agent: AgentRecord | undefined): ResolvedHarnessInstance | null {
+    if (!agent) return null
+    const config = agent.config ?? {}
+    const harness = harnessTypeOf(config.coding_agent)
+    if (!harness || config.auth_method === 'api_key') return null
+
+    const candidate = config.harness_instance_id ? this.db.getHarnessInstance(config.harness_instance_id) : undefined
+    const id = candidate ? agentInstanceId(config, [candidate]) : null
+    if (!candidate || !id) {
+      return {
+        id: defaultHarnessInstanceId(harness),
+        harness,
+        home: undefined,
+        label: harnessTypeLabel(harness),
+        shareable: true,
+        isDefault: true
+      }
+    }
+    return {
+      id,
+      harness,
+      home: instanceHomeFor(harness, candidate.home_path),
+      label: harnessInstanceDisplayName(harness, candidate.label),
+      // Recorded when the instance was created, updated or checked at startup.
+      // An instance without a record is treated as not shareable: a handoff is always safe.
+      shareable: this.instanceSharing.get(id) ?? false,
+      isDefault: false
+    }
+  }
+
+  /** Whether sessions of this agent can be resumed by another agent of the same harness. */
+  private sharesSessionHistory(agent: AgentRecord | undefined): boolean {
+    if (!agent) return true
+    if (agent.config?.auth_method === 'api_key') return false
+    return this.resolveAgentInstance(agent)?.shareable ?? true
+  }
+
+  /** Display label of an instance for usage and notes. Reads the current name, so renames show at once. */
+  harnessInstanceLabel(instanceId: string, provider: UsageProvider): string {
+    if (isDefaultHarnessInstanceId(instanceId)) return harnessTypeLabel(provider)
+    const stored = this.db.getHarnessInstance(instanceId)
+    return stored ? harnessInstanceDisplayName(stored.harness_type, stored.label) : harnessTypeLabel(provider)
+  }
+
+  // ── Subscription usage tracking ──────────────────────────
+
+  private getUsageTracker(): UsageTracker | null {
+    if (this.usageTracker !== undefined) return this.usageTracker
+    try {
+      const tracker = new UsageTracker(this.db.usage, Date.now, (instanceId, provider) => this.harnessInstanceLabel(instanceId, provider))
+      tracker.on('recorded', (records) => {
+        this.sendToRenderer(USAGE_RECORDED_CHANNEL, records)
+        for (const record of records) {
+          // Token counts only: no cost, plan limits, task ids or content.
+          analytics()?.record('provider.usage.recorded', {
+            provider: record.provider,
+            model: record.model,
+            inputTokens: record.inputTokens,
+            cacheReadTokens: record.cacheReadTokens,
+            cacheWriteTokens: record.cacheWriteTokens,
+            outputTokens: record.outputTokens,
+            reasoningTokens: record.reasoningTokens,
+            costReported: record.costSource === 'reported'
+          })
+        }
+      })
+      tracker.on('limits', (limits) => {
+        this.sendToRenderer(USAGE_LIMITS_UPDATED_CHANNEL, limits)
+        // Stops whose reset time was unknown can pick it up from fresh plan windows.
+        this.getLimitRecovery()?.applyLimits(limits)
+      })
+      this.usageTracker = tracker
+    } catch (error) {
+      console.warn('[AgentManager] Usage tracking unavailable:', error)
+      this.usageTracker = null
+    }
+    return this.usageTracker
+  }
+
+  // ── Usage-limit recovery (auto-continue after a limit reset) ──
+
+  private getLimitRecovery(): UsageLimitRecoveryScheduler | null {
+    if (this.limitRecovery !== undefined) return this.limitRecovery
+    try {
+      this.limitRecovery = new UsageLimitRecoveryScheduler({
+        store: new UsageLimitRecoveryStore(this.db.db),
+        autoResumeEnabled: () => isAutoResumeSettingEnabled(this.db.getSetting(AUTO_RESUME_LIMITED_TASKS_SETTING)),
+        getTaskState: (taskId) => {
+          const task = this.db.getTask(taskId)
+          return {
+            exists: !!task,
+            completed: task?.status === TaskStatus.Completed,
+            agentId: task?.agent_id ?? null,
+            busy: this.hasActiveSessionForTask(taskId)
+          }
+        },
+        resume: (recovery) => this.dispatchLimitContinuation(recovery),
+        emit: (recovery) => this.sendToRenderer(USAGE_LIMIT_RECOVERY_UPDATED_CHANNEL, recovery)
+      })
+    } catch (error) {
+      console.warn('[AgentManager] Usage-limit recovery unavailable:', error)
+      this.limitRecovery = null
+    }
+    return this.limitRecovery
+  }
+
+  /** Starts the usage-limit recovery sweep (runs overdue continuations from before a restart). */
+  startUsageLimitRecovery(): void {
+    this.getLimitRecovery()?.start()
+  }
+
+  getUsageLimitRecovery(taskId: string): UsageLimitRecovery | null {
+    return this.getLimitRecovery()?.get(taskId) ?? null
+  }
+
+  /**
+   * The user acted on a task (sent a message, started or resumed a session).
+   * Takes over from any scheduled usage-limit continuation. Called only from
+   * user-facing entry points (desktop IPC, mobile API) — automated senders
+   * (heartbeat, coordinator wake-ups, agent messages) must not cancel it.
+   */
+  noteUserTaskActivity(taskId?: string | null, sessionId?: string | null): void {
+    const resolvedTaskId = taskId || (sessionId ? this.sessions.get(sessionId)?.taskId : undefined)
+    if (!resolvedTaskId || this.limitRecoveryDispatching.has(resolvedTaskId)) return
+    this.getLimitRecovery()?.supersede(resolvedTaskId)
+  }
+
+  setUsageLimitRecoveryAutoResume(taskId: string, autoResume: boolean): UsageLimitRecovery | null {
+    return this.getLimitRecovery()?.setAutoResume(taskId, autoResume) ?? null
+  }
+
+  private recordUsageLimitStop(taskId: string, agentId: string, sessionId: string, resetAt: string | null, message: string | undefined): void {
+    const agent = this.db.getAgent(agentId)
+    const codingAgent = agent?.config?.coding_agent
+    const recovery = this.getLimitRecovery()?.recordStop({
+      taskId,
+      agentId,
+      provider: isUsageProvider(codingAgent) ? codingAgent : null,
+      sessionId,
+      resetAt,
+      message: message ?? null
+    })
+    if (recovery) {
+      console.log(`[AgentManager] Task ${taskId} stopped on a usage limit (reset ${recovery.resetAt ?? 'unknown'}, autoResume=${recovery.autoResume})`)
+    }
+  }
+
+  private async dispatchLimitContinuation(recovery: UsageLimitRecovery): Promise<void> {
+    console.log(`[AgentManager] Usage limit reset for task ${recovery.taskId}: sending continuation`)
+    this.limitRecoveryDispatching.add(recovery.taskId)
+    try {
+      await this.sendByTaskId(recovery.taskId, LIMIT_RECOVERY_CONTINUE_MESSAGE)
+      analytics()?.record('provider.usage_limit.auto_resumed', {
+        provider: recovery.provider,
+        waitedMinutes: Math.round((Date.now() - recovery.stoppedAt) / 60_000),
+        attempt: recovery.attempts + 1
+      })
+    } finally {
+      this.limitRecoveryDispatching.delete(recovery.taskId)
+    }
+  }
+
+  /** Usage and plan limits of an adapter are attributed to the harness instance it serves. */
+  private wireUsageTracking(adapter: CodingAgentAdapter, instanceId: string): void {
+    if (adapter instanceof AcpAdapter) {
+      adapter.cursorKeychainAccess = () => this.db.getSetting(CURSOR_KEYCHAIN_ACCESS_SETTING) === 'true'
+    }
+    adapter.onUsage = (report) => {
+      this.getUsageTracker()?.recordUsage({ ...report, instanceId })
+    }
+    adapter.onUsageLimits = (event) => {
+      this.getUsageTracker()?.applyLimitsEvent({ ...event, instanceId })
+    }
+  }
+
+  /** Lets the user allow (or revoke) reading the Cursor CLI login from the macOS Keychain. */
+  async setCursorKeychainAccess(enabled: boolean): Promise<UsageLimitsRefreshResult> {
+    this.db.setSetting(CURSOR_KEYCHAIN_ACCESS_SETTING, enabled ? 'true' : 'false')
+    this.getUsageTracker()?.clearProbeThrottle(defaultHarnessInstanceId('cursor'))
+    return this.refreshUsageLimits({ force: true })
+  }
+
+  // ── Harness instances (settings) ─────────────────────────
+
+  /**
+   * Links every stored instance's shared session history and records whether it
+   * is shareable. Called once at startup. The resume path reads only these records.
+   */
+  checkHarnessInstances(): void {
+    for (const instance of this.db.listHarnessInstances()) this.recordInstanceSharing(instance)
+  }
+
+  /** Links the instance's shared session history (idempotent) and records whether it is shareable. */
+  private recordInstanceSharing(instance: { id: string; harness_type: string; home_path: string }): boolean {
+    const harness = instance.harness_type as HarnessType
+    let shareable = false
+    try {
+      shareable = linkSharedHistory({
+        harness,
+        instanceHome: instanceHomeFor(harness, instance.home_path),
+        realHome: realHomeFor(harness)
+      }).shareable
+    } catch (err) {
+      console.warn(`[AgentManager] Could not check the shared history of ${instance.id}:`, err)
+    }
+    this.instanceSharing.set(instance.id, shareable)
+    return shareable
+  }
+
+  listHarnessInstances(): HarnessInstanceView[] {
+    return this.db.listHarnessInstances().map((instance) => this.toInstanceView(instance))
+  }
+
+  createHarnessInstance(data: CreateHarnessInstanceData): HarnessInstanceView {
+    if (!isHarnessType(data.harness_type)) throw new Error('Choose Claude Code or Codex for this account.')
+    const label = data.label?.trim()
+    if (!label) throw new Error('Name this account.')
+    const error = instanceHomeError(data.home_path ?? '', data.harness_type)
+    if (error) throw new Error(error)
+    const homePath = normalizeHomePath(data.home_path) ?? ''
+    const created = this.db.createHarnessInstance({ harness_type: data.harness_type, label, home_path: homePath })
+    this.recordInstanceSharing(created)
+    return this.toInstanceView(created)
+  }
+
+  updateHarnessInstance(id: string, data: UpdateHarnessInstanceData): HarnessInstanceView | undefined {
+    const before = this.db.getHarnessInstance(id)
+    if (!before) return undefined
+    const patch: UpdateHarnessInstanceData = {}
+    if (data.label !== undefined) {
+      const label = data.label.trim()
+      if (!label) throw new Error('Name this account.')
+      patch.label = label
+    }
+    if (data.home_path !== undefined) {
+      const error = instanceHomeError(data.home_path, before.harness_type as HarnessType)
+      if (error) throw new Error(error)
+      patch.home_path = normalizeHomePath(data.home_path) ?? ''
+    }
+    const updated = this.db.updateHarnessInstance(id, patch)
+    if (updated && patch.home_path !== undefined && patch.home_path !== before.home_path) {
+      // A new folder means a new login: rebuild its adapters and re-check its history.
+      this.forgetHarnessInstanceAdapters(id)
+      this.recordInstanceSharing(updated)
+    }
+    return updated ? this.toInstanceView(updated) : undefined
+  }
+
+  /**
+   * Removes an instance. Its agents continue on the default instance of their
+   * harness, and their sessions keep their ids. Its plan-limit snapshot is dropped too.
+   */
+  deleteHarnessInstance(id: string): boolean {
+    const removed = this.db.deleteHarnessInstance(id)
+    if (removed) {
+      this.forgetHarnessInstanceAdapters(id)
+      this.instanceSharing.delete(id)
+      this.getUsageTracker()?.forgetInstance(id)
+    }
+    return removed
+  }
+
+  private toInstanceView(instance: { id: string; harness_type: string; label: string; home_path: string; created_at: string }): HarnessInstanceView {
+    return {
+      ...instance,
+      harness_type: instance.harness_type as HarnessType,
+      shares_history: this.instanceSharing.get(instance.id) ?? false
+    }
+  }
+
+  getUsageLimits(): ProviderUsageLimits[] {
+    return this.getUsageTracker()?.getLimits() ?? []
+  }
+
+  getUsageSummary(query: UsageSummaryQuery = {}): UsageSummary | null {
+    return this.getUsageTracker()?.getSummary(query) ?? null
+  }
+
+  /**
+   * Re-reads subscription plan limits for every provider that has a
+   * subscription-authenticated agent configured. Automatic refreshes are
+   * throttled to once per 5 minutes per provider; `force` (manual refresh)
+   * to once per 15 seconds.
+   */
+  async refreshUsageLimits(options: { force?: boolean } = {}): Promise<UsageLimitsRefreshResult> {
+    const tracker = this.getUsageTracker()
+    if (!tracker) return { limits: [], refreshed: [] }
+
+    // One probe per harness instance: each login has its own plan limits.
+    const targets: UsageLimitsProbeTarget[] = []
+    const probed = new Set<string>()
+    for (const agent of this.db.getAgents()) {
+      const provider = agent.config?.coding_agent
+      if (!isUsageProvider(provider) || agent.config?.auth_method === 'api_key') continue
+      const instanceId = this.resolveAgentInstance(agent)?.id ?? defaultHarnessInstanceId(provider)
+      if (probed.has(instanceId)) continue
+      const adapter = this.getAdapter(agent.id)
+      if (!adapter?.probeUsageLimits) continue
+      probed.add(instanceId)
+      targets.push({ instanceId, provider, probe: () => adapter.probeUsageLimits!() })
+    }
+    return tracker.refreshLimits(targets, options)
   }
 
   /**
@@ -934,6 +1357,7 @@ export class AgentManager extends EventEmitter {
       systemPrompt: withPeakoIdentity(taskId, baseSystemPrompt, this.db.getSetting(PEAKO_SETTING_KEYS.name)),
       mcpServers,
       authMethod: agent.config?.auth_method,
+      harnessHome: this.resolveAgentInstance(agent)?.home,
       permissionMode: agent.config?.permission_mode,
       sandboxMode: agent.config?.sandbox_mode,
       apiKeys: agent.config?.api_keys,
@@ -1603,6 +2027,7 @@ export class AgentManager extends EventEmitter {
       systemPrompt: withPeakoIdentity(taskId, agent.config?.system_prompt, this.db.getSetting(PEAKO_SETTING_KEYS.name)),
       mcpServers,
       authMethod: agent.config?.auth_method,
+      harnessHome: this.resolveAgentInstance(agent)?.home,
       permissionMode: agent.config?.permission_mode,
       sandboxMode: agent.config?.sandbox_mode,
       apiKeys: agent.config?.api_keys,
@@ -1749,6 +2174,11 @@ export class AgentManager extends EventEmitter {
       let promptText: string
 
       if (isTriageSession && task) {
+        // Refresh plan limits (throttled) so list_agents reports current usage
+        // when the triage agent compares agents. Never blocks the triage start.
+        void this.refreshUsageLimits().catch((err) => {
+          console.warn('[AgentManager] Plan-limit refresh before triage failed:', err)
+        })
         // Use triage-specific prompt
         promptText = this.buildTriagePrompt(task)
       } else {
@@ -1832,6 +2262,11 @@ If a PR, deploy, or linked issue should be checked after this task, write \`hear
       const memoryFileName = this.getMemoryFileName(agentId)
       promptText += `\n\nIMPORTANT: First, read the \`${memoryFileName}\` file in the working directory — it has workspace config, skills, and project context.`
 
+      // A reassigned task's earlier conversation is prepared here, before the
+      // prompt is shown, so the transcript note sits ahead of the prompt.
+      const handoff = this.prepareContextHandoff(taskId, agentId)
+      if (handoff?.announce) this.announceContextHandoff(adapterSessionId, taskId, handoff)
+
       // Show the full prompt in the UI so the user can see the complete
       // context sent to the agent (repos, skills, secrets, heartbeat, etc.)
       this.sendToRenderer('agent:output', {
@@ -1850,12 +2285,14 @@ If a PR, deploy, or linked issue should be checked after this task, write \`hear
       // the race where the first tick() runs before we get here and forwards
       // the duplicate user message echoed by the adapter.
 
-      // Send prompt via adapter
+      // Send prompt via adapter. A reassigned task's earlier conversation goes
+      // in front of the prompt; the UI keeps showing only the prompt itself.
       const parts: MessagePart[] = [
-        { type: MessagePartType.TEXT, text: promptText }
+        { type: MessagePartType.TEXT, text: handoff ? handoff.block + CONTEXT_HANDOFF_SEPARATOR + promptText : promptText }
       ]
       try {
         await adapter.sendPrompt(adapterSessionId, parts, sessionConfig)
+        if (handoff) this.completeContextHandoff(taskId)
       } catch (sendError) {
         console.error(`[AgentManager] sendPrompt FAILED:`, sendError)
         // Write to crash log for visibility
@@ -2464,6 +2901,13 @@ If a PR, deploy, or linked issue should be checked after this task, write \`hear
       const status = await adapter.getStatus(sessionId, config)
       const session = this.sessions.get(sessionId)
 
+      // First prompt of a natively resumed session: the backend's answer decides
+      // whether the task keeps its session or continues by handoff.
+      if (session?.nativeResumeAwaitingAck) {
+        const settled = await this.settleNativeResume(sessionId, session, status, batchMessages)
+        if (settled === 'fell-back') return
+      }
+
       // Check for errors first (higher priority than idle)
       if (status.type === SessionStatusType.ERROR) {
         if (status.message?.includes('INCOMPATIBLE_SESSION_ID')) {
@@ -2482,6 +2926,13 @@ If a PR, deploy, or linked issue should be checked after this task, write \`hear
           console.log(`[AgentManager] Client not found for session ${sessionId}, stopping polling`)
           this.stopAdapterPolling(sessionId)
           return
+        }
+
+        if (status.usageLimit) {
+          this.recordUsageLimitStop(config.taskId, config.agentId, sessionId, status.usageLimit.resetAt, status.message)
+        } else {
+          // A continuation that failed for another reason shows as failed, not resumed.
+          this.limitRecovery?.markFailedIfRecent(config.taskId, status.message)
         }
 
         // Regular error (e.g., rate limit). If the same poll already delivered
@@ -2852,6 +3303,16 @@ If a PR, deploy, or linked issue should be checked after this task, write \`hear
 
     const agent = this.db.getAgent(agentId)!
 
+    // A session of another harness cannot be resumed here. Drop the reference
+    // and return the sentinel; the caller starts a new session, which receives the handoff.
+    const resumePlan = this.planResume(taskId, agentId, adapterSessionId)
+    if (resumePlan !== 'native-resume') {
+      // The caller starts a new session, which receives the handoff. The old
+      // session id stays until that session replaces it, so no context is lost.
+      console.log(`[AgentManager] Session ${adapterSessionId} is not resumed (${resumePlan}); task ${taskId} continues by a new session.`)
+      return ''
+    }
+
     // Use the same workspace resolution as startSession: try git worktree first,
     // then fall back to the default workspace dir. This is critical because Claude
     // Code stores session files under ~/.claude/projects/<encoded-workspaceDir>/,
@@ -2897,6 +3358,7 @@ If a PR, deploy, or linked issue should be checked after this task, write \`hear
       systemPrompt: withPeakoIdentity(taskId, baseSystemPrompt, this.db.getSetting(PEAKO_SETTING_KEYS.name)),
       mcpServers,
       authMethod: agent.config?.auth_method,
+      harnessHome: this.resolveAgentInstance(agent)?.home,
       permissionMode: agent.config?.permission_mode,
       sandboxMode: agent.config?.sandbox_mode,
       apiKeys: agent.config?.api_keys,
@@ -2951,6 +3413,14 @@ If a PR, deploy, or linked issue should be checked after this task, write \`hear
         errorMessage.includes('SESSION_FILE_NOT_FOUND') ||
         errorMessage.includes('Session no longer exists on server')
       ) {
+        // The task has a pending handoff, so the conversation is not lost: drop the
+        // dead session and leave the marker in place. The next session of this agent
+        // receives the handoff block. No dialog is needed.
+        if (parseContextHandoffMarker(this.db.getSetting(contextHandoffSettingKey(taskId)))) {
+          console.warn(`[AgentManager] Session ${adapterSessionId} is gone; task ${taskId} continues by handoff`)
+          return ''
+        }
+
         console.warn(`[AgentManager] Session not found or incompatible: ${adapterSessionId}`)
 
         // For completed/review tasks, the session may have ended normally.
@@ -2996,6 +3466,22 @@ If a PR, deploy, or linked issue should be checked after this task, write \`hear
 
       // Re-throw other errors
       throw error
+    }
+
+    // A native resume under another instance keeps the handoff marker until the
+    // first prompt is accepted (see completeNativeResume). If that prompt finds
+    // no session, the handoff is sent instead. Here we only note the continuation.
+    const pendingMarker = resumePlan === 'native-resume'
+      ? parseContextHandoffMarker(this.db.getSetting(contextHandoffSettingKey(taskId)))
+      : null
+    if (pendingMarker && !pendingMarker.continuedNoteShown) {
+      const from = pendingMarker.fromAgentId ? this.db.getAgent(pendingMarker.fromAgentId) : undefined
+      const fromInstance = this.resolveAgentInstance(from)
+      const toInstance = this.resolveAgentInstance(this.db.getAgent(agentId))
+      if (fromInstance && toInstance && fromInstance.id !== toInstance.id) {
+        this.announceContinuedOn(adapterSessionId, taskId, toInstance.label)
+      }
+      this.db.setSetting(contextHandoffSettingKey(taskId), JSON.stringify({ ...pendingMarker, continuedNoteShown: true }))
     }
 
     // Same attach-truthfulness rewrite as startAdapterSession: OpenCode may fail
@@ -3069,7 +3555,8 @@ If a PR, deploy, or linked issue should be checked after this task, write \`hear
       adapter,
       pollingStarted: false,
       secretSessionToken: secretToken,
-      taskContextMode: resumeTaskContextMode
+      taskContextMode: resumeTaskContextMode,
+      nativeResumeAwaitingAck: !!pendingMarker
     })
 
     // Persist the resumed session binding and tell the renderer BEFORE any
@@ -4303,7 +4790,8 @@ If a PR, deploy, or linked issue should be checked after this task, write \`hear
     session: AgentSession,
     sessionId: string,
     message: string,
-    attachments?: MessageAttachmentRef[]
+    attachments?: MessageAttachmentRef[],
+    opts: { redisplay?: boolean } = {}
   ): Promise<void> {
     session.autoAbortNotified = false
 
@@ -4353,8 +4841,15 @@ If a PR, deploy, or linked issue should be checked after this task, write \`hear
 
     const userFacingMessage = this.buildDisplayMessage(message, attachments)
 
+    // The first prompt of a natively resumed session carries no handoff. The
+    // handoff is only sent if that prompt finds no session (see fallBackToHandoff).
+    const nativeFirstPrompt = session.nativeResumeAwaitingAck === true
+    // First message of a session that took over a reassigned task: announce the carried-over context.
+    const handoff = nativeFirstPrompt ? null : this.prepareContextHandoff(session.taskId, session.agentId)
+    if (handoff?.announce) this.announceContextHandoff(sessionId, session.taskId, handoff)
+
     // Show user's message in UI
-    this.sendToRenderer('agent:output', {
+    if (opts.redisplay !== false) this.sendToRenderer('agent:output', {
       sessionId,
       taskId: session.taskId,
       type: 'message',
@@ -4397,8 +4892,20 @@ If a PR, deploy, or linked issue should be checked after this task, write \`hear
     if (currentTask) {
       promptText += this.buildTaskContextReminder(currentTask, liveTaskContextMode)
     }
+    if (handoff) promptText = handoff.block + CONTEXT_HANDOFF_SEPARATOR + promptText
     const parts: MessagePart[] = [{ type: MessagePartType.TEXT, text: promptText }]
-    await session.adapter.sendPrompt(sessionId, parts, sessionConfig)
+    // Set before the send: the backend can report "session not found" while the send is still in flight.
+    if (nativeFirstPrompt) session.nativeResumeFirstPrompt = { message, attachments }
+    try {
+      await session.adapter.sendPrompt(sessionId, parts, sessionConfig)
+    } catch (error) {
+      if (nativeFirstPrompt && isSessionGoneMessage(error instanceof Error ? error.message : String(error))) {
+        await this.fallBackToHandoff(sessionId, session, message, attachments, error)
+        return
+      }
+      throw error
+    }
+    if (handoff) this.completeContextHandoff(session.taskId)
     analytics()?.record('provider.turn.sent', {
       provider: getAgentProvider(this.db.getAgent(session.agentId)),
       model: sessionConfig.model,
@@ -4963,8 +5470,10 @@ If a PR, deploy, or linked issue should be checked after this task, write \`hear
    * Gets or creates an adapter by backend type (without requiring an agent ID).
    */
   private getAdapterByType(backendType: string): CodingAgentAdapter | null {
-    if (this.adapters.has(backendType)) {
-      return this.adapters.get(backendType)!
+    const instanceId = harnessTypeOf(backendType) ? defaultHarnessInstanceId(backendType) : undefined
+    const cacheKey = this.adapterCacheKey(backendType, instanceId)
+    if (this.adapters.has(cacheKey)) {
+      return this.adapters.get(cacheKey)!
     }
 
     let adapter: CodingAgentAdapter | null = null
@@ -4981,7 +5490,8 @@ If a PR, deploy, or linked issue should be checked after this task, write \`hear
     }
 
     if (adapter) {
-      this.adapters.set(backendType, adapter)
+      this.wireUsageTracking(adapter, instanceId ?? defaultHarnessInstanceId(backendType))
+      this.adapters.set(cacheKey, adapter)
     }
     return adapter
   }
@@ -5045,11 +5555,15 @@ IMPORTANT: For ALL task operations below, use ONLY the \`task-management\` MCP s
 Follow these steps:
 
 1. Call \`find_similar_tasks\` with individual keywords extracted from the title/description. Pass them as space-separated words in \`title_keywords\` (e.g. "login bug fix" not the full title). Do NOT set \`completed_only\` — search all tasks so you find patterns even if tasks are still in progress.
-2. Call \`list_agents\` to see available agents and their capabilities.
+2. Call \`list_agents\` to see available agents, their capabilities, and the current subscription plan usage of each agent's harness (\`usage_limits\`).
 3. Call \`list_skills\` to see available skills.
 4. Call \`list_repos\` to see known repositories.
 5. Based on the similar tasks and available resources, determine:
-   - The best agent_id to assign (REQUIRED — you must set this)
+   - The best agent_id to assign (REQUIRED — you must set this). Choose in this order:
+     1. Fit comes first: the agent whose purpose, system prompt, MCP servers, skills and past similar tasks best match this task. Never pick a worse-fitting agent only because it has more headroom.
+     2. Among agents that fit equally well, prefer the one whose \`usage_limits\` shows the lowest usage (highest \`headroom_percent\`). This matters most when usage is high: avoid agents at \`critical\` or \`exhausted\` level when an equally suitable agent has headroom.
+     3. Treat \`unknown\` (including stale readings) as having headroom, but below a known \`low\` level.
+     4. \`not_applicable\` means an API-key login billed per token: among equally suitable agents, prefer a subscription agent that still has headroom; use the API-key agent when subscription agents are \`critical\` or \`exhausted\`, or when it is the better fit.
    - Relevant skill_ids (if any match the task)
    - Appropriate repos (if the task relates to specific repositories)
    - Priority (critical/high/medium/low) — adjust if the current priority seems wrong
@@ -5060,7 +5574,7 @@ Follow these steps:
      - A review task might have: { id: "approved", name: "Approved", type: "boolean", required: true }
 6. If the task is complex and clearly involves multiple distinct steps that would benefit from separate agents or sequential human review, create subtasks using \`create_subtask\` from the \`task-management\` MCP server. Each subtask should:
    - Have a clear, specific title describing one step
-   - Be assigned to the most appropriate agent_id (REQUIRED for each subtask)
+   - Be assigned to the most appropriate agent_id (REQUIRED for each subtask), using the same order: fit first, then the lowest current plan usage among equally suitable agents
    - Have relevant skill_ids assigned based on what skills match that subtask's work
    - Have repos set to the repositories relevant to that subtask (inherits from parent if not specified)
    - Include a description explaining the subtask's scope, expected output, and how it relates to other subtasks
@@ -5657,6 +6171,223 @@ Important:
     }
   }
 
+  /**
+   * Plans a resume of the task's backend session on `agentId`. With no handoff
+   * marker the session belongs to the current agent, so it is resumed natively.
+   * With a marker, the agent changed since the session last ran: the same harness
+   * under a shareable instance resumes natively, anything else continues by handoff.
+   */
+  private planResume(taskId: string, agentId: string, sessionId: string): ContinuationPlan {
+    const marker = parseContextHandoffMarker(this.db.getSetting(contextHandoffSettingKey(taskId)))
+    if (!marker) return 'native-resume'
+    const from = marker.fromAgentId ? this.db.getAgent(marker.fromAgentId) : undefined
+    const to = this.db.getAgent(agentId)
+    return planContinuation(
+      { session_id: sessionId },
+      from ? this.continuationAgent(from.id, from.config?.coding_agent) : null,
+      this.continuationAgent(agentId, to?.config?.coding_agent),
+      {
+        // An existing session id is history in its own right, even when no transcript was stored.
+        hasHistory: !!sessionId || this.db.getTranscriptParts(taskId).length > 0,
+        // Reachability is only known once the first prompt is answered. A
+        // missing session then falls back to a handoff (see fallBackToHandoff).
+        sessionReachable: true,
+        sessionsShared: this.sharesSessionHistory(from) && this.sharesSessionHistory(to)
+      }
+    )
+  }
+
+  private continuationAgent(id: string, codingAgent: string | undefined): ContinuationAgent {
+    return { id, codingAgent }
+  }
+
+  /**
+   * Builds the handoff block when a task was moved to the agent that is starting
+   * a session and its earlier conversation has not been handed over yet. Returns
+   * null otherwise. Only the task's current agent receives the block, so a
+   * session still running for the previous agent is left alone.
+   */
+  private prepareContextHandoff(taskId: string, agentId: string): PreparedContextHandoff | null {
+    const key = contextHandoffSettingKey(taskId)
+    const marker = parseContextHandoffMarker(this.db.getSetting(key))
+    if (!marker) return null
+    const task = this.db.getTask(taskId)
+    if (!task || task.agent_id !== agentId) return null
+    if (marker.fromAgentId === agentId) {
+      this.db.deleteSetting(key)
+      return null
+    }
+
+    // This runs for a session that was NOT resumed natively: a new session, or a live one
+    // started without a resume. A native resume consumes the marker before it gets here.
+    // So a pending marker always means the backend session does not hold the conversation,
+    // whatever session_id the task has now. The session id saved by a fresh start must not
+    // make a same-harness handoff look native, so the reachability is always false here.
+    const previous = marker.fromAgentId ? this.db.getAgent(marker.fromAgentId) : undefined
+    const current = this.db.getAgent(agentId)
+    const transcript = this.db.getTranscriptParts(taskId)
+    const plan = planContinuation(
+      { session_id: null },
+      previous ? this.continuationAgent(previous.id, previous.config?.coding_agent) : null,
+      this.continuationAgent(agentId, current?.config?.coding_agent),
+      {
+        hasHistory: transcript.length > 0,
+        sessionReachable: false,
+        sessionsShared: this.sharesSessionHistory(previous) && this.sharesSessionHistory(current)
+      }
+    )
+    if (plan !== 'handoff') {
+      this.db.deleteSetting(key)
+      return null
+    }
+
+    const budgetSetting = Number(this.db.getSetting(CONTEXT_HANDOFF_BUDGET_SETTING))
+    const tokenBudget = Number.isFinite(budgetSetting) && budgetSetting > 0
+      ? budgetSetting
+      : CONTEXT_HANDOFF_DEFAULT_TOKEN_BUDGET
+
+    const built: ContextHandoffResult | null = buildContextHandoff(transcript, {
+      previousAgentLabel: previous
+        ? `${previous.name} (${harnessLabel(previous.config?.coding_agent)})`
+        : 'a previous agent',
+      tokenBudget,
+      // The task's own request, not the previous agent's startup prompt.
+      request: { title: task.title, description: task.description }
+    })
+    if (!built) {
+      this.db.deleteSetting(key)
+      return null
+    }
+    console.log(`[AgentManager] Context handoff for task ${taskId} to ${current?.name ?? agentId}: ${built.carried} carried, ${built.omitted} omitted, ~${built.usedTokens} tokens`)
+    return {
+      block: built.text,
+      carried: built.carried,
+      omitted: built.omitted,
+      previousAgentName: previous?.name ?? 'previous agent',
+      announce: !marker.announced
+    }
+  }
+
+  /** Shows the transcript note saying which context was carried over, once per handoff. */
+  private announceContextHandoff(sessionId: string, taskId: string, handoff: PreparedContextHandoff): void {
+    this.sendToRenderer('agent:output', {
+      sessionId,
+      taskId,
+      type: 'message',
+      data: {
+        id: `context-handoff-${taskId}-${Date.now()}`,
+        role: 'system',
+        partType: 'context-handoff',
+        content: `Context from ${handoff.previousAgentName} carried over (${handoff.carried} messages, ${handoff.omitted} omitted)`
+      }
+    })
+    const key = contextHandoffSettingKey(taskId)
+    const marker = parseContextHandoffMarker(this.db.getSetting(key))
+    if (marker) this.db.setSetting(key, JSON.stringify({ ...marker, announced: true }))
+  }
+
+  /** Transcript note for a native continue under another harness instance. Shown once per marker. */
+  private announceContinuedOn(sessionId: string, taskId: string, instanceLabel: string): void {
+    this.sendToRenderer('agent:output', {
+      sessionId,
+      taskId,
+      type: 'message',
+      data: {
+        id: `harness-instance-continued-${taskId}-${Date.now()}`,
+        role: 'system',
+        partType: 'harness-instance-continued',
+        content: `Continued on ${instanceLabel}`
+      }
+    })
+  }
+
+  /** Called once the handoff has reached the adapter. Until then the marker stays, so a failed send is retried. */
+  private completeContextHandoff(taskId: string): void {
+    this.db.deleteSetting(contextHandoffSettingKey(taskId))
+  }
+
+  /**
+   * Decides the first prompt of a natively resumed session from what the backend reports.
+   *
+   * - Acknowledged on assistant output, or on idle after the turn started (the
+   *   result came back). BUSY alone does not count: Claude Code reports a
+   *   missing session only after it has started the turn, so an early
+   *   acknowledgement would drop the handoff.
+   * - A session-gone error before the acknowledgement hands the task over: a new
+   *   session starts with the carried context and the same message. No dialog.
+   */
+  private async settleNativeResume(
+    sessionId: string,
+    session: AgentSession,
+    status: { type: string; message?: string },
+    batchMessages: ReadonlyArray<{ role: string }>
+  ): Promise<'pending' | 'acknowledged' | 'fell-back'> {
+    if (batchMessages.some((message) => message.role === 'assistant')) {
+      this.completeNativeResume(session)
+      return 'acknowledged'
+    }
+    if (status.type === SessionStatusType.ERROR && isSessionGoneMessage(status.message) && session.nativeResumeFirstPrompt) {
+      const pending = session.nativeResumeFirstPrompt
+      try {
+        await this.fallBackToHandoff(sessionId, session, pending.message, pending.attachments, status.message)
+      } catch (error) {
+        this.handleSessionError(sessionId, session, error)
+      }
+      return 'fell-back'
+    }
+    const entry = this.pollingEntries.get(sessionId)
+    if (status.type === SessionStatusType.IDLE && entry?.hasSeenWork) {
+      this.completeNativeResume(session)
+      return 'acknowledged'
+    }
+    return 'pending'
+  }
+
+  /**
+   * The backend accepted the first prompt of a natively resumed session, so the
+   * session really holds the conversation. The handoff marker is no longer needed.
+   */
+  private completeNativeResume(session: AgentSession): void {
+    session.nativeResumeAwaitingAck = false
+    session.nativeResumeFirstPrompt = undefined
+    this.db.deleteSetting(contextHandoffSettingKey(session.taskId))
+  }
+
+  /**
+   * The first prompt of a natively resumed session found no session on the
+   * backend (for example a missing session file, or a session that belongs to
+   * another login). The task continues by handoff: a new session starts and the
+   * same message is sent with the carried conversation. The session id is replaced
+   * only by that new session, after the context is in the prompt.
+   */
+  private async fallBackToHandoff(
+    sessionId: string,
+    session: AgentSession,
+    message: string,
+    attachments: MessageAttachmentRef[] | undefined,
+    cause: unknown
+  ): Promise<void> {
+    const reason = cause instanceof Error ? cause.message : String(cause)
+    console.warn(`[AgentManager] Native resume of ${sessionId} failed on its first prompt (${reason}); task ${session.taskId} continues by handoff`)
+    session.nativeResumeAwaitingAck = false
+    session.nativeResumeFirstPrompt = undefined
+    await this.stopSession(sessionId, false)
+    const newSessionId = await this.startSession(session.agentId, session.taskId, undefined, true)
+    const next = this.sessions.get(newSessionId)
+    if (!next) throw new Error('Failed to start a session for the handoff')
+    // The user's message is already in the transcript, so it is not shown twice.
+    await this.doSendAdapterMessage(next, newSessionId, message, attachments, { redisplay: false })
+  }
+
+  /**
+   * Called after the user reassigns a task in the agent dropdown. Stops the
+   * live session of the previous agent. The task's session_id was already
+   * cleared by the database write, so the next session starts from a handoff.
+   */
+  async handleTaskAgentChanged(taskId: string): Promise<void> {
+    await this.stopByTaskId(taskId)
+  }
+
   private sendToRenderer(channel: string, data: unknown): void {
     if (channel === 'task:updated' && data && typeof data === 'object') {
       const event = data as { taskId?: string; updates?: Record<string, unknown> }
@@ -5688,6 +6419,25 @@ Important:
       try { fn(channel, data) } catch { /* ignore */ }
     }
 
+    // Notify paired phones on run transitions and user questions.
+    if ((channel === 'agent:output' || channel === 'agent:output-batch') && data && typeof data === 'object') {
+      const output = data as { taskId?: string; sessionId?: string; data?: QuestionPart; messages?: QuestionPart[] }
+      const parts = output.messages ?? (output.data ? [output.data] : [])
+      const newQuestions = output.sessionId ? parts.filter(part => this.pushEvents.questionStarted(output.sessionId!, part)) : []
+      if (output.taskId && newQuestions.length > 0) {
+        const task = this.db.getTask(output.taskId)
+        const parentCompleted = task?.parent_task_id && this.db.getTask(task.parent_task_id)?.status === TaskStatus.Completed
+        if (task && !parentCompleted && !task.id.startsWith('heartbeat-') && task.id !== 'mastermind-session') {
+          const isWindowInactive = !this.mainWindow || this.mainWindow.isDestroyed() || !this.mainWindow.isFocused()
+          if (isWindowInactive) {
+            for (let i = 0; i < newQuestions.length; i++) {
+              void sendMobilePush(this.db, 'question', task.id, task.title).catch(error => console.error('[MobilePush] Send failed:', error))
+            }
+          }
+        }
+      }
+    }
+
     // Show OS notification when agent transitions from working to idle/waiting_approval
     // and the app window is not focused
     if (channel === 'agent:status' && data && typeof data === 'object') {
@@ -5695,14 +6445,23 @@ Important:
       if (sessionId && status) {
         const prevStatus = this.lastSentStatus.get(sessionId)
         this.lastSentStatus.set(sessionId, status)
+        const pushEvent = this.pushEvents.statusChanged(sessionId, prevStatus, status)
+        const isWindowInactive = !this.mainWindow || this.mainWindow.isDestroyed() || !this.mainWindow.isFocused()
+        if (pushEvent && taskId && isWindowInactive) {
+          const task = this.db.getTask(taskId)
+          const parentCompleted = task?.parent_task_id && this.db.getTask(task.parent_task_id)?.status === TaskStatus.Completed
+          if (task && !parentCompleted && !taskId.startsWith('heartbeat-') && taskId !== 'mastermind-session') {
+            void sendMobilePush(this.db, pushEvent, taskId, task.title).catch(error => console.error('[MobilePush] Send failed:', error))
+          }
+        }
 
         // Check ALL conditions BEFORE doing any DB/notification work.
         // Previously the sync db.getTask() call ran inside the notification
         // block but BEFORE checking if the window was inactive, blocking the
         // event loop on every status transition even when no notification was
         // needed.
-        const isWindowInactive = !this.mainWindow || this.mainWindow.isDestroyed() || !this.mainWindow.isFocused()
         const isNotifiableTransition = prevStatus === SessionStatus.WORKING && (status === SessionStatus.IDLE || status === SessionStatus.WAITING_APPROVAL)
+        const questionPending = this.pushEvents.hasPendingQuestion(sessionId)
 
         if (isNotifiableTransition && isWindowInactive) {
           try {
@@ -5721,7 +6480,11 @@ Important:
 
               let title: string
               let body: string
-              if (status === SessionStatus.WAITING_APPROVAL) {
+              if (questionPending) {
+                // The agent stopped to ask the user something. Say so instead of "finished".
+                title = 'Agent has a question'
+                body = taskTitle ? `"${taskTitle}" is waiting for your answer` : 'An agent is waiting for your answer'
+              } else if (status === SessionStatus.WAITING_APPROVAL) {
                 title = 'Agent needs approval'
                 body = taskTitle ? `"${taskTitle}" is waiting for your approval` : 'An agent is waiting for your approval'
               } else {

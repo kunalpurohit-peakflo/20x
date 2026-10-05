@@ -13,6 +13,7 @@ import { MASTERMIND_PREWARM_SETTING } from '@/components/orchestrator/Orchestrat
 import { PeakoSettings } from './PeakoSettings'
 import { useMastermindStore } from '@/stores/mastermind-store'
 import { AppearanceSettings } from './AppearanceSettings'
+import { PushNotificationSettings } from './PushNotificationSettings'
 
 /** Human-readable summary of a cleanup run, or null when there is nothing to report. */
 function describeCleanupOutcome(cleaned: number | undefined, nodeModulesCleaned: number | undefined): string | null {
@@ -335,6 +336,8 @@ const [currentVersion, setCurrentVersion] = useState<string | null>(null)
             disabled={loading}
           />
         </div>
+
+        <PushNotificationSettings />
 
         <div className="flex items-center justify-between py-2 border-b border-border">
           <div className="space-y-0.5">
