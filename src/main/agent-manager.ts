@@ -63,6 +63,8 @@ import {
 } from './context-handoff'
 import { ArtifactType, pullRequestUrlFromTool, type Artifact } from '../shared/artifacts'
 import { buildSystemMessage, computeDeliveryId, SystemMessageOrigin } from '../shared/system-authority'
+import { sendMobilePush } from './mobile-push'
+import { AgentPushEvents, type QuestionPart } from './agent-push-events'
 
 // Coding agent backend type enum
 enum CodingAgentType {
@@ -409,6 +411,7 @@ export class AgentManager extends EventEmitter {
 
   // Track last sent status per session to detect transitions for OS notifications
   private lastSentStatus: Map<string, string> = new Map()
+  private pushEvents = new AgentPushEvents()
 
   /**
    * Maximum total characters allowed in partContentLengths values per session.
@@ -6075,6 +6078,25 @@ Important:
       try { fn(channel, data) } catch { /* ignore */ }
     }
 
+    // Notify paired phones on run transitions and user questions.
+    if ((channel === 'agent:output' || channel === 'agent:output-batch') && data && typeof data === 'object') {
+      const output = data as { taskId?: string; sessionId?: string; data?: QuestionPart; messages?: QuestionPart[] }
+      const parts = output.messages ?? (output.data ? [output.data] : [])
+      const newQuestions = output.sessionId ? parts.filter(part => this.pushEvents.questionStarted(output.sessionId!, part)) : []
+      if (output.taskId && newQuestions.length > 0) {
+        const task = this.db.getTask(output.taskId)
+        const parentCompleted = task?.parent_task_id && this.db.getTask(task.parent_task_id)?.status === TaskStatus.Completed
+        if (task && !parentCompleted && !task.id.startsWith('heartbeat-') && task.id !== 'mastermind-session') {
+          const isWindowInactive = !this.mainWindow || this.mainWindow.isDestroyed() || !this.mainWindow.isFocused()
+          if (isWindowInactive) {
+            for (let i = 0; i < newQuestions.length; i++) {
+              void sendMobilePush(this.db, 'question', task.id, task.title).catch(error => console.error('[MobilePush] Send failed:', error))
+            }
+          }
+        }
+      }
+    }
+
     // Show OS notification when agent transitions from working to idle/waiting_approval
     // and the app window is not focused
     if (channel === 'agent:status' && data && typeof data === 'object') {
@@ -6082,14 +6104,23 @@ Important:
       if (sessionId && status) {
         const prevStatus = this.lastSentStatus.get(sessionId)
         this.lastSentStatus.set(sessionId, status)
+        const pushEvent = this.pushEvents.statusChanged(sessionId, prevStatus, status)
+        const isWindowInactive = !this.mainWindow || this.mainWindow.isDestroyed() || !this.mainWindow.isFocused()
+        if (pushEvent && taskId && isWindowInactive) {
+          const task = this.db.getTask(taskId)
+          const parentCompleted = task?.parent_task_id && this.db.getTask(task.parent_task_id)?.status === TaskStatus.Completed
+          if (task && !parentCompleted && !taskId.startsWith('heartbeat-') && taskId !== 'mastermind-session') {
+            void sendMobilePush(this.db, pushEvent, taskId, task.title).catch(error => console.error('[MobilePush] Send failed:', error))
+          }
+        }
 
         // Check ALL conditions BEFORE doing any DB/notification work.
         // Previously the sync db.getTask() call ran inside the notification
         // block but BEFORE checking if the window was inactive, blocking the
         // event loop on every status transition even when no notification was
         // needed.
-        const isWindowInactive = !this.mainWindow || this.mainWindow.isDestroyed() || !this.mainWindow.isFocused()
         const isNotifiableTransition = prevStatus === SessionStatus.WORKING && (status === SessionStatus.IDLE || status === SessionStatus.WAITING_APPROVAL)
+        const questionPending = this.pushEvents.hasPendingQuestion(sessionId)
 
         if (isNotifiableTransition && isWindowInactive) {
           try {
@@ -6108,7 +6139,11 @@ Important:
 
               let title: string
               let body: string
-              if (status === SessionStatus.WAITING_APPROVAL) {
+              if (questionPending) {
+                // The agent stopped to ask the user something. Say so instead of "finished".
+                title = 'Agent has a question'
+                body = taskTitle ? `"${taskTitle}" is waiting for your answer` : 'An agent is waiting for your answer'
+              } else if (status === SessionStatus.WAITING_APPROVAL) {
                 title = 'Agent needs approval'
                 body = taskTitle ? `"${taskTitle}" is waiting for your approval` : 'An agent is waiting for your approval'
               } else {

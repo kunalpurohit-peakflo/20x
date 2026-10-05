@@ -5,6 +5,9 @@ import { AgentManager } from './agent-manager'
 import { SessionStatus, TaskStatus } from '../shared/constants'
 import { MessagePartType, MessageRole, SessionStatusType } from './adapters/coding-agent-adapter'
 import { unregisterSecretSession } from './secret-broker'
+import { sendMobilePush } from './mobile-push'
+
+vi.mock('./mobile-push', () => ({ sendMobilePush: vi.fn(async () => ({ sent: 1, failed: 0 })) }))
 
 /** Path join that matches production `path.join` on this platform. */
 const p = (...parts: string[]) => join(...parts)
@@ -1004,6 +1007,30 @@ describe('AgentManager OS notifications', () => {
     expect(notificationInstances[0].opts.title).toBe('Agent finished')
     expect(notificationInstances[0].opts.body).toContain('Test Task')
     expect(notificationInstances[0].show).toHaveBeenCalled()
+  })
+
+  it('sends one question push and a question (not finished) desktop alert when the turn ends on a question', () => {
+    const { mgr } = createManagerWithWindow({ isFocused: false })
+    vi.spyOn(mgr as any, 'persistTranscriptEvent').mockImplementation(() => undefined)
+    ;(mgr as any).sendToRenderer('agent:status', { sessionId: 's1', taskId: 'task-1', status: SessionStatus.WORKING })
+    const question = { id: 'tool-1', partType: 'question', tool: { name: 'AskUserQuestion', status: 'pending' } }
+    ;(mgr as any).sendToRenderer('agent:output-batch', { sessionId: 's1', taskId: 'task-1', messages: [question] })
+    ;(mgr as any).sendToRenderer('agent:output-batch', { sessionId: 's1', taskId: 'task-1', messages: [question, { ...question, update: true, tool: { ...question.tool, status: 'completed' } }] })
+    ;(mgr as any).sendToRenderer('agent:status', { sessionId: 's1', taskId: 'task-1', status: SessionStatus.IDLE })
+    expect(sendMobilePush).toHaveBeenCalledTimes(1)
+    expect(sendMobilePush).toHaveBeenCalledWith(expect.anything(), 'question', 'task-1', 'Test Task')
+    expect(notificationInstances).toHaveLength(1)
+    expect(notificationInstances[0].opts.title).toBe('Agent has a question')
+    expect(notificationInstances[0].opts.body).toContain('Test Task')
+  })
+
+  it('keeps phone notifications quiet while the desktop window is focused', () => {
+    const { mgr } = createManagerWithWindow({ isFocused: true })
+    vi.spyOn(mgr as any, 'persistTranscriptEvent').mockImplementation(() => undefined)
+    ;(mgr as any).sendToRenderer('agent:status', { sessionId: 's1', taskId: 'task-1', status: SessionStatus.WORKING })
+    ;(mgr as any).sendToRenderer('agent:output', { sessionId: 's1', taskId: 'task-1', data: { id: 'tool-1', partType: 'question', tool: { name: 'AskUserQuestion', status: 'pending' } } })
+    ;(mgr as any).sendToRenderer('agent:status', { sessionId: 's1', taskId: 'task-1', status: SessionStatus.IDLE })
+    expect(sendMobilePush).not.toHaveBeenCalled()
   })
 
   it('shows notification when status transitions from working to waiting_approval and window is not focused', () => {
