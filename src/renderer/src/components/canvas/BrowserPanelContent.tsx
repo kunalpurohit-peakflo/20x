@@ -10,9 +10,18 @@ import {
   ExternalLink,
 } from 'lucide-react'
 import type { BrowserRecordingManifest } from '@shared/browser-recording'
+import { AGENT_BROWSER_PARTITION } from '@shared/agent-browser-session'
 import { browserRecordingApi } from '@/lib/ipc-client'
 import { notifyAgentsOfBrowserRecording } from '@/lib/browser-agent-notifications'
 import { useCanvasStore } from '@/stores/canvas-store'
+import { BrowserSessionImportPanel } from './BrowserSessionImportPanel'
+
+function pageDomain(url: string): string | null {
+  try {
+    const parsed = new URL(url)
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.hostname : null
+  } catch { return null }
+}
 
 interface BrowserPanelContentProps {
   panelId: string
@@ -62,6 +71,8 @@ export function BrowserPanelContent({
   const DEFAULT_URL = 'https://www.google.com'
   const initialSrc = useRef(initialUrl || DEFAULT_URL)
   const [inputValue, setInputValue] = useState(initialUrl || DEFAULT_URL)
+  const [pageUrl, setPageUrl] = useState(initialUrl || DEFAULT_URL)
+  const [importDomain, setImportDomain] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [canGoBack, setCanGoBack] = useState(false)
   const [canGoForward, setCanGoForward] = useState(false)
@@ -280,6 +291,8 @@ export function BrowserPanelContent({
     const onNavigate = (e: { url: string }) => {
       // Only update the URL bar text — never feed back into <webview src>
       setInputValue(e.url)
+      setPageUrl(e.url)
+      setImportDomain(current => current && current !== pageDomain(e.url) ? null : current)
       // Clear blocked state when navigating to a new URL
       setBlockedUrl(null)
       // Debounce store update to avoid flooding zustand on SPA navigations
@@ -461,6 +474,19 @@ export function BrowserPanelContent({
         >
           {recordingBusy ? 'Please wait…' : recording ? '■ Stop recording' : '● Record'}
         </button>
+        <button
+          type="button"
+          aria-expanded={importDomain !== null}
+          onClick={() => {
+            if (importDomain) { setImportDomain(null); return }
+            const current = webviewRef.current?.getURL?.() || pageUrl
+            setImportDomain(pageDomain(current))
+          }}
+          disabled={!pageDomain(pageUrl)}
+          className="rounded px-2 py-1 border border-border hover:bg-accent disabled:opacity-50 whitespace-nowrap"
+        >
+          Import session
+        </button>
         <span role={recordingError ? 'alert' : 'status'} className={recordingError ? 'text-destructive' : 'text-muted-foreground'}>
           {recordingNotice || (recording ? 'Recording actions and page snapshots' : 'Record browser actions and page snapshots')}
         </span>
@@ -477,6 +503,8 @@ export function BrowserPanelContent({
           </button>
         )}
       </div>
+
+      {importDomain && <BrowserSessionImportPanel key={importDomain} domain={importDomain} onClose={() => setImportDomain(null)} onImported={() => webviewRef.current?.reload()} />}
 
       {/* Bot-detection block banner */}
       {(blockedUrl || authStatus) && (
@@ -508,6 +536,7 @@ export function BrowserPanelContent({
         <webview
           ref={webviewRef as any}
           src={initialSrc.current}
+          partition={AGENT_BROWSER_PARTITION}
           className="w-full h-full"
           /* @ts-expect-error — Electron webview attributes not typed in JSX */
           allowpopups="true"

@@ -13,6 +13,9 @@ import { getPendingPin } from './mobile-api-server'
 import { sendMobilePush } from './mobile-push'
 import { setTaskApiUiState } from './task-api-server'
 import { panelBrowserBroker } from './panel-browser-broker'
+import { getAgentBrowserSession } from './agent-browser-session'
+import { listBrowserImportSources, importBrowserSessions, clearImportedBrowserSessions, normalizeDomains } from './browser-session-import'
+import type { BrowserImportRequest } from '../shared/browser-session-import'
 import type { UsageSummaryQuery } from '../shared/usage'
 import { sanitizeUsageSummaryQuery } from './usage/usage-query'
 import type {
@@ -2196,6 +2199,24 @@ else:
   })
 
   // ── Browser panel broker ────────────────────────────────
+  ipcMain.handle('browser:listImportSources', () => listBrowserImportSources())
+  ipcMain.handle('browser:importSessions', async (_event, input: BrowserImportRequest) => {
+    const source = listBrowserImportSources().find(item => item.id === input?.browserId)
+    if (!source || !source.profiles.some(profile => profile.id === input.profileId)) throw new Error('Select an available browser profile')
+    const domains = normalizeDomains(input.domains)
+    const choice = await dialog.showMessageBox({
+      type: 'warning', buttons: ['Cancel', 'Import sessions'], defaultId: 0, cancelId: 0,
+      title: 'Import signed-in sessions',
+      message: `Copy ${domains.length ? `cookies for ${domains.join(', ')}` : 'cookies for ALL SITES'} from ${source.name} (${input.profileId}) into the agent browser?`,
+      detail: `${domains.length ? '' : 'All sites may include email, banking, and single sign-on. '}Agents can use these signed-in sites. Cookies stay on this computer. On macOS, expect a Keychain prompt for the browser Safe Storage item. Safari may require Full Disk Access.`
+    })
+    if (choice.response !== 1) return { imported: 0, skipped: 0, unsupportedWindowsCookies: 0, byDomain: {} }
+    return importBrowserSessions(input)
+  })
+  ipcMain.handle('browser:clearImportedSessions', async () => {
+    const choice = await dialog.showMessageBox({ type: 'warning', buttons: ['Cancel', 'Clear all agent browser sessions'], defaultId: 0, cancelId: 0, title: 'Clear all agent browser sessions', message: 'Close agent browser pages and remove all cookies and site data from the agent browser?' })
+    return choice.response === 1 ? clearImportedBrowserSessions() : 0
+  })
   // Canvas browser panels register themselves here so agents can drive them
   // through browser_* MCP tools. Only registered panels are addressable; the
   // main app window is never registered and there is no global debug port.
@@ -2205,7 +2226,7 @@ else:
     }
     const taskIds = Array.isArray(payload.taskIds) ? payload.taskIds.filter((t): t is string => typeof t === 'string') : []
     if (!panelBrowserBroker.setPanelTasks(payload.panelId, taskIds)) {
-      panelBrowserBroker.registerPanel(payload.panelId, payload.webContentsId, taskIds)
+      return { success: panelBrowserBroker.registerPanel(payload.panelId, payload.webContentsId, taskIds) }
     }
     return { success: true }
   })
@@ -2402,7 +2423,7 @@ else:
 
       // ── Inject cookies into Electron session ──
       if (cookies.length > 0) {
-        const ses = session.defaultSession
+        const ses = getAgentBrowserSession()
         let injected = 0
         for (const cookie of cookies) {
           try {
@@ -2411,7 +2432,7 @@ else:
               url,
               name: cookie.name,
               value: cookie.value,
-              domain: cookie.domain,
+              ...(cookie.domain.startsWith('.') ? { domain: cookie.domain } : {}),
               path: cookie.path,
               secure: cookie.secure,
               httpOnly: cookie.httpOnly,
