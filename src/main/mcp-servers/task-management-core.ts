@@ -116,7 +116,7 @@ const sharedTools: Tool[] = [
   ...artifactTools,
   {
     name: 'list_agents',
-    description: 'List all available agents with their capabilities and configurations',
+    description: 'List all available agents with their capabilities and configurations. Each agent includes `usage_limits`: the current subscription plan usage of its harness (level low/moderate/high/critical/exhausted/unknown/not_applicable, most_used_percent, headroom_percent, per-window usage and reset times). When several agents fit a task equally well, prefer the one with the most headroom.',
     inputSchema: { type: 'object', properties: {} }
   },
   {
@@ -180,20 +180,60 @@ const sharedTools: Tool[] = [
 ]
 
 // Mastermind-only tools (full access to all tasks)
+/** Reads a task's transcript. Shared by mastermind and subtask scopes; a subtask is limited to its own task. */
+const getMessagesTool: Tool = {
+  name: 'get_messages',
+  description:
+    'Read the conversation of a task, newest first. Tool output is left out unless include_tools is true, because it is long and is rarely what a question is about. Page backwards with next_before_seq. Pass seq to read one message by its number, for example one listed as omitted in a context handoff.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      task_id: { type: 'string', description: 'Task ID' },
+      limit: { type: 'number', description: 'How many messages to return. Default 20, maximum 200.' },
+      before_seq: { type: 'number', description: 'Return messages older than this sequence number. Use next_before_seq from the previous call.' },
+      seq: { type: 'number', description: 'Return only the message with this sequence number.' },
+      role: { type: 'string', enum: ['user', 'assistant'], description: 'Return one side of the conversation only' },
+      include_tools: { type: 'boolean', description: 'Include tool calls and their output. Default false.' },
+      output_offset: { type: 'number', description: 'Character offset into a tool output to read from. Use output_next_offset from the previous result to read the next page. Default 0.' }
+    },
+    required: ['task_id']
+  }
+}
+
 const mastermindTools: Tool[] = [
+  getMessagesTool,
   {
     name: 'list_tasks',
     description:
-      'List all tasks with optional filters. Returns task details including title, description, status, priority, labels, agent assignment, and skills.',
+      'List tasks, newest first, with optional filters. Each row is a summary (id, title, status, priority, agent, labels, dates, the start of the description); call get_task for one task in full, or pass detail=true. For "what is going on" or "what needs me", call get_overview instead.',
     inputSchema: {
       type: 'object',
       properties: {
         status: { type: 'string', enum: ['not_started', 'triaging', 'agent_working', 'ready_for_review', 'agent_learning', 'completed'], description: 'Filter by task status' },
+        statuses: { type: 'array', items: { type: 'string', enum: ['not_started', 'triaging', 'agent_working', 'ready_for_review', 'agent_learning', 'completed'] }, description: 'Filter by any of several statuses' },
+        open_only: { type: 'boolean', description: 'Leave out completed tasks' },
+        search: { type: 'string', description: 'Words that must all appear in the title or description' },
+        detail: { type: 'boolean', description: 'Return full task records instead of summaries. Costly; prefer get_task.' },
         priority: { type: 'string', enum: ['critical', 'high', 'medium', 'low'], description: 'Filter by priority level' },
         has_agent: { type: 'boolean', description: 'Filter tasks with/without assigned agent' },
         labels: { type: 'array', items: { type: 'string' }, description: 'Filter by labels (tasks matching any of these labels)' },
         agent_id: { type: 'string', description: 'Filter by assigned agent ID' },
-        limit: { type: 'number', default: 100, description: 'Max results to return' }
+        updated_after: { type: 'string', description: 'Only tasks changed at or after this ISO date' },
+        updated_before: { type: 'string', description: 'Only tasks changed before this ISO date, for older work' },
+        limit: { type: 'number', default: 50, description: 'Max results to return. Default 50, maximum 200.' },
+        offset: { type: 'number', default: 0, description: 'Skip this many results, to page back to older tasks' }
+      }
+    }
+  },
+  {
+    name: 'get_overview',
+    description:
+      'One-call summary of the whole workspace: what is waiting for the user (approvals), failed, running, ready for review, overdue, due today, up next, and what finished since finished_since (default the last 24 hours), with complete counts and the first few tasks of each. Call this first for "what is going on?", "what needs me?" or "what is pending?". For older or longer lists, use list_tasks.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        finished_since: { type: 'string', description: 'ISO date; report tasks finished since then, e.g. a week ago for "what got done this week". Default: 24 hours ago.' },
+        per_group: { type: 'number', description: 'How many tasks to show in each group. Default 10, maximum 50.' }
       }
     }
   },
@@ -246,6 +286,10 @@ const mastermindTools: Tool[] = [
         auto_complete_without_review: { type: 'boolean', description: 'Complete the task automatically when its agent finishes, instead of leaving it for review. Needed for a task that must finish with no 20x window open.' },
         repos: { type: 'array', items: { type: 'string' }, description: 'Set repository paths/URLs for this task' },
         priority: { type: 'string', enum: ['critical', 'high', 'medium', 'low'] },
+        type: { type: 'string', enum: ['coding', 'manual', 'review', 'approval', 'general'] },
+        assignee: { type: 'string', description: 'Person responsible for the task' },
+        due_date: { type: 'string', description: 'Due date in ISO format; an empty string clears it' },
+        snoozed_until: { type: 'string', description: 'Hide the task from the active list until this ISO date; an empty string wakes it now' },
         status: {
           type: 'string',
           enum: ['not_started', 'triaging', 'agent_working', 'ready_for_review', 'agent_learning', 'completed'],
@@ -383,22 +427,6 @@ const mastermindTools: Tool[] = [
   // These are deliberately absent from the subtask tool set: a scoped agent
   // must not answer a checkpoint or stop work on a task that is not its own.
 
-  {
-    name: 'get_messages',
-    description:
-      'Read the conversation of a task, newest first. Tool output is left out unless include_tools is true, because it is long and is rarely what a question is about. Page backwards with next_before_seq.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        task_id: { type: 'string', description: 'Task ID' },
-        limit: { type: 'number', description: 'How many messages to return. Default 20, maximum 200.' },
-        before_seq: { type: 'number', description: 'Return messages older than this sequence number. Use next_before_seq from the previous call.' },
-        role: { type: 'string', enum: ['user', 'assistant'], description: 'Return one side of the conversation only' },
-        include_tools: { type: 'boolean', description: 'Include tool calls and their output. Default false.' }
-      },
-      required: ['task_id']
-    }
-  },
   {
     name: 'get_session_status',
     description:
@@ -732,6 +760,7 @@ const browserTools: Tool[] = [
 
 // Subtask-scoped tools (can only access parent task + sibling subtasks)
 const subtaskTools: Tool[] = [
+  getMessagesTool,
   {
     name: 'get_parent_task',
     description: 'Get the parent task details including description, resolution, and output fields.',
@@ -985,6 +1014,10 @@ async function handleScopedCall(
       return invoke('/get_session_transcript', { task_id: args.task_id })
     }
 
+    // A subtask reads only its own transcript, whatever task_id it passes.
+    case 'get_messages':
+      return invoke('/get_messages', { ...args, task_id: scope.taskId })
+
     // Shared tools pass through directly
     default:
       return invoke(`/${name}`, args)
@@ -1038,7 +1071,9 @@ export async function callToolForScope(
     if (result?.error) {
       return { content: [{ type: 'text', text: JSON.stringify(result) }], isError: true }
     }
-    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
+    // Compact: the reader is a model, and indentation alone added about a
+    // third to every reply's token count.
+    return { content: [{ type: 'text', text: JSON.stringify(result) }] }
   } catch (error: unknown) {
     return {
       content: [{ type: 'text', text: JSON.stringify({ error: (error as Error).message }) }],

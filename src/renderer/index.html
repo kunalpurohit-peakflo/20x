@@ -13,6 +13,8 @@
           var root = document.documentElement;
           if (dark) root.classList.add("dark");
           root.style.colorScheme = dark ? "dark" : "light";
+          var pack = localStorage.getItem("ui-theme-pack");
+          if (pack && pack !== "legacy") root.setAttribute("data-theme-pack", pack);
         } catch (e) {}
       })();
     </script>

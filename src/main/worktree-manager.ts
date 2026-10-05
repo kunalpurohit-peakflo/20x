@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } f
 import { readdir } from 'fs/promises'
 import { isAbsolute, join, relative, resolve, sep, win32 } from 'path'
 import { app, type BrowserWindow } from 'electron'
+import { generateBranchName, shortTaskId, withBranchSuffix, WORKTREE_BRANCH_MODE_KEY, WORKTREE_BRANCH_PREFIX_KEY, WORKTREE_BRANCH_TEMPLATE_KEY, type BranchTask } from '../shared/worktree-branch-name'
 
 const execFileAsync = promisify(execFile)
 
@@ -59,6 +60,9 @@ function isWithinRoot(rootPath: string, candidatePath: string): boolean {
 
 export class WorktreeManager {
   private mainWindow: BrowserWindow | null = null
+  private branchNamePromises = new Map<string, Promise<string>>()
+
+  constructor(private db?: { getSetting(key: string): string | null | undefined; setSetting(key: string, value: string): void; getTask(id: string): BranchTask | undefined }) {}
 
   setMainWindow(window: BrowserWindow): void {
     this.mainWindow = window
@@ -226,6 +230,84 @@ export class WorktreeManager {
     throw new Error(`Could not resolve any ref for ${defaultBranch} in ${barePath}`)
   }
 
+  private async branchExists(barePath: string, name: string, includeRemote = true): Promise<boolean> {
+    const refs = [`refs/heads/${name}`]
+    if (includeRemote) refs.push(`refs/remotes/origin/${name}`)
+    for (const ref of refs) {
+      try {
+        await execFileAsync('git', ['show-ref', '--verify', '--quiet', ref], { cwd: barePath })
+        return true
+      } catch {
+        // Check the next ref.
+      }
+    }
+    return false
+  }
+
+  private async branchAvailable(barePath: string, name: string): Promise<boolean> {
+    await execFileAsync('git', ['check-ref-format', '--branch', name], { cwd: barePath })
+    const { stdout } = await execFileAsync('git', [
+      'for-each-ref', '--format=%(refname)', 'refs/heads', 'refs/remotes/origin'
+    ], { cwd: barePath })
+    return !stdout.split('\n').some((ref) => {
+      const existing = ref.startsWith('refs/heads/')
+        ? ref.slice('refs/heads/'.length)
+        : ref.startsWith('refs/remotes/origin/')
+          ? ref.slice('refs/remotes/origin/'.length)
+          : ''
+      return existing && (existing === name || existing.startsWith(`${name}/`) || name.startsWith(`${existing}/`))
+    })
+  }
+
+  private taskBranchName(taskId: string): Promise<string> {
+    const cached = this.branchNamePromises.get(taskId)
+    if (cached) return cached
+    const promise = (async () => {
+      const key = `worktree_branch_base:${taskId}`
+      const stored = this.db?.getSetting(key)
+      if (stored) return stored
+      const task = this.db?.getTask(taskId) ?? { id: taskId, title: taskId }
+      const settings = {
+        mode: this.db?.getSetting(WORKTREE_BRANCH_MODE_KEY),
+        prefix: this.db?.getSetting(WORKTREE_BRANCH_PREFIX_KEY),
+        template: this.db?.getSetting(WORKTREE_BRANCH_TEMPLATE_KEY)
+      }
+      const proposal = settings.mode === 'ai' ? await this.proposeBranchName(task) : undefined
+      const name = generateBranchName(task, settings, proposal)
+      this.db?.setSetting(key, name)
+      return name
+    })()
+    this.branchNamePromises.set(taskId, promise)
+    return promise
+  }
+
+  private async proposeBranchName(task: BranchTask): Promise<string | undefined> {
+    const key = this.db?.getSetting('openai_api_key')
+    if (!key) return undefined
+    try {
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'gpt-4.1-mini',
+          temperature: 0,
+          max_tokens: 40,
+          messages: [
+            { role: 'system', content: 'Return only a concise git branch name in type/slug format. Choose type from feat, fix, chore, docs, refactor, test. Use lowercase ASCII and hyphens.' },
+            { role: 'user', content: `Title: ${task.title}\nDescription: ${(task.description || '').slice(0, 1500)}` }
+          ]
+        }),
+        signal: AbortSignal.timeout(4000)
+      })
+      if (!response.ok) return undefined
+      const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> }
+      const proposal = data.choices?.[0]?.message?.content?.trim()
+      return proposal && /^(feat|fix|chore|docs|refactor|test)\/[a-z0-9][a-z0-9-]{0,60}$/.test(proposal) ? proposal : undefined
+    } catch {
+      return undefined
+    }
+  }
+
   private async createWorktree(
     taskId: string,
     org: string,
@@ -247,27 +329,40 @@ export class WorktreeManager {
 
     this.sendProgress(taskId, repoName, 'creating worktree', false)
 
-    const branchName = `task/${taskId}`
-
-    // Check if branch already exists
-    try {
-      const { stdout } = await execFileAsync('git', ['branch', '--list', branchName], {
-        cwd: barePath
-      })
-      if (stdout.trim()) {
-        // Branch exists — create worktree from existing branch
-        console.log(`[WorktreeManager]   Branch ${branchName} exists, creating worktree from existing branch`)
-        console.log(`[WorktreeManager]   Executing: git worktree add ${wtPath} ${branchName}`)
-        console.log(`[WorktreeManager]   CWD: ${barePath}`)
-        await execFileAsync('git', ['worktree', 'add', wtPath, branchName], {
-          cwd: barePath
-        })
-        console.log(`[WorktreeManager]   Worktree created successfully`)
+    const branchKey = `worktree_branch:${taskId}:${org}/${repoName}`
+    const storedBranch = this.db?.getSetting(branchKey)
+    if (storedBranch) {
+      if (await this.branchExists(barePath, storedBranch, false)) {
+        await execFileAsync('git', ['worktree', 'add', wtPath, storedBranch], { cwd: barePath })
         return
       }
-    } catch (err: unknown) {
-      console.log(`[WorktreeManager]   Error checking for existing branch:`, (err as Error).message)
-      // ignore — fall through to create new branch
+      if (await this.branchExists(barePath, storedBranch)) {
+        await execFileAsync('git', ['worktree', 'add', '--track', '-b', storedBranch, wtPath, `origin/${storedBranch}`], { cwd: barePath })
+        return
+      }
+      throw new Error(`Stored branch ${storedBranch} is missing for ${org}/${repoName}; refusing to start a new branch from the default branch`)
+    }
+
+    // Recover a legacy branch if its worktree directory was removed.
+    const legacyName = `task/${taskId}`
+    if (await this.branchExists(barePath, legacyName, false)) {
+      await execFileAsync('git', ['worktree', 'add', wtPath, legacyName], { cwd: barePath })
+      this.db?.setSetting(branchKey, legacyName)
+      return
+    }
+
+    const baseName = await this.taskBranchName(taskId)
+    let branchName = baseName
+    if (!(await this.branchAvailable(barePath, branchName))) {
+      branchName = withBranchSuffix(baseName, shortTaskId(taskId))
+      if (!(await this.branchAvailable(barePath, branchName))) {
+        const flatName = baseName.replace(/\//g, '-')
+        branchName = withBranchSuffix(flatName, shortTaskId(taskId))
+        let attempt = 2
+        while (!(await this.branchAvailable(barePath, branchName))) {
+          branchName = withBranchSuffix(flatName, `${shortTaskId(taskId)}-${attempt++}`)
+        }
+      }
     }
 
     const startRef = await this.resolveStartRef(barePath, defaultBranch)
@@ -285,6 +380,7 @@ export class WorktreeManager {
         cwd: barePath,
         timeout: 60000
       })
+      this.db?.setSetting(branchKey, branchName)
       console.log(`[WorktreeManager]   Worktree created successfully`)
     } catch (err: unknown) {
       const execErr = err as { message: string; stdout?: string; stderr?: string }

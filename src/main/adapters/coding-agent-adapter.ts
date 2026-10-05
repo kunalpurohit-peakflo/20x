@@ -4,6 +4,9 @@
  */
 
 import type { ReasoningEffort } from '../../shared/reasoning-effort'
+import type { ProviderUsageLimits, ProviderUsageLimitsUpdate, UsageProvider } from '../../shared/usage'
+import type { UsageBucket } from '../usage/usage-normalize'
+import type { DiscreteUsageItem } from '../usage/usage-store'
 
 export enum SessionStatusType {
   IDLE = 'idle',
@@ -54,6 +57,11 @@ export interface SessionConfig {
   mcpServers?: Record<string, McpServerConfig>
   /** Claude Code auth method: 'subscription' (OAuth/Pro/Max) or 'api_key' (pay-per-use). Defaults to 'subscription'. */
   authMethod?: 'subscription' | 'api_key'
+  /**
+   * Home directory of the harness instance the session runs under: CODEX_HOME
+   * for Codex, CLAUDE_CONFIG_DIR for Claude Code. Unset means the harness default.
+   */
+  harnessHome?: string
   permissionMode?: 'ask' | 'allow'
   sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access'
   apiKeys?: {
@@ -74,9 +82,19 @@ export interface SessionConfig {
   tillDone?: boolean
 }
 
+/**
+ * Set on an ERROR status when the turn stopped because a subscription usage
+ * limit was hit. `resetAt` is the ISO time the blocking window(s) reset, or
+ * null when the provider did not report it (manual resume only).
+ */
+export interface UsageLimitStop {
+  resetAt: string | null
+}
+
 export interface SessionStatus {
   type: SessionStatusType
   message?: string
+  usageLimit?: UsageLimitStop
 }
 
 export interface SessionMessage {
@@ -122,6 +140,54 @@ export interface MessagePart {
     usage?: { total_tokens: number; tool_uses: number; duration_ms: number }
   }
 }
+
+/**
+ * Cumulative token usage observed on a provider session (Claude Code, Codex).
+ * Adapters report the provider's running totals as-is; the usage tracker turns
+ * them into per-turn deltas against the last persisted totals for the session.
+ */
+export interface AdapterCumulativeUsageReport {
+  kind?: 'cumulative'
+  provider: UsageProvider
+  /** Provider session / thread id the totals belong to. */
+  providerSessionId: string
+  taskId?: string
+  agentId?: string
+  /** Harness instance that produced the usage. Set by agent-manager. */
+  instanceId?: string
+  /**
+   * True when this app created the provider session, so every token in its
+   * running totals was consumed here. False for resumed sessions: if no
+   * baseline was persisted for them yet (e.g. they predate usage tracking),
+   * the first reading only establishes the baseline instead of attributing
+   * the session's whole history to the current turn.
+   */
+  newSession: boolean
+  buckets: UsageBucket[]
+}
+
+/**
+ * Discrete usage items (OpenCode / Pi assistant messages, Cursor turns). Each
+ * item carries a stable `sourceKey`; the tracker stores each key once, so
+ * adapters may safely re-report items (repeated events, history replays).
+ */
+export interface AdapterDiscreteUsageReport {
+  kind: 'discrete'
+  provider: UsageProvider
+  providerSessionId?: string
+  taskId?: string
+  agentId?: string
+  /** Harness instance that produced the usage. Set by agent-manager. */
+  instanceId?: string
+  items: DiscreteUsageItem[]
+}
+
+export type AdapterUsageReport = AdapterCumulativeUsageReport | AdapterDiscreteUsageReport
+
+/** Subscription plan-limit signal from a provider runtime. */
+export type AdapterUsageLimitsEvent =
+  | { kind: 'update'; provider: UsageProvider; instanceId?: string; update: ProviderUsageLimitsUpdate }
+  | { kind: 'snapshot'; instanceId?: string; limits: ProviderUsageLimits }
 
 export interface MessagePayload {
   content: string
@@ -312,4 +378,22 @@ export interface CodingAgentAdapter {
    * continuous polling loop.
    */
   onDataAvailable?: (sessionId: string) => void
+
+  /**
+   * Optional callback set by agent-manager. Adapters whose provider reports
+   * token usage call it with cumulative totals (typically once per turn).
+   */
+  onUsage?: (report: AdapterUsageReport) => void
+
+  /**
+   * Optional callback set by agent-manager. Adapters whose provider reports
+   * subscription plan limits call it with full snapshots or sparse updates.
+   */
+  onUsageLimits?: (event: AdapterUsageLimitsEvent) => void
+
+  /**
+   * Read the provider's current subscription plan limits on demand.
+   * Returns null when the adapter cannot read limits at all.
+   */
+  probeUsageLimits?(): Promise<ProviderUsageLimits | null>
 }

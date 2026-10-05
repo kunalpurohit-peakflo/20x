@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo, useRef, lazy, Suspense } from 'react'
+import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef, lazy, Suspense } from 'react'
 import { Sidebar } from './Sidebar'
 import { TaskWorkspace } from '@/components/tasks/TaskWorkspace'
 import { InfiniteCanvas } from '@/components/canvas/InfiniteCanvas'
@@ -13,12 +13,17 @@ import { useVoiceControl } from '@/hooks/use-voice-control'
 import { useUiRemoteControl } from '@/hooks/use-ui-remote-control'
 import { useRecordingChrome } from '@/hooks/use-recording-chrome'
 import { TopBarVoiceButton } from '@/components/voice/TopBarVoiceButton'
+import { PeakoBridge } from '@/components/peako/PeakoBridge'
+import { useThemeStore } from '@/stores/theme-store'
+import { useMastermindStore } from '@/stores/mastermind-store'
+import { resolveHomeLayout } from '@shared/theme-packs'
 
 // Lazy-load heavy workspace components — only imported when their view is active.
 // This reduces the initial bundle size and speeds up first render significantly.
 const SkillWorkspace = lazy(() => import('@/components/skills/SkillWorkspace').then(m => ({ default: m.SkillWorkspace })))
 const SettingsWorkspace = lazy(() => import('@/components/settings/SettingsWorkspace').then(m => ({ default: m.SettingsWorkspace })))
 const DashboardWorkspace = lazy(() => import('@/components/dashboard/DashboardWorkspace').then(m => ({ default: m.DashboardWorkspace })))
+const TodayHome = lazy(() => import('@/components/dashboard/TodayHome').then(m => ({ default: m.TodayHome })))
 const OrchestratorPanel = lazy(() => import('@/components/orchestrator/OrchestratorPanel').then(m => ({ default: m.OrchestratorPanel })))
 import { useTasks } from '@/hooks/use-tasks'
 import { useUIStore } from '@/stores/ui-store'
@@ -41,7 +46,7 @@ import { KeyboardShortcutsDialog } from './KeyboardShortcutsDialog'
 import { SubtaskPickerDialog } from '@/components/tasks/SubtaskPickerDialog'
 import type { SidebarView } from '@/stores/ui-store'
 import logo20x from '@/assets/logos/20x.svg'
-import { dispatchTaskShortcut, findComposerElement, focusComposerInput, getChordCommand, getNextNudgeMessage, insertIntoComposer, isGlobalShortcutBlocked, onShortcutFeedback, shouldAutoFocusComposer, TaskShortcutAction } from '@/lib/keyboard-shortcuts'
+import { createChordTracker, dispatchTaskShortcut, findComposerElement, focusComposerInput, getNextNudgeMessage, getShortcutKey, insertIntoComposer, isGlobalShortcutBlocked, isModifierKeyEvent, onShortcutFeedback, shouldAutoFocusComposer, TaskShortcutAction, type ChordCommand } from '@/lib/keyboard-shortcuts'
 import { selectVoiceReady, useVoiceStore } from '@/stores/voice-store'
 import { composerCanSubmit, MASTERMIND_COMPOSER_KEY, sendComposerMessage, setActiveComposer } from '@/lib/voice-dictation-target'
 
@@ -80,6 +85,8 @@ export function AppLayout() {
   const closeDashboardPreview = useUIStore((s) => s.closeDashboardPreview)
   const canvasPendingTaskId = useUIStore((s) => s.canvasPendingTaskId)
   const showOrchestrator = useUIStore((s) => s.showOrchestrator)
+  const homeLayout = useThemeStore((s) => resolveHomeLayout(s.pack, s.layout))
+  const assistantName = useMastermindStore((s) => s.assistantName)
   const setShowOrchestrator = useUIStore((s) => s.setShowOrchestrator)
   const toggleOrchestrator = useUIStore((s) => s.toggleOrchestrator)
   const createTaskPrefill = useUIStore((s) => s.createTaskPrefill)
@@ -103,7 +110,6 @@ export function AppLayout() {
   const [cmdOpen, setCmdOpen] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const [subtaskPickerOpen, setSubtaskPickerOpen] = useState(false)
-  const chordRef = useRef<{ key: 'g' | 'o' | 'y' | 'v'; timer: number } | null>(null)
 
   // ── Update indicator state ──
   const [updateAvailableVersion, setUpdateAvailableVersion] = useState<string | null>(null)
@@ -485,6 +491,25 @@ export function AppLayout() {
     }, 0)
   }, [setShowOrchestrator, showToast])
 
+  /**
+   * Peako's microphone: always a hands-free conversation with Mastermind, so
+   * each sentence is sent and the answer read aloud. The drawer stays closed;
+   * its composer is mounted either way, and Peako shows the chat.
+   */
+  const togglePeakoVoice = useCallback(() => {
+    const voice = useVoiceStore.getState()
+    if (!selectVoiceReady(voice)) return
+    if (voice.turnId) {
+      void voice.endTurn()
+      return
+    }
+    setActiveComposer(MASTERMIND_COMPOSER_KEY)
+    window.setTimeout(() => {
+      const mode = composerCanSubmit(MASTERMIND_COMPOSER_KEY) ? 'conversation' : 'dictation'
+      void useVoiceStore.getState().toggleTurn(mode)
+    }, 0)
+  }, [])
+
   const commandActions = useMemo(() => ({
     nextTask: () => navigateVisibleTask(1),
     previousTask: () => navigateVisibleTask(-1),
@@ -576,120 +601,137 @@ export function AppLayout() {
   }, [])
 
   // ── Global keyboard shortcuts: command palette, navigation chords, and task actions ──
+  // Chord state lives in a stable tracker (not in a ref that an effect cleanup
+  // could leave half-reset). It expires by time, so nothing has to clear it.
+  const [chords] = useState(createChordTracker)
+
+  const runChordCommand = (command: ChordCommand) => {
+    if (command.type === 'view') {
+      if (activeModal === 'settings') closeModal()
+      setSidebarView(command.view)
+    } else if (command.type === 'task') {
+      runTaskShortcut(command.action)
+    } else if (command.type === 'canvas') {
+      if (activeTaskId) openActiveTaskOnCanvas()
+      else setSidebarView('canvas')
+    } else if (command.type === 'parent') {
+      openParentTask()
+    } else if (command.type === 'subtasks') {
+      openSubtasks()
+    } else if (command.type === 'taskAudio') {
+      toggleTaskAudio()
+    } else if (command.type === 'mastermindAudio') {
+      toggleMastermindAudio()
+    }
+  }
+
+  const onGlobalKey = (e: KeyboardEvent) => {
+    // Layout-independent letter (a Cyrillic layout still maps the O key to 'o').
+    const key = getShortcutKey(e)
+    if ((e.metaKey || e.ctrlKey) && !e.altKey) {
+      chords.cancel()
+      if (key === 'k') {
+        e.preventDefault()
+        setCmdOpen((value) => !value)
+        captureAnalyticsEvent('command_palette_toggled', { source: 'keyboard' })
+        return
+      }
+      const number = Number(key)
+      if (Number.isInteger(number) && number >= 1 && number <= NAV_ITEMS.length) {
+        e.preventDefault()
+        if (activeModal === 'settings') closeModal()
+        setSidebarView(NAV_ITEMS[number - 1].key)
+        captureAnalyticsEvent('workspace_view_selected', { view: NAV_ITEMS[number - 1].key, source: 'keyboard' })
+      }
+      return
+    }
+
+    // Second key of a pending chord (O, G, Y, V). A key that does not complete a
+    // chord is not swallowed: the chord is dropped and the key is handled below.
+    if (chords.isPending() && !isModifierKeyEvent(e)) {
+      // A held starter key auto-repeats; it must not complete its own chord.
+      if (e.repeat) return
+      if (isGlobalShortcutBlocked(e, true)) {
+        chords.cancel()
+      } else {
+        const command = chords.complete(key)
+        if (command) {
+          e.preventDefault()
+          runChordCommand(command)
+          return
+        }
+      }
+    }
+
+    // Radix dialogs prevent the Escape event after they close. Respect that
+    // marker so this listener does not also close the task behind the popup.
+    if (isGlobalShortcutBlocked(e)) return
+
+    // A selected canvas task makes the canvas behave like the tasks view:
+    // the single-letter task shortcuts and the o/y/v chords act on it. 'g'
+    // chords are always available.
+    const chordsAllowed = sidebarView !== 'canvas' || !!canvasTaskId
+    if (key === 'g' || (chordsAllowed && (key === 'o' || key === 'y' || key === 'v'))) {
+      e.preventDefault()
+      if (!e.repeat) chords.start(key)
+      return
+    }
+    // J/K move the task selection in every view — through the task list in
+    // the tasks view and across the open task panels on the canvas (with
+    // nothing selected they pick the first/last task panel).
+    if (key === 'j') { e.preventDefault(); navigateVisibleTask(1); return }
+    if (key === 'k') { e.preventDefault(); navigateVisibleTask(-1); return }
+    // Without a selected task panel the canvas keeps its own shortcuts and
+    // the global task shortcuts stay off.
+    if (sidebarView === 'canvas' && !canvasTaskId) return
+    if (e.repeat) return
+
+    // Explicit composer focus (I) — before single-letter task shortcuts
+    if (key === 'i' && !e.shiftKey) { e.preventDefault(); focusComposer(); return }
+
+    // Just start typing: any printable key that is not a defined shortcut focuses the
+    // composer and inserts the character, so the first keystroke is not lost.
+    if (shouldAutoFocusComposer(e, chords.isPending())) {
+      const composer = findComposerElement()
+      if (composer) {
+        e.preventDefault()
+        composer.focus()
+        insertIntoComposer(composer, e.key)
+        captureAnalyticsEvent('composer_focused', { source: 'keyboard', trigger: 'auto_type' })
+        return
+      }
+    }
+
+    if (e.key === 'Enter' && !(e.target as HTMLElement | null)?.closest('button, a')) { e.preventDefault(); openSelectedTask() }
+    else if (e.key === 'Escape') {
+      e.preventDefault()
+      if (showOrchestrator) setShowOrchestrator(false)
+      else if (sidebarView !== 'canvas') clearTaskSelection()
+      // On the canvas Escape is handled by InfiniteCanvas itself: it cancels
+      // connections, closes the context menu and deselects the panel.
+    }
+    else if (key === 'c') { e.preventDefault(); openCreateModal() }
+    else if (key === 'e') { e.preventDefault(); completeActiveTask() }
+    else if (key === 'h' && e.shiftKey) { e.preventDefault(); void runActiveHeartbeat() }
+    else if (key === 'h') { e.preventDefault(); runTaskShortcut(TaskShortcutAction.SNOOZE) }
+    else if (key === 'r') { e.preventDefault(); runTaskShortcut(TaskShortcutAction.RUN) }
+    else if (key === 'w') { e.preventDefault(); nudgeActiveTask() }
+    else if (e.key === '#') { e.preventDefault(); deleteActiveTask() }
+    else if (e.key === '?') { e.preventDefault(); setShortcutsOpen(true) }
+    else if (e.key === '/') { e.preventDefault(); focusSearch() }
+  }
+
+  // Subscribe once. The listener calls the handler from the latest render, so a
+  // dependency change never removes and re-adds the listener mid-chord.
+  const onGlobalKeyRef = useRef(onGlobalKey)
+  useLayoutEffect(() => {
+    onGlobalKeyRef.current = onGlobalKey
+  })
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const key = e.key.toLowerCase()
-      if ((e.metaKey || e.ctrlKey) && !e.altKey) {
-        if (key === 'k') {
-          e.preventDefault()
-          setCmdOpen((value) => !value)
-          captureAnalyticsEvent('command_palette_toggled', { source: 'keyboard' })
-          return
-        }
-        const number = Number(e.key)
-        if (Number.isInteger(number) && number >= 1 && number <= NAV_ITEMS.length) {
-          e.preventDefault()
-          if (activeModal === 'settings') closeModal()
-          setSidebarView(NAV_ITEMS[number - 1].key)
-          captureAnalyticsEvent('workspace_view_selected', { view: NAV_ITEMS[number - 1].key, source: 'keyboard' })
-        }
-        return
-      }
-      const pending = chordRef.current
-      // A chord already started outside an input must get its second key even
-      // if focus moved to the composer in the meantime.
-      if (pending && !isGlobalShortcutBlocked(e, true)) {
-        window.clearTimeout(pending.timer)
-        chordRef.current = null
-        const command = getChordCommand(pending.key, key)
-        if (command) e.preventDefault()
-        if (command?.type === 'view') {
-          if (activeModal === 'settings') closeModal()
-          setSidebarView(command.view)
-        } else if (command?.type === 'task') {
-          runTaskShortcut(command.action)
-        } else if (command?.type === 'canvas') {
-          if (activeTaskId) openActiveTaskOnCanvas()
-          else setSidebarView('canvas')
-        } else if (command?.type === 'parent') {
-          openParentTask()
-        } else if (command?.type === 'subtasks') {
-          openSubtasks()
-        } else if (command?.type === 'taskAudio') {
-          toggleTaskAudio()
-        } else if (command?.type === 'mastermindAudio') {
-          toggleMastermindAudio()
-        }
-        return
-      }
-
-      // Radix dialogs prevent the Escape event after they close. Respect that
-      // marker so this listener does not also close the task behind the popup.
-      if (isGlobalShortcutBlocked(e)) return
-
-      // A selected canvas task makes the canvas behave like the tasks view:
-      // the single-letter task shortcuts and the o/y/v chords act on it. 'g'
-      // chords are always available.
-      const chordsAllowed = sidebarView !== 'canvas' || !!canvasTaskId
-      if (key === 'g' || (chordsAllowed && (key === 'o' || key === 'y' || key === 'v'))) {
-        e.preventDefault()
-        chordRef.current = {
-          key: key as 'g' | 'o' | 'y' | 'v',
-          timer: window.setTimeout(() => { chordRef.current = null }, 1200)
-        }
-        return
-      }
-      // J/K move the task selection in every view — through the task list in
-      // the tasks view and across the open task panels on the canvas (with
-      // nothing selected they pick the first/last task panel).
-      if (key === 'j') { e.preventDefault(); navigateVisibleTask(1); return }
-      if (key === 'k') { e.preventDefault(); navigateVisibleTask(-1); return }
-      // Without a selected task panel the canvas keeps its own shortcuts and
-      // the global task shortcuts stay off.
-      if (sidebarView === 'canvas' && !canvasTaskId) return
-      if (e.repeat && key !== 'j' && key !== 'k') return
-
-      // Explicit composer focus (I) — before single-letter task shortcuts
-      if (key === 'i' && !e.shiftKey) { e.preventDefault(); focusComposer(); return }
-
-      // Just start typing: any printable key that is not a defined shortcut focuses the
-      // composer and inserts the character, so the first keystroke is not lost.
-      if (shouldAutoFocusComposer(e, !!chordRef.current)) {
-        const composer = findComposerElement()
-        if (composer) {
-          e.preventDefault()
-          composer.focus()
-          insertIntoComposer(composer, e.key)
-          captureAnalyticsEvent('composer_focused', { source: 'keyboard', trigger: 'auto_type' })
-          return
-        }
-      }
-
-      if (e.key === 'Enter' && !(e.target as HTMLElement | null)?.closest('button, a')) { e.preventDefault(); openSelectedTask() }
-      else if (e.key === 'Escape') {
-        e.preventDefault()
-        if (showOrchestrator) setShowOrchestrator(false)
-        else if (sidebarView !== 'canvas') clearTaskSelection()
-        // On the canvas Escape is handled by InfiniteCanvas itself: it cancels
-        // connections, closes the context menu and deselects the panel.
-      }
-      else if (key === 'c') { e.preventDefault(); openCreateModal() }
-      else if (key === 'e') { e.preventDefault(); completeActiveTask() }
-      else if (key === 'h' && e.shiftKey) { e.preventDefault(); void runActiveHeartbeat() }
-      else if (key === 'h') { e.preventDefault(); runTaskShortcut(TaskShortcutAction.SNOOZE) }
-      else if (key === 'r') { e.preventDefault(); runTaskShortcut(TaskShortcutAction.RUN) }
-      else if (key === 'w') { e.preventDefault(); nudgeActiveTask() }
-      else if (e.key === '#') { e.preventDefault(); deleteActiveTask() }
-      else if (e.key === '?') { e.preventDefault(); setShortcutsOpen(true) }
-      else if (e.key === '/') { e.preventDefault(); focusSearch() }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => {
-      window.removeEventListener('keydown', onKey)
-      if (chordRef.current) window.clearTimeout(chordRef.current.timer)
-    }
-  }, [activeModal, activeTaskId, canvasTaskId, clearTaskSelection, closeModal, completeActiveTask, deleteActiveTask, focusComposer, focusSearch, navigateVisibleTask, nudgeActiveTask, openActiveTaskOnCanvas, openCreateModal, openParentTask, openSelectedTask, openSubtasks, runActiveHeartbeat, runTaskShortcut, setShowOrchestrator, setSidebarView, showOrchestrator, sidebarView, toggleMastermindAudio, toggleTaskAudio])
-
+    const listener = (e: KeyboardEvent) => onGlobalKeyRef.current(e)
+    window.addEventListener('keydown', listener)
+    return () => window.removeEventListener('keydown', listener)
+  }, [])
   return (
     <>
       {completionDialog}
@@ -772,9 +814,9 @@ export function AppLayout() {
             <Settings className="h-3.5 w-3.5" />
           </button>
           <div className="mx-1 h-3.5 w-px bg-border/70" />
-          {/* Start talking to Mastermind from any view. Hidden until voice is on. */}
+          {/* Start talking to Peako from any view. Hidden until voice is on. */}
           <TopBarVoiceButton />
-          {/* Quieter than the microphone beside it: typing to Mastermind is
+          {/* Quieter than the microphone beside it: typing to Peako is
               the fallback, speaking to it is the invitation. */}
           <Button
             variant={showOrchestrator ? 'default' : 'ghost'}
@@ -783,7 +825,7 @@ export function AppLayout() {
             className="h-7 px-2"
           >
             <MessageSquare className="h-3 w-3" />
-            <span className="text-[11px]">Mastermind</span>
+            <span className="text-[11px]">{assistantName}</span>
           </Button>
         </div>
       </div>
@@ -855,7 +897,7 @@ export function AppLayout() {
               </Suspense>
             ) : sidebarView === 'dashboard' ? (
               <Suspense fallback={<div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">Loading...</div>}>
-                <DashboardWorkspace />
+                {homeLayout === 'calm' ? <TodayHome /> : <DashboardWorkspace />}
               </Suspense>
             ) : sidebarView === 'skills' ? (
               <Suspense fallback={<div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">Loading...</div>}>
@@ -879,7 +921,7 @@ export function AppLayout() {
           </div>
         </main>
 
-        {/* Mastermind drawer — sits beside the workspace, shifts main content left */}
+        {/* Peako's chat drawer — sits beside the workspace, shifts main content left */}
         <div
           className={`flex-shrink-0 transition-all duration-200 ease-in-out overflow-hidden ${
             showOrchestrator ? 'w-[340px]' : 'w-0'
@@ -895,6 +937,9 @@ export function AppLayout() {
 
       {/* Bottom status bar — live agent/task counts + version */}
       <StatusBar />
+
+      {/* Feeds Peako's desktop window; renders nothing. */}
+      <PeakoBridge onToggleVoice={togglePeakoVoice} />
 
       {/* Create Task Dialog — dismiss on outside click */}
       <Dialog open={activeModal === 'create'} onOpenChange={(open) => { if (!open) { closeModal(); clearCreateTaskPrefill() } }}>

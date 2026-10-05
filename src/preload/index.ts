@@ -1,7 +1,19 @@
 import type { BrowserRecordingManifest } from '../shared/browser-recording'
+import type { BrowserImportRequest, BrowserImportResult, BrowserImportSource } from '../shared/browser-session-import'
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { ArtifactContent, ArtifactCopyFileResult, ArtifactFileEntry, PullRequestDetails } from '../shared/artifacts'
 import { UI_COMMAND_CHANNEL, type UiCommand } from '../shared/ui-commands'
+import { PEAKO_CHANNELS, type PeakoMainCommand, type PeakoState } from '../shared/peako'
+import {
+  USAGE_LIMITS_UPDATED_CHANNEL,
+  USAGE_RECORDED_CHANNEL,
+  type ProviderUsageLimits,
+  type TokenUsageRecord,
+  type UsageLimitsRefreshResult,
+  type UsageSummary,
+  type UsageSummaryQuery
+} from '../shared/usage'
+import { USAGE_LIMIT_RECOVERY_UPDATED_CHANNEL, type UsageLimitRecovery } from '../shared/usage-limit-recovery'
 
 contextBridge.exposeInMainWorld('electronAPI', {
   db: {
@@ -79,6 +91,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     update: (id: string, data: Record<string, unknown>): Promise<unknown> =>
       ipcRenderer.invoke('agent:update', id, data),
     delete: (id: string): Promise<boolean> => ipcRenderer.invoke('agent:delete', id)
+  },
+  harnessInstances: {
+    list: (): Promise<unknown[]> => ipcRenderer.invoke('harnessInstance:list'),
+    create: (data: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('harnessInstance:create', data),
+    update: (id: string, data: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('harnessInstance:update', id, data),
+    delete: (id: string): Promise<boolean> => ipcRenderer.invoke('harnessInstance:delete', id)
   },
   mcpServers: {
     getAll: (): Promise<unknown[]> => ipcRenderer.invoke('mcp:getAll'),
@@ -184,6 +202,34 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('agent:approval', handler)
     return () => ipcRenderer.removeListener('agent:approval', handler)
   },
+  usage: {
+    getLimits: (): Promise<ProviderUsageLimits[]> => ipcRenderer.invoke('usage:getLimits'),
+    refreshLimits: (options?: { force?: boolean }): Promise<UsageLimitsRefreshResult> =>
+      ipcRenderer.invoke('usage:refreshLimits', options),
+    getSummary: (query?: UsageSummaryQuery): Promise<UsageSummary | null> =>
+      ipcRenderer.invoke('usage:getSummary', query),
+    setCursorKeychainAccess: (enabled: boolean): Promise<UsageLimitsRefreshResult> =>
+      ipcRenderer.invoke('usage:setCursorKeychainAccess', enabled),
+    getLimitRecovery: (taskId: string): Promise<UsageLimitRecovery | null> =>
+      ipcRenderer.invoke('usage:getLimitRecovery', taskId),
+    setLimitRecoveryAutoResume: (taskId: string, autoResume: boolean): Promise<UsageLimitRecovery | null> =>
+      ipcRenderer.invoke('usage:setLimitRecoveryAutoResume', taskId, autoResume)
+  },
+  onUsageLimitRecoveryUpdated: (callback: (recovery: UsageLimitRecovery) => void): (() => void) => {
+    const handler = (_: unknown, data: UsageLimitRecovery): void => callback(data)
+    ipcRenderer.on(USAGE_LIMIT_RECOVERY_UPDATED_CHANNEL, handler)
+    return () => ipcRenderer.removeListener(USAGE_LIMIT_RECOVERY_UPDATED_CHANNEL, handler)
+  },
+  onUsageLimitsUpdated: (callback: (limits: ProviderUsageLimits) => void): (() => void) => {
+    const handler = (_: unknown, data: ProviderUsageLimits): void => callback(data)
+    ipcRenderer.on(USAGE_LIMITS_UPDATED_CHANNEL, handler)
+    return () => ipcRenderer.removeListener(USAGE_LIMITS_UPDATED_CHANNEL, handler)
+  },
+  onUsageRecorded: (callback: (records: TokenUsageRecord[]) => void): (() => void) => {
+    const handler = (_: unknown, data: TokenUsageRecord[]): void => callback(data)
+    ipcRenderer.on(USAGE_RECORDED_CHANNEL, handler)
+    return () => ipcRenderer.removeListener(USAGE_RECORDED_CHANNEL, handler)
+  },
   onAgentIncompatibleSession: (callback: (event: unknown) => void): (() => void) => {
     const handler = (_: unknown, data: unknown): void => callback(data)
     ipcRenderer.on('agent:incompatible-session', handler)
@@ -214,6 +260,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     set: (key: string, value: string): Promise<void> => ipcRenderer.invoke('settings:set', key, value),
     getAll: (): Promise<Record<string, string>> => ipcRenderer.invoke('settings:getAll')
   },
+  pushTest: (): Promise<{ success: boolean; sent: number }> => ipcRenderer.invoke('mobile:pushTest'),
   env: {
     get: (key: string): Promise<string | null> => ipcRenderer.invoke('env:get', key)
   },
@@ -704,7 +751,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
       }
     }
   },
+  peako: {
+    publishState: (state: PeakoState): void => ipcRenderer.send(PEAKO_CHANNELS.publishState, state),
+    setEnabled: (enabled: boolean): Promise<boolean> => ipcRenderer.invoke(PEAKO_CHANNELS.setEnabled, enabled),
+    getEnabled: (): Promise<boolean> => ipcRenderer.invoke(PEAKO_CHANNELS.getEnabled),
+    onCommand: (callback: (command: PeakoMainCommand) => void): (() => void) => {
+      const handler = (_: unknown, command: PeakoMainCommand): void => callback(command)
+      ipcRenderer.on(PEAKO_CHANNELS.mainCommand, handler)
+      return () => ipcRenderer.removeListener(PEAKO_CHANNELS.mainCommand, handler)
+    }
+  },
   browser: {
+    listImportSources: (): Promise<BrowserImportSource[]> => ipcRenderer.invoke('browser:listImportSources'),
+    importSessions: (input: BrowserImportRequest): Promise<BrowserImportResult> => ipcRenderer.invoke('browser:importSessions', input),
+    clearImportedSessions: (): Promise<number> => ipcRenderer.invoke('browser:clearImportedSessions'),
     startRecording: (panelId: string, title?: string): Promise<{ ok: true; recording: BrowserRecordingManifest } | { error: string }> =>
       ipcRenderer.invoke('browser:startRecording', panelId, title),
     stopRecording: (panelId: string): Promise<{ ok: true; recording: BrowserRecordingManifest } | { error: string }> =>

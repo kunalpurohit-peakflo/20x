@@ -5,10 +5,11 @@ import { useAgentStore, SessionStatus } from '@/stores/agent-store'
 import { TaskStatus } from '@/types'
 import { isSnoozed } from '@/lib/utils'
 import { AiUsageRing } from './AiUsageRing'
+import { UsageLimitsIndicator } from './UsageLimitsIndicator'
 
 /**
  * Slim always-visible strip at the bottom of the shell: live agent + task
- * counts on the left, app version on the right. Read-only.
+ * counts on the left, subscription plan usage and app version on the right.
  */
 export function StatusBar() {
   const tasks = useTaskStore((s) => s.tasks)
@@ -40,7 +41,6 @@ export function StatusBar() {
 
   return (
     <div className="app-chrome bg-background flex-shrink-0 flex items-center gap-4 h-4 px-3 pb-1 leading-none text-[10px] text-muted-foreground select-none tabular-nums">
-      <AiUsageRing />
       <span className="flex items-center gap-1.5" title={`${runningAgents} agent session${runningAgents !== 1 ? 's' : ''} running`}>
         <span
           className={`h-1.5 w-1.5 rounded-full ${runningAgents > 0 ? 'bg-primary animate-pulse' : 'bg-muted-foreground/40'}`}
@@ -52,6 +52,10 @@ export function StatusBar() {
         {active} active · {total} total
       </span>
       <div className="flex-1" />
+      <span className="flex items-center gap-3" aria-label="Subscription usage">
+        <AiUsageRing />
+        <UsageLimitsIndicator />
+      </span>
       {version && <span className="opacity-70">v{version}</span>}
     </div>
   )

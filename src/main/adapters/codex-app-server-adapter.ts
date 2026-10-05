@@ -20,12 +20,25 @@ import type {
   MessagePart,
   McpServerConfig
 } from './coding-agent-adapter'
+import type { AdapterUsageLimitsEvent, AdapterUsageReport, UsageLimitStop } from './coding-agent-adapter'
 import { MessagePartType, MessageRole, SessionStatusType } from './coding-agent-adapter'
+import type { ProviderUsageLimits } from '../../shared/usage'
+import type { UsageBucket } from '../usage/usage-normalize'
+import {
+  codexRateLimitsResponseToLimits,
+  codexRateLimitsUpdatedToUpdate,
+  exhaustedWindowsResetAt,
+  isCodexUsageLimitCode,
+  normalizeCodexThreadTokenUsage
+} from '../usage/usage-normalize'
+import { mergeUsageLimits } from '../../shared/usage'
 
 const DEFAULT_CODEX_APP_SERVER_MODEL = 'gpt-6-astra'
 const MAX_IPC_TOOL_INPUT_CHARS = 20_000
 const MAX_IPC_TOOL_OUTPUT_CHARS = 100_000
 const MIN_THREAD_LEVEL_ASSISTANT_DEDUPE_CHARS = 40
+/** Minimum interval between automatic `account/rateLimits/read` calls. */
+const RATE_LIMITS_REFRESH_INTERVAL_MS = 5 * 60 * 1000
 
 type CodexSandboxPolicy =
   | { type: 'readOnly'; networkAccess: boolean }
@@ -103,6 +116,16 @@ interface AppServerSession {
   }>
   codexUseApiKey: boolean
   codexAuthSummary: string
+  /** True when this adapter started the thread (thread/start), false for thread/resume. */
+  createdInApp: boolean
+  /**
+   * Latest cumulative thread token usage not yet reported. Codex sends
+   * `thread/tokenUsage/updated` after every model request; it is reported once
+   * per turn (on turn/completed) to keep one usage record per turn.
+   */
+  pendingUsage: { bucket: UsageBucket; threadId: string } | null
+  /** Set when the turn stopped on a usage limit (`usageLimitExceeded` / `rateLimitExceeded`). */
+  usageLimit?: UsageLimitStop | null
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -358,8 +381,25 @@ function decisionLabel(decision: string): string {
 export class CodexAppServerAdapter implements CodingAgentAdapter {
   private sessions = new Map<string, AppServerSession>()
   private codexExecutablePath: string | null = null
+  /** CODEX_HOME of the harness instance this adapter serves. Sessions may override it per call. */
+  private readonly harnessHome: string | undefined
+
+  constructor(options: { harnessHome?: string } = {}) {
+    this.harnessHome = options.harnessHome
+  }
 
   onDataAvailable?: (sessionId: string) => void
+
+  /** Set by agent-manager: receives cumulative thread token usage once per turn. */
+  onUsage?: (report: AdapterUsageReport) => void
+
+  /** Set by agent-manager: receives ChatGPT-plan rate-limit snapshots/updates. */
+  onUsageLimits?: (event: AdapterUsageLimitsEvent) => void
+
+  private rateLimitsRead: Promise<ProviderUsageLimits> | null = null
+  private lastRateLimitsReadAt = 0
+  /** Latest known ChatGPT-plan windows (from reads and rolling updates), for limit reset times. */
+  private latestRateLimits: ProviderUsageLimits | null = null
 
   async initialize(): Promise<void> {
     const health = await this.checkHealth()
@@ -391,9 +431,11 @@ export class CodexAppServerAdapter implements CodingAgentAdapter {
     }
 
     session.threadId = threadId
+    session.createdInApp = true
     this.sessions.delete(config.taskId)
     this.sessions.set(threadId, session)
     void this.logMcpServerInventory(session, threadId, 'thread/start')
+    this.maybeRefreshRateLimits(session)
     return threadId
   }
 
@@ -462,13 +504,16 @@ export class CodexAppServerAdapter implements CodingAgentAdapter {
       approvalsReviewer: 'user',
       sandbox: this.resolveSandboxMode(config),
       runtimeWorkspaceRoots: this.buildRuntimeWorkspaceRoots(config.workspaceDir),
-      initialTurnsPage: { limit: 50 },
+      // The task transcript is persisted separately. Returning every turn here
+      // can make a large thread exceed the RPC deadline before resume completes.
+      excludeTurns: true,
       config: this.buildConfigOverrides(config)
     })
   }
 
   private async finishResume(session: AppServerSession, sessionId: string, config: SessionConfig): Promise<SessionMessage[]> {
     void this.logMcpServerInventory(session, sessionId, 'thread/resume')
+    this.maybeRefreshRateLimits(session)
 
     try {
       await this.bufferAllThreadItems(session, sessionId)
@@ -514,6 +559,7 @@ export class CodexAppServerAdapter implements CodingAgentAdapter {
 
     session.status = SessionStatusType.BUSY
     session.lastError = null
+    session.usageLimit = null
 
     const result = await this.sendRpcRequest(session, 'turn/start', {
       threadId: session.threadId,
@@ -541,7 +587,8 @@ export class CodexAppServerAdapter implements CodingAgentAdapter {
     }
     return {
       type: session.status,
-      message: session.status === SessionStatusType.ERROR ? (session.lastError || 'Process error') : undefined
+      message: session.status === SessionStatusType.ERROR ? (session.lastError || 'Process error') : undefined,
+      ...(session.status === SessionStatusType.ERROR && session.usageLimit ? { usageLimit: session.usageLimit } : {})
     }
   }
 
@@ -636,6 +683,7 @@ export class CodexAppServerAdapter implements CodingAgentAdapter {
   async destroySession(sessionId: string, _config: SessionConfig): Promise<void> {
     const session = this.sessions.get(sessionId)
     if (!session) return
+    this.flushPendingUsage(session)
     session.process.kill('SIGTERM')
     setTimeout(() => {
       if (!session.process.killed) {
@@ -754,7 +802,9 @@ export class CodexAppServerAdapter implements CodingAgentAdapter {
       assistantTextKeysByTurn: new Map(),
       runningTools: new Map(),
       codexUseApiKey: authEnv.usesApiKey,
-      codexAuthSummary: authEnv.summary
+      codexAuthSummary: authEnv.summary,
+      createdInApp: false,
+      pendingUsage: null
     }
 
     this.setupStdoutParser(child, session)
@@ -763,6 +813,7 @@ export class CodexAppServerAdapter implements CodingAgentAdapter {
     })
     child.on('exit', (code, signal) => {
       console.log(`[CodexAppServerAdapter] process exited: code=${code}, signal=${signal}`)
+      this.flushPendingUsage(session)
       if (code !== 0 && code !== null) {
         session.status = SessionStatusType.ERROR
         session.lastError = `Codex app-server exited with code ${code}`
@@ -842,7 +893,11 @@ export class CodexAppServerAdapter implements CodingAgentAdapter {
     if (!useApiKey) {
       delete env.OPENAI_API_KEY
       delete env.CODEX_API_KEY
-      if (!env.CODEX_HOME) {
+      // The instance's home holds its login. Without one, the inherited CODEX_HOME or ~/.codex applies.
+      const home = config.harnessHome ?? this.harnessHome
+      if (home) {
+        env.CODEX_HOME = home
+      } else if (!env.CODEX_HOME) {
         env.CODEX_HOME = join(homedir(), '.codex')
       }
     }
@@ -1018,6 +1073,17 @@ export class CodexAppServerAdapter implements CodingAgentAdapter {
   private handleNotification(session: AppServerSession, notification: JsonRpcNotification): void {
     const params = isObject(notification.params) ? notification.params : {}
 
+    if (notification.method === 'thread/tokenUsage/updated') {
+      this.trackThreadTokenUsage(session, params)
+      // Bookkeeping only — not a transcript event.
+      return
+    }
+
+    if (notification.method === 'account/rateLimits/updated') {
+      this.reportRateLimitsUpdate(session, params)
+      return
+    }
+
     if (notification.method === 'thread/status/changed') {
       const status = asString(params.status)
       session.status = status === 'running' || status === 'busy' ? SessionStatusType.BUSY : SessionStatusType.IDLE
@@ -1030,6 +1096,7 @@ export class CodexAppServerAdapter implements CodingAgentAdapter {
     }
 
     if (notification.method === 'turn/completed') {
+      this.flushPendingUsage(session)
       session.activeTurnId = null
       // A failed turn reports `turn.status === 'failed'` with a `TurnError`.
       // Codex normally sends a non-retryable `error` notification first, but
@@ -1038,6 +1105,7 @@ export class CodexAppServerAdapter implements CodingAgentAdapter {
       if (failure) {
         session.status = SessionStatusType.ERROR
         session.lastError = failure.message
+        this.markUsageLimitStop(session, failure.code)
       }
       if (session.threadId) {
         session.pendingCompletionRefreshes += 1
@@ -1074,6 +1142,7 @@ export class CodexAppServerAdapter implements CodingAgentAdapter {
       } else {
         session.status = SessionStatusType.ERROR
         session.lastError = failure.message
+        this.markUsageLimitStop(session, failure.code)
       }
     }
 
@@ -1088,6 +1157,158 @@ export class CodexAppServerAdapter implements CodingAgentAdapter {
     }
 
     this.addEvent(session, notification)
+  }
+
+  // ── Subscription usage tracking ──────────────────────────
+
+  private trackThreadTokenUsage(session: AppServerSession, params: Record<string, unknown>): void {
+    try {
+      const model = session.config.model || DEFAULT_CODEX_APP_SERVER_MODEL
+      const normalized = normalizeCodexThreadTokenUsage(params, model)
+      const threadId = asString(params.threadId) || session.threadId
+      if (!normalized || !threadId) return
+      session.pendingUsage = { bucket: normalized.bucket, threadId }
+      // Outside a turn (e.g. the totals replayed on thread/resume) there is no
+      // turn/completed to wait for.
+      if (!session.activeTurnId) this.flushPendingUsage(session)
+    } catch (error) {
+      console.warn('[CodexAppServerAdapter] Failed to track token usage:', error)
+    }
+  }
+
+  private flushPendingUsage(session: AppServerSession): void {
+    const pending = session.pendingUsage
+    if (!pending) return
+    session.pendingUsage = null
+    if (!this.onUsage) return
+    try {
+      this.onUsage({
+        provider: 'codex',
+        providerSessionId: pending.threadId,
+        taskId: session.config.taskId,
+        agentId: session.config.agentId,
+        newSession: session.createdInApp,
+        buckets: [pending.bucket]
+      })
+    } catch (error) {
+      console.warn('[CodexAppServerAdapter] Failed to report token usage:', error)
+    }
+  }
+
+  // ── Usage-limit stops ────────────────────────────────────
+
+  /** Marks a usage-limit stop; the reset time comes from the exhausted plan windows. */
+  private markUsageLimitStop(session: AppServerSession, code: string | null): void {
+    if (!isCodexUsageLimitCode(code)) return
+    const known = this.latestRateLimits ? exhaustedWindowsResetAt(this.latestRateLimits.windows) : null
+    // A cached window whose reset already passed is stale: read fresh windows instead.
+    session.usageLimit = { resetAt: known && Date.parse(known) > Date.now() ? known : null }
+    // The stop often precedes the rolling update that carries the reset time.
+    if (!session.usageLimit.resetAt && !session.codexUseApiKey) {
+      void this.readRateLimits(() => this.readRateLimitsFromSession(session))
+        .then((limits) => this.onUsageLimits?.({ kind: 'snapshot', limits }))
+        .catch(() => undefined)
+    }
+  }
+
+  /** Keeps the latest plan windows and fills in reset times of stops that lacked one. */
+  private rememberRateLimits(limits: ProviderUsageLimits): void {
+    this.latestRateLimits = limits
+    const resetAt = exhaustedWindowsResetAt(limits.windows)
+    if (!resetAt || Date.parse(resetAt) <= Date.now()) return
+    for (const session of this.sessions.values()) {
+      // Plan windows say nothing about API-key sessions.
+      if (session.codexUseApiKey) continue
+      if (session.usageLimit && !session.usageLimit.resetAt) session.usageLimit = { resetAt }
+    }
+  }
+
+  private reportRateLimitsUpdate(session: AppServerSession, params: Record<string, unknown>): void {
+    if (session.codexUseApiKey) return
+    try {
+      const update = codexRateLimitsUpdatedToUpdate(params)
+      if (!update) return
+      this.rememberRateLimits(mergeUsageLimits('codex', this.latestRateLimits, update, new Date().toISOString()))
+      if (this.onUsageLimits) this.onUsageLimits({ kind: 'update', provider: 'codex', update })
+    } catch (error) {
+      console.warn('[CodexAppServerAdapter] Failed to report rate-limit update:', error)
+    }
+  }
+
+  /**
+   * Reads the full plan-limit snapshot on a freshly started/resumed
+   * subscription session, at most once per interval across sessions.
+   */
+  private maybeRefreshRateLimits(session: AppServerSession): void {
+    if (!this.onUsageLimits || session.codexUseApiKey) return
+    if (this.rateLimitsRead) return
+    if (Date.now() - this.lastRateLimitsReadAt < RATE_LIMITS_REFRESH_INTERVAL_MS) return
+    void this.readRateLimits(() => this.readRateLimitsFromSession(session))
+      .then((limits) => this.onUsageLimits?.({ kind: 'snapshot', limits }))
+      .catch((error) => {
+        console.warn('[CodexAppServerAdapter] Rate-limit read failed:', error instanceof Error ? error.message : error)
+      })
+  }
+
+  /**
+   * Reads the current ChatGPT-plan rate limits. Reuses a live subscription
+   * session when one exists; otherwise starts a short-lived app-server just
+   * for the read (no thread, no model call) and shuts it down.
+   */
+  async probeUsageLimits(): Promise<ProviderUsageLimits | null> {
+    const live = Array.from(this.sessions.values()).find((s) =>
+      !s.codexUseApiKey && s.process.exitCode === null && s.process.signalCode === null
+    )
+    try {
+      return await this.readRateLimits(() =>
+        live ? this.readRateLimitsFromSession(live) : this.readRateLimitsWithEphemeralServer()
+      )
+    } catch (error) {
+      return {
+        provider: 'codex',
+        checkedAt: new Date().toISOString(),
+        windows: [],
+        unavailable: {
+          reason: 'probe_failed',
+          message: error instanceof Error ? error.message : String(error)
+        }
+      }
+    }
+  }
+
+  private readRateLimits(read: () => Promise<ProviderUsageLimits>): Promise<ProviderUsageLimits> {
+    if (this.rateLimitsRead) return this.rateLimitsRead
+    this.lastRateLimitsReadAt = Date.now()
+    const pending = read().finally(() => {
+      if (this.rateLimitsRead === pending) this.rateLimitsRead = null
+    })
+    this.rateLimitsRead = pending
+    return pending
+  }
+
+  private async readRateLimitsFromSession(session: AppServerSession): Promise<ProviderUsageLimits> {
+    const response = await this.sendRpcRequest(session, 'account/rateLimits/read', null)
+    const limits = codexRateLimitsResponseToLimits(response, new Date().toISOString())
+    if (limits.windows.length > 0) this.rememberRateLimits(limits)
+    return limits
+  }
+
+  private async readRateLimitsWithEphemeralServer(): Promise<ProviderUsageLimits> {
+    const probeConfig: SessionConfig = {
+      agentId: '',
+      taskId: 'usage-limits-probe',
+      workspaceDir: homedir(),
+      authMethod: 'subscription',
+      harnessHome: this.harnessHome
+    }
+    const session = await this.startAppServerProcess(probeConfig, 'usage-limits-probe')
+    try {
+      await this.initializeAppServer(session)
+      return await this.readRateLimitsFromSession(session)
+    } finally {
+      session.pendingRequests.clear()
+      await this.terminateProcess(session)
+    }
   }
 
   private handleApprovalRequest(

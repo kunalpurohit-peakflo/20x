@@ -21,6 +21,7 @@ import { NotionPlugin } from './plugins/notion-plugin'
 import { YouTrackPlugin } from './plugins/youtrack-plugin'
 import { registerIpcHandlers } from './ipc-handlers'
 import { panelBrowserBroker } from './panel-browser-broker'
+import { getAgentBrowserSession } from './agent-browser-session'
 import { VoiceSessionManager } from './voice/voice-session-manager'
 import { assistantTextParts, sinceLastUserMessage } from './voice/voice-answer-parts'
 import { EnterpriseAuth } from './enterprise-auth'
@@ -43,6 +44,7 @@ import { initCrashLogger } from './crash-logger'
 import { installProcessStreamErrorHandlers } from './process-stream-errors'
 import { getWindowsPathEntries, prependMissingWindowsPaths } from './windows-runtime-paths'
 import { initAnalytics, shutdownAnalytics } from './analytics-service'
+import { PeakoWindowManager } from './peako-window'
 
 /**
  * Validate that a URL is safe to open via shell.openExternal.
@@ -80,6 +82,7 @@ let claudePluginManager: ClaudePluginManager | null = null
 let enterpriseHeartbeatInstance: EnterpriseHeartbeat | null = null
 let enterpriseStateSyncInstance: EnterpriseStateSync | null = null
 let voiceSessionManager: VoiceSessionManager | null = null
+let peakoWindow: PeakoWindowManager | null = null
 let isShuttingDown = false
 
 /**
@@ -365,6 +368,9 @@ function createWindow(): void {
     setInterval(() => {
       mainWindow?.webContents.send('overdue:check')
     }, 60_000)
+
+    // Peako lives as long as the main window, which owns its session.
+    peakoWindow?.sync()
   })
 
   // Force the main window to 100% zoom on first load. Chromium persists page
@@ -485,9 +491,13 @@ function createWindow(): void {
 
   mainWindow.on('closed', () => {
     mainWindow = null
+    peakoWindow?.destroy()
     // A closed window must not keep reporting the screen it last showed.
     setTaskApiUiState(null)
   })
+
+  // Peako must stay above this window whenever it comes forward.
+  peakoWindow?.watchMainWindow(mainWindow)
 
   // Set main window for managers
   agentManager?.setMainWindow(mainWindow)
@@ -611,6 +621,17 @@ function buildAppMenu(): void {
   ]
 
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+}
+
+/** Brings the main window to the front, creating it again if it was closed. */
+function showMainWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow()
+    return
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
 }
 
 function createTray(): void {
@@ -979,9 +1000,15 @@ app.whenReady().then(async () => {
   await pathFixPromise
 
   agentManager = new AgentManager(db)
+  try {
+    // Links each account's shared session history once, so resuming never does filesystem work.
+    agentManager.checkHarnessInstances()
+  } catch (err) {
+    console.warn('[Main] Harness account check failed:', err)
+  }
   githubManager = new GitHubManager()
   gitlabManager = new GitLabManager()
-  worktreeManager = new WorktreeManager()
+  worktreeManager = new WorktreeManager(db)
   agentManager.setManagers(githubManager, worktreeManager, gitlabManager ?? undefined)
 
   mcpToolCaller = new McpToolCaller()
@@ -1009,6 +1036,8 @@ app.whenReady().then(async () => {
 
   syncManager = new SyncManager(db, mcpToolCaller, pluginRegistry, oauthManager)
   agentManager.setSyncManager(syncManager)
+  // Continue tasks that stopped on a usage limit once it resets (incl. overdue ones from before a restart).
+  agentManager.startUsageLimitRecovery()
 
   recurrenceScheduler = new RecurrenceScheduler(db)
   heartbeatScheduler = new HeartbeatScheduler(db, agentManager)
@@ -1140,6 +1169,23 @@ app.whenReady().then(async () => {
 
   registerIpcHandlers(db, agentManager, githubManager, worktreeManager, syncManager, pluginRegistry, mcpToolCaller, oauthManager, recurrenceScheduler, enterpriseAuth ?? undefined, claudePluginManager, heartbeatScheduler, enterpriseHeartbeatInstance ?? undefined, enterpriseStateSyncInstance ?? undefined, gitlabManager ?? undefined, workspaceCleanupScheduler ?? undefined, voiceSessionManager ?? undefined, taskAutomationScheduler ?? undefined)
 
+  const settingsDb = db
+  peakoWindow = new PeakoWindowManager({
+    getSetting: (key) => settingsDb.getSetting(key),
+    setSetting: (key, value) => settingsDb.setSetting(key, value),
+    getMainWindow: () => mainWindow,
+    showMainWindow,
+    preloadPath: join(__dirname, '../preload/peako.js'),
+    loadPage: (window) => {
+      if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
+        void window.loadURL(`${process.env['ELECTRON_RENDERER_URL']}/peako.html`)
+      } else {
+        void window.loadFile(join(__dirname, '../renderer/peako.html'))
+      }
+    }
+  })
+  peakoWindow.registerIpc()
+
   // ── Media permission handler (design §5.9) ────────────────────────────────
   // Grant the microphone only to the 20x renderer, and only while voice is on.
   // Every other media request (camera, screen, and any embedded web content) is
@@ -1159,6 +1205,8 @@ app.whenReady().then(async () => {
     const isAppWindow = mainWindow != null && contents === mainWindow.webContents
     callback(isAppWindow && voiceSessionManager?.isEnabled() === true)
   })
+  // Agent webviews have separate storage and receive no privileged permissions.
+  getAgentBrowserSession().setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
 
   // Register updater IPC handlers (safe in dev mode — returns no-op results)
   registerUpdaterIpc()
@@ -1190,8 +1238,8 @@ app.whenReady().then(async () => {
   }).catch(() => {})
 
   // ── Strip embedding-restriction headers ───────────────────────────────────
-  // Register on session.defaultSession so it intercepts ALL HTTP responses
-  // including those from iframes/subframes. Must be set before any window loads.
+  // Apply to the application and isolated agent browser sessions, including
+  // responses from iframes/subframes. Must be set before any window loads.
   const BLOCKED_HEADERS_LC = [
     'x-frame-options',
     'cross-origin-opener-policy',
@@ -1199,7 +1247,7 @@ app.whenReady().then(async () => {
     'cross-origin-resource-policy',
   ]
 
-  session.defaultSession.webRequest.onHeadersReceived(
+  for (const browserSession of [session.defaultSession, getAgentBrowserSession()]) browserSession.webRequest.onHeadersReceived(
     { urls: ['http://*/*', 'https://*/*'] },
     (details, callback) => {
       const headers = { ...details.responseHeaders }
@@ -1231,12 +1279,9 @@ app.whenReady().then(async () => {
   // as a signal.  We intercept via will-attach-webview to configure each
   // webview's session without conflicting with enterprise auth handlers.
   //
-  // We modify the defaultSession headers directly.  The onBeforeSendHeaders
-  // handler merges with enterprise auth because enterprise auth only registers
-  // its handler AFTER enableIframeAuth is called (and with a narrow URL filter).
-  // Our handler runs first; if enterprise auth later overrides it with its
-  // scoped filter, that's fine — the scoped handler only affects API URLs.
-  session.defaultSession.webRequest.onBeforeSendHeaders(
+  // Apply the browser fingerprint headers to the isolated agent session too.
+  // Enterprise auth may later replace the default session handler for API URLs.
+  for (const browserSession of [session.defaultSession, getAgentBrowserSession()]) browserSession.webRequest.onBeforeSendHeaders(
     { urls: ['http://*/*', 'https://*/*'] },
     (details, callback) => {
       const headers = { ...details.requestHeaders }

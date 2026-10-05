@@ -22,8 +22,11 @@ import { listTaskArtifactEntries, readTaskArtifact } from './artifacts'
 import type { Artifact, ArtifactFileEntry } from '../shared/artifacts'
 import { MOBILE_VOICE_CAPABILITIES } from '../shared/voice'
 import { TaskStatus } from '../shared/constants'
+import { sanitizeUsageSummaryQuery } from './usage/usage-query'
 import { guardStream } from './child-stream-guards'
 import type { ArtifactMcpCall } from '../shared/artifact-mcp'
+import { getVapidPublicKey, isPushSubscription, sendMobilePush, PUSH_PREFERENCES_KEY } from './mobile-push'
+import { parsePushPreferences, PUSH_EVENTS, type PushPreferences } from '../shared/push-notifications'
 
 // ── State ────────────────────────────────────────────────────
 let server: HttpServer | null = null
@@ -210,6 +213,7 @@ const MIME: Record<string, string> = {
   '.js': 'application/javascript',
   '.css': 'text/css',
   '.json': 'application/json',
+  '.webmanifest': 'application/manifest+json',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.svg': 'image/svg+xml',
@@ -313,7 +317,7 @@ async function handleApiRoute(req: IncomingMessage, res: ServerResponse, pathnam
   // GET requests
   if (req.method === 'GET') {
     try {
-      const result = await routeGet(pathname, url)
+      const result = await routeGet(pathname, url, req)
       res.writeHead(200)
       res.end(JSON.stringify(result))
     } catch (err: unknown) {
@@ -331,7 +335,7 @@ async function handleApiRoute(req: IncomingMessage, res: ServerResponse, pathnam
 
 // ── GET routes ───────────────────────────────────────────────
 
-async function routeGet(pathname: string, url: URL): Promise<unknown> {
+async function routeGet(pathname: string, url: URL, req?: IncomingMessage): Promise<unknown> {
   const db = dbRef!
 
   // GET /api/tasks
@@ -385,6 +389,18 @@ async function routeGet(pathname: string, url: URL): Promise<unknown> {
     })
 
     return tasks
+  }
+
+  if (pathname === '/api/push/config') {
+    return { publicKey: getVapidPublicKey(db), preferences: parsePushPreferences(db.getSetting(PUSH_PREFERENCES_KEY)) }
+  }
+
+  if (pathname === '/api/push/subscription') {
+    const token = req?.headers.authorization?.slice('Bearer '.length)
+    const session = token ? db.getMobileSessionByTokenHash(hashToken(token)) : undefined
+    if (!session) throw Object.assign(new Error('Unauthorized'), { status: 401 })
+    const row = db.getMobilePushSubscription(session.id)
+    return { subscription: row ? JSON.parse(row.subscription) : null }
   }
 
   // GET /api/tasks/:taskId/transcript — full durable transcript snapshot.
@@ -468,6 +484,27 @@ async function routeGet(pathname: string, url: URL): Promise<unknown> {
   // GET /api/skills
   if (pathname === '/api/skills') {
     return db.getSkills()
+  }
+
+  // GET /api/tasks/:id/limit-recovery — scheduled continuation after a usage-limit stop
+  const limitRecoveryGet = pathname.match(/^\/api\/tasks\/([^/]+)\/limit-recovery$/)
+  if (limitRecoveryGet) {
+    return agentRef!.getUsageLimitRecovery(decodeURIComponent(limitRecoveryGet[1]))
+  }
+
+  // GET /api/harness-instances — subscription logins (read-only on mobile)
+  if (pathname === '/api/harness-instances') {
+    return agentRef!.listHarnessInstances()
+  }
+
+  // GET /api/usage/limits — subscription plan limits per harness instance (Claude Code, Codex)
+  if (pathname === '/api/usage/limits') {
+    return agentRef!.getUsageLimits()
+  }
+
+  // GET /api/usage/summary?sinceMs=&untilMs=&utcOffsetMinutes=&taskId=
+  if (pathname === '/api/usage/summary') {
+    return agentRef!.getUsageSummary(sanitizeUsageSummaryQuery(Object.fromEntries(url.searchParams)))
   }
 
   // GET /api/sessions
@@ -577,6 +614,32 @@ async function routeGet(pathname: string, url: URL): Promise<unknown> {
 async function routePost(pathname: string, params: Record<string, unknown>, req?: IncomingMessage): Promise<unknown> {
   const agent = agentRef!
   const db = dbRef!
+
+  if (pathname === '/api/push/subscription' || pathname === '/api/push/test') {
+    const token = req?.headers.authorization?.slice('Bearer '.length)
+    const session = token ? db.getMobileSessionByTokenHash(hashToken(token)) : undefined
+    if (!session) throw Object.assign(new Error('Unauthorized'), { status: 401 })
+    if (pathname === '/api/push/subscription') {
+      if (params.subscription !== null && !isPushSubscription(params.subscription)) {
+        throw Object.assign(new Error('Invalid push subscription'), { status: 400 })
+      }
+      db.setMobilePushSubscription(session.id, params.subscription === null ? null : JSON.stringify(params.subscription))
+      return { success: true }
+    }
+    const row = db.getMobilePushSubscription(session.id)
+    if (!row) throw Object.assign(new Error('Enable notifications on this device first'), { status: 400 })
+    const result = await sendMobilePush(db, 'finished', '', '20x test notification', undefined, { sessionId: session.id, ignorePreferences: true, throwOnError: true })
+    return { success: result.sent === 1 }
+  }
+
+  if (pathname === '/api/push/preferences') {
+    const value = params.preferences as Partial<PushPreferences> | undefined
+    if (!value || typeof value !== 'object' || PUSH_EVENTS.some(event => typeof value[event] !== 'boolean')) {
+      throw Object.assign(new Error('Invalid notification preferences'), { status: 400 })
+    }
+    db.setSetting(PUSH_PREFERENCES_KEY, JSON.stringify(value))
+    return { preferences: parsePushPreferences(db.getSetting(PUSH_PREFERENCES_KEY)) }
+  }
 
   const artifactMcpMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/artifacts\/mcp$/)
   if (artifactMcpMatch) {
@@ -791,6 +854,12 @@ async function routePost(pathname: string, params: Record<string, unknown>, req?
     const existing = db.getTask(taskId)
     if (!existing) throw Object.assign(new Error('Task not found'), { status: 404 })
     const updated = updateTaskFromUser(db, taskId, params as Parameters<DatabaseManager['updateTask']>[1])
+    // A reassignment from the agent dropdown stops the previous agent's live session.
+    if (updated && (params as Record<string, unknown>).agent_id !== undefined && (updated.agent_id ?? null) !== (existing.agent_id ?? null)) {
+      agentRef?.handleTaskAgentChanged(taskId).catch((error) => {
+        console.error(`[MobileAPI] Failed to stop the previous agent's session for task ${taskId}:`, error)
+      })
+    }
     if (updated) {
       broadcastToMobileClients('task:updated', { taskId, updates: updated })
       if (notifyDesktop) notifyDesktop('task:updated', { taskId, updates: updated })
@@ -818,10 +887,25 @@ async function routePost(pathname: string, params: Record<string, unknown>, req?
     return updated
   }
 
+  // POST /api/tasks/:id/limit-recovery — { autoResume: boolean }
+  const limitRecoveryPost = pathname.match(/^\/api\/tasks\/([^/]+)\/limit-recovery$/)
+  if (limitRecoveryPost) {
+    return agent.setUsageLimitRecoveryAutoResume(
+      decodeURIComponent(limitRecoveryPost[1]),
+      (params as { autoResume?: unknown }).autoResume === true
+    )
+  }
+
+  // POST /api/usage/limits/refresh — re-read plan limits ({ force?: boolean })
+  if (pathname === '/api/usage/limits/refresh') {
+    return agent.refreshUsageLimits({ force: (params as { force?: unknown }).force === true })
+  }
+
   // POST /api/sessions/start
   if (pathname === '/api/sessions/start') {
     const { agentId, taskId, skipInitialPrompt } = params as { agentId: string; taskId: string; skipInitialPrompt?: boolean }
     if (!agentId || !taskId) throw Object.assign(new Error('agentId and taskId are required'), { status: 400 })
+    agent.noteUserTaskActivity(taskId)
     const sessionId = await agent.startSession(agentId, taskId, undefined, skipInitialPrompt as boolean | undefined)
     return { sessionId }
   }
@@ -832,7 +916,11 @@ async function routePost(pathname: string, params: Record<string, unknown>, req?
     const sessionId = resumeMatch[1]
     const { agentId, taskId } = params as { agentId: string; taskId: string }
     if (!agentId || !taskId) throw Object.assign(new Error('agentId and taskId are required'), { status: 400 })
+    agent.noteUserTaskActivity(taskId)
     const newSessionId = await agent.resumeSession(agentId, taskId, sessionId)
+    // An empty id means the session is gone or belongs to another harness. Its
+    // context carries over to a new session, started from the Start action.
+    if (!newSessionId) throw Object.assign(new Error('This session is no longer available. Start a new session to continue; the earlier conversation carries over.'), { status: 409 })
     return { sessionId: newSessionId }
   }
 
@@ -847,6 +935,7 @@ async function routePost(pathname: string, params: Record<string, unknown>, req?
       attachments?: Array<{ id: string; filename: string; size: number; mime_type: string }>
     }
     if (!message) throw Object.assign(new Error('message is required'), { status: 400 })
+    agent.noteUserTaskActivity(taskId, sessionId)
     const result = await agent.sendMessage(sessionId, message, taskId, aid, attachments)
     return { success: true, ...result }
   }

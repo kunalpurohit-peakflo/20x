@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Peako</title>
+    <script>
+      // Same pre-paint theme resolution as the main window, read from the
+      // shared localStorage so Peako matches the app's light or dark mode.
+      (function () {
+        try {
+          var m = localStorage.getItem("ui-theme") || "dark";
+          var dark = m === "dark" || (m === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+          var root = document.documentElement;
+          if (dark) root.classList.add("dark");
+          root.style.colorScheme = dark ? "dark" : "light";
+          var pack = localStorage.getItem("ui-theme-pack");
+          if (pack && pack !== "legacy") root.setAttribute("data-theme-pack", pack);
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body class="peako-body antialiased">
+    <div id="root"></div>
+    <script type="module" src="./src/peako/main.tsx"></script>
+  </body>
+</html>

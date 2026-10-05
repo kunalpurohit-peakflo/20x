@@ -300,7 +300,7 @@ function QuestionMessage({ message, onAnswer, canAnswer, searchQuery }: { messag
   }
 
   return (
-    <div className="rounded-md bg-card border border-primary/30 overflow-hidden">
+    <div data-part="question" className="rounded-md bg-card border border-primary/30 overflow-hidden">
       {questions.map((q, qi) => {
         const hasOptions = q.options && q.options.length > 0
         return (
@@ -494,7 +494,10 @@ function TaskProgressMessage({ message, searchQuery }: { message: AgentMessage; 
   )
 }
 
-function ToolCallMessage({ message, searchQuery }: { message: AgentMessage; searchQuery?: string }) {
+// A tool row is memoized on its message identity. The activity group that holds
+// it re-renders on every new tool call (the trailing group grows), and without
+// this every earlier row in a 200-call run re-rendered each time.
+const ToolCallMessage = React.memo(function ToolCallMessage({ message, searchQuery }: { message: AgentMessage; searchQuery?: string }) {
   const [expanded, setExpanded] = useState(false)
   const tool = message.tool!
   const isRunning = !tool.status || tool.status === 'in_progress' || tool.status === 'running' || tool.status === 'pending'
@@ -503,12 +506,16 @@ function ToolCallMessage({ message, searchQuery }: { message: AgentMessage; sear
   // they only run when the tool payload actually changes, not on every render.
   const subtitle = useMemo(() => deriveToolSubtitle(tool), [tool])
   const command = useMemo(() => deriveToolCommand(tool), [tool])
+  // Expanded payloads are sanitized once per payload, not on every re-render
+  // (sanitizing scans the whole string for base64 when it is over 5 KB).
+  const input = useMemo(() => (expanded && tool.input ? sanitizeToolContent(tool.input) : ''), [expanded, tool.input])
+  const output = useMemo(() => (expanded && tool.output ? sanitizeToolContent(tool.output) : ''), [expanded, tool.output])
 
   return (
-    <div className="group/tool w-full min-w-0 overflow-hidden">
+    <div data-part="tool" data-state={isError ? 'error' : isRunning ? 'running' : 'done'} className="group/tool w-full min-w-0 overflow-hidden">
       <button
         onClick={() => setExpanded(!expanded)}
-        className="flex h-6 w-full items-center gap-2 rounded-sm px-1 text-xs font-mono text-muted-foreground hover:bg-white/5 hover:text-foreground transition-colors"
+        className="flex h-6 w-full items-center gap-2 rounded-sm px-1 text-left text-xs font-mono text-muted-foreground hover:bg-white/5 hover:text-foreground transition-colors"
       >
         <ChevronRight className={`h-3 w-3 text-muted-foreground shrink-0 transition-transform ${expanded ? 'rotate-90' : ''}`} />
         <Wrench className="h-3 w-3 text-muted-foreground shrink-0" />
@@ -529,16 +536,16 @@ function ToolCallMessage({ message, searchQuery }: { message: AgentMessage; sear
               <pre className="mt-0.5 text-muted-foreground whitespace-pre-wrap break-words max-h-40 overflow-y-auto"><HighlightedText text={command} query={searchQuery} /></pre>
             </div>
           )}
-          {tool.input && (
+          {input && (
             <div>
               <span className="text-muted-foreground">Input:</span>
-              <pre className="mt-0.5 text-muted-foreground whitespace-pre-wrap break-words max-h-40 overflow-y-auto"><HighlightedText text={sanitizeToolContent(tool.input)} query={searchQuery} /></pre>
+              <pre className="mt-0.5 text-muted-foreground whitespace-pre-wrap break-words max-h-40 overflow-y-auto"><HighlightedText text={input} query={searchQuery} /></pre>
             </div>
           )}
-          {tool.output && (
+          {output && (
             <div>
               <span className="text-muted-foreground">Output:</span>
-              <pre className="mt-0.5 text-muted-foreground whitespace-pre-wrap break-words max-h-40 overflow-y-auto"><HighlightedText text={sanitizeToolContent(tool.output)} query={searchQuery} /></pre>
+              <pre className="mt-0.5 text-muted-foreground whitespace-pre-wrap break-words max-h-40 overflow-y-auto"><HighlightedText text={output} query={searchQuery} /></pre>
             </div>
           )}
           {tool.error && (
@@ -551,17 +558,17 @@ function ToolCallMessage({ message, searchQuery }: { message: AgentMessage; sear
       )}
     </div>
   )
-}
+})
 
-function ReasoningMessage({ message, searchQuery }: { message: AgentMessage; searchQuery?: string }) {
+const ReasoningMessage = React.memo(function ReasoningMessage({ message, searchQuery }: { message: AgentMessage; searchQuery?: string }) {
   const [expanded, setExpanded] = useState(false)
   const summary = message.content.split('\n').map((line) => line.trim()).find(Boolean) || 'Thinking'
 
   return (
-    <div className="group/tool w-full min-w-0 overflow-hidden">
+    <div data-part="thinking" className="group/tool w-full min-w-0 overflow-hidden">
       <button
         onClick={() => setExpanded(!expanded)}
-        className="flex h-6 w-full items-center gap-2 rounded-sm px-1 text-xs font-mono text-teal-700/90 dark:text-teal-300/80 hover:bg-accent hover:text-teal-700 dark:hover:text-teal-200 transition-colors"
+        className="flex h-6 w-full items-center gap-2 rounded-sm px-1 text-left text-xs font-mono text-teal-700/90 dark:text-teal-300/80 hover:bg-accent hover:text-teal-700 dark:hover:text-teal-200 transition-colors"
       >
         <ChevronRight className={`h-3 w-3 shrink-0 text-teal-600/70 dark:text-teal-300/60 transition-transform ${expanded ? 'rotate-90' : ''}`} />
         <span className="shrink-0 text-teal-700 dark:text-teal-300">Thinking</span>
@@ -577,7 +584,7 @@ function ReasoningMessage({ message, searchQuery }: { message: AgentMessage; sea
       )}
     </div>
   )
-}
+})
 
 function findMessageArtifact(message: AgentMessage, artifacts: Artifact[]): Artifact | undefined {
   if (!message.tool || !['success', 'succeeded', 'complete', 'completed'].includes(message.tool.status?.toLowerCase?.() || '')) return undefined
@@ -625,7 +632,7 @@ function ArtifactTranscriptCard({ artifact, onOpen }: { artifact: Artifact; onOp
 
 function ActivityMessageGroup({ messages, searchQuery, artifacts = EMPTY_ARTIFACTS, onOpenArtifact }: { messages: AgentMessage[]; searchQuery?: string; artifacts?: Artifact[]; onOpenArtifact?: (artifact: Artifact) => void }) {
   return (
-    <div className="w-full border-l border-border/30 pl-2 py-0.5">
+    <div data-part="activity" className="w-full border-l border-border/30 pl-2 py-0.5">
       {messages.map((message) => {
         if (message.partType === 'reasoning') {
           return <ReasoningMessage key={message.id} message={message} searchQuery={searchQuery} />
@@ -676,6 +683,7 @@ function MessageBubble({ message, onAnswer, canAnswerQuestion = false, searchQue
   return (
     <div className={`flex gap-2 ${isUser ? 'justify-end' : 'justify-start'} ${!isUser ? 'w-full' : ''}`}>
       <div
+        data-part={isError ? 'error' : isUser ? 'user' : isSystem ? 'system' : 'answer'}
         className={`overflow-hidden min-w-0 ${
           isError
             ? 'w-full text-red-200 border-l border-red-500/40 pl-3 py-1'
@@ -1056,7 +1064,12 @@ export function AgentTranscriptPanel({
       autoScrollRafRef.current = requestAnimationFrame(() => {
         autoScrollRafRef.current = null
         if (!atBottomRef.current) return
-        virtualizer.scrollToIndex(transcriptItems.length - 1, { align: 'end' })
+        // Following the bottom while text streams: one layout read and one
+        // write per frame. scrollToIndex re-reads scrollHeight and retries up
+        // to ten times while the last row is still growing, which forced a
+        // layout on nearly every frame and was most of the streaming cost.
+        const el = scrollRef.current
+        if (el) el.scrollTop = el.scrollHeight
       })
     }
     return () => {
@@ -1201,7 +1214,7 @@ export function AgentTranscriptPanel({
   }
 
   return (
-    <div ref={panelRef} tabIndex={-1} className={cn('flex flex-col min-h-0 bg-background border-l border-border relative', className)}>
+    <div ref={panelRef} tabIndex={-1} data-transcript="" className={cn('flex flex-col min-h-0 bg-background border-l border-border relative', className)}>
       {/* Debug copy toast — only visible briefly after copy */}
       {debugCopyToast && (
         <div className="absolute top-12 left-1/2 -translate-x-1/2 z-50 bg-card border border-border rounded-md px-3 py-1.5 text-xs text-foreground shadow-lg animate-in fade-in duration-150">

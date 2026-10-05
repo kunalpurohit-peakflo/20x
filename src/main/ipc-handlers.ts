@@ -10,8 +10,14 @@ import type { ArtifactMcpCall } from '../shared/artifact-mcp'
 import WebSocket from 'ws'
 import { startTunnel, stopTunnel, getTunnelUrl, isTunnelActive } from './tunnel-manager'
 import { getPendingPin } from './mobile-api-server'
+import { sendMobilePush } from './mobile-push'
 import { setTaskApiUiState } from './task-api-server'
 import { panelBrowserBroker } from './panel-browser-broker'
+import { getAgentBrowserSession } from './agent-browser-session'
+import { listBrowserImportSources, importBrowserSessions, clearImportedBrowserSessions, normalizeDomains } from './browser-session-import'
+import type { BrowserImportRequest } from '../shared/browser-session-import'
+import type { UsageSummaryQuery } from '../shared/usage'
+import { sanitizeUsageSummaryQuery } from './usage/usage-query'
 import type {
   DatabaseManager,
   CreateTaskData,
@@ -19,6 +25,8 @@ import type {
   FileAttachmentRecord,
   CreateAgentData,
   UpdateAgentData,
+  CreateHarnessInstanceData,
+  UpdateHarnessInstanceData,
   CreateMcpServerData,
   UpdateMcpServerData,
   CreateTaskSourceData,
@@ -148,8 +156,15 @@ export function registerIpcHandlers(
         previousStatus = existing.status
       }
     }
+    // Previous agent, to detect a reassignment from the agent dropdown.
+    const previousAgentId = data.agent_id !== undefined ? (db.getTask(id)?.agent_id ?? null) : undefined
 
     const updated = updateTaskFromUser(db, id, data)
+    if (previousAgentId !== undefined && updated && (updated.agent_id ?? null) !== previousAgentId) {
+      agentManager.handleTaskAgentChanged(id).catch((error) => {
+        console.error(`[IPC] Failed to stop the previous agent's session for task ${id}:`, error)
+      })
+    }
 
     // Initialize recurring task schedule when recurrence is added or changed
     if (recurrenceScheduler && updated && updated.is_recurring && updated.recurrence_pattern) {
@@ -450,13 +465,32 @@ export function registerIpcHandlers(
     return db.deleteAgent(id)
   })
 
+  // Harness instances (one subscription login of Claude Code or Codex)
+  ipcMain.handle('harnessInstance:list', () => {
+    return agentManager.listHarnessInstances()
+  })
+
+  ipcMain.handle('harnessInstance:create', (_, data: CreateHarnessInstanceData) => {
+    return agentManager.createHarnessInstance(data)
+  })
+
+  ipcMain.handle('harnessInstance:update', (_, id: string, data: UpdateHarnessInstanceData) => {
+    return agentManager.updateHarnessInstance(id, data)
+  })
+
+  ipcMain.handle('harnessInstance:delete', (_, id: string) => {
+    return agentManager.deleteHarnessInstance(id)
+  })
+
   // Agent Session handlers
   ipcMain.handle('agentSession:start', async (_, agentId: string, taskId: string, workspaceDir?: string, skipInitialPrompt?: boolean) => {
+    agentManager.noteUserTaskActivity(taskId)
     const sessionId = await agentManager.startSession(agentId, taskId, workspaceDir, skipInitialPrompt)
     return { sessionId }
   })
 
   ipcMain.handle('agentSession:resume', async (_, agentId: string, taskId: string, ocSessionId: string) => {
+    agentManager.noteUserTaskActivity(taskId)
     const sessionId = await agentManager.resumeSession(agentId, taskId, ocSessionId)
     if (!sessionId) {
       // Session ended normally (task completed/reviewed) — session_id already cleared.
@@ -484,6 +518,7 @@ export function registerIpcHandlers(
   ipcMain.handle(
     'agentSession:sendByTaskId',
     async (_, taskId: string, message: string, attachments?: Array<{ id: string; filename: string; size: number; mime_type: string }>) => {
+      agentManager.noteUserTaskActivity(taskId)
       const result = await agentManager.sendByTaskId(taskId, message, attachments)
       return { success: true, ...result }
     }
@@ -492,6 +527,7 @@ export function registerIpcHandlers(
   ipcMain.handle(
     'agentSession:send',
     async (_, sessionId: string, message: string, taskId?: string, agentId?: string, attachments?: Array<{ id: string; filename: string; size: number; mime_type: string }>) => {
+      agentManager.noteUserTaskActivity(taskId, sessionId)
       const result = await agentManager.sendMessage(sessionId, message, taskId, agentId, attachments)
       return { success: true, ...result }
     }
@@ -516,6 +552,31 @@ export function registerIpcHandlers(
 
   ipcMain.handle('agentSession:getRawTranscript', async (_, taskId: string) => {
     return await agentManager.getRawTranscriptForDebug(taskId)
+  })
+
+  // Subscription usage tracking (plan limits + token usage)
+  ipcMain.handle('usage:getLimits', () => {
+    return agentManager.getUsageLimits()
+  })
+
+  ipcMain.handle('usage:refreshLimits', async (_, options?: { force?: boolean }) => {
+    return await agentManager.refreshUsageLimits({ force: options?.force === true })
+  })
+
+  ipcMain.handle('usage:setCursorKeychainAccess', async (_, enabled: boolean) => {
+    return await agentManager.setCursorKeychainAccess(enabled === true)
+  })
+
+  ipcMain.handle('usage:getLimitRecovery', (_, taskId: string) => {
+    return agentManager.getUsageLimitRecovery(taskId)
+  })
+
+  ipcMain.handle('usage:setLimitRecoveryAutoResume', (_, taskId: string, autoResume: boolean) => {
+    return agentManager.setUsageLimitRecoveryAutoResume(taskId, autoResume === true)
+  })
+
+  ipcMain.handle('usage:getSummary', (_, query?: UsageSummaryQuery) => {
+    return agentManager.getUsageSummary(sanitizeUsageSummaryQuery(query))
   })
 
   // Durable transcript snapshot: the renderer hydrates transcript state from
@@ -573,6 +634,7 @@ export function registerIpcHandlers(
 
   // Settings handlers
   ipcMain.handle('settings:get', (_, key: string) => {
+    if (key === 'mobile_push_vapid_private') return null
     return db.getSetting(key) ?? null
   })
 
@@ -584,8 +646,13 @@ export function registerIpcHandlers(
     const all = db.getAllSettings()
     // Strip internal mobile pairing keys — they're live credentials, not UI settings
     return Object.fromEntries(
-      Object.entries(all).filter(([k]) => !k.startsWith('mobile_init_code_'))
+      Object.entries(all).filter(([k]) => !k.startsWith('mobile_init_code_') && k !== 'mobile_push_vapid_private')
     )
+  })
+
+  ipcMain.handle('mobile:pushTest', async () => {
+    const result = await sendMobilePush(db, 'finished', '', '20x test notification', undefined, { ignorePreferences: true, throwOnError: true })
+    return { success: result.sent > 0, sent: result.sent }
   })
 
   // Environment variable handlers
@@ -2151,6 +2218,24 @@ else:
   })
 
   // ── Browser panel broker ────────────────────────────────
+  ipcMain.handle('browser:listImportSources', () => listBrowserImportSources())
+  ipcMain.handle('browser:importSessions', async (_event, input: BrowserImportRequest) => {
+    const source = listBrowserImportSources().find(item => item.id === input?.browserId)
+    if (!source || !source.profiles.some(profile => profile.id === input.profileId)) throw new Error('Select an available browser profile')
+    const domains = normalizeDomains(input.domains)
+    const choice = await dialog.showMessageBox({
+      type: 'warning', buttons: ['Cancel', 'Import sessions'], defaultId: 0, cancelId: 0,
+      title: 'Import signed-in sessions',
+      message: `Copy ${domains.length ? `cookies for ${domains.join(', ')}` : 'cookies for ALL SITES'} from ${source.name} (${input.profileId}) into the agent browser?`,
+      detail: `${domains.length ? '' : 'All sites may include email, banking, and single sign-on. '}Agents can use these signed-in sites. Cookies stay on this computer. On macOS, expect a Keychain prompt for the browser Safe Storage item. Safari may require Full Disk Access.`
+    })
+    if (choice.response !== 1) return { imported: 0, skipped: 0, unsupportedWindowsCookies: 0, byDomain: {} }
+    return importBrowserSessions(input)
+  })
+  ipcMain.handle('browser:clearImportedSessions', async () => {
+    const choice = await dialog.showMessageBox({ type: 'warning', buttons: ['Cancel', 'Clear all agent browser sessions'], defaultId: 0, cancelId: 0, title: 'Clear all agent browser sessions', message: 'Close agent browser pages and remove all cookies and site data from the agent browser?' })
+    return choice.response === 1 ? clearImportedBrowserSessions() : 0
+  })
   // Canvas browser panels register themselves here so agents can drive them
   // through browser_* MCP tools. Only registered panels are addressable; the
   // main app window is never registered and there is no global debug port.
@@ -2160,7 +2245,7 @@ else:
     }
     const taskIds = Array.isArray(payload.taskIds) ? payload.taskIds.filter((t): t is string => typeof t === 'string') : []
     if (!panelBrowserBroker.setPanelTasks(payload.panelId, taskIds)) {
-      panelBrowserBroker.registerPanel(payload.panelId, payload.webContentsId, taskIds)
+      return { success: panelBrowserBroker.registerPanel(payload.panelId, payload.webContentsId, taskIds) }
     }
     return { success: true }
   })
@@ -2357,7 +2442,7 @@ else:
 
       // ── Inject cookies into Electron session ──
       if (cookies.length > 0) {
-        const ses = session.defaultSession
+        const ses = getAgentBrowserSession()
         let injected = 0
         for (const cookie of cookies) {
           try {
@@ -2366,7 +2451,7 @@ else:
               url,
               name: cookie.name,
               value: cookie.value,
-              domain: cookie.domain,
+              ...(cookie.domain.startsWith('.') ? { domain: cookie.domain } : {}),
               path: cookie.path,
               secure: cookie.secure,
               httpOnly: cookie.httpOnly,

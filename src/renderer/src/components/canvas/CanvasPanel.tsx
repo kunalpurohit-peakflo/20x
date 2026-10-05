@@ -11,6 +11,7 @@ import { getLiveViewport } from '@/stores/canvas-live-viewport'
 import { X, Focus, Maximize2, Minimize2, PanelLeft, PanelRight, Columns2, Globe } from 'lucide-react'
 import type { TaskWorkspaceLayout } from '@/components/tasks/TaskWorkspace'
 import { useTaskStore } from '@/stores/task-store'
+import { useAgentStore, SessionStatus } from '@/stores/agent-store'
 import { TaskStatus } from '@/types'
 import { TaskPanelContent } from './TaskPanelContent'
 import { TranscriptPanelContent } from './TranscriptPanelContent'
@@ -35,13 +36,9 @@ const FROZEN_CONTENT_STYLE: CSSProperties = { visibility: 'hidden', contain: 'la
 
 interface CanvasPanelProps {
   panel: CanvasPanelData
-  zoom: number
+  commitPendingViewport?: () => void
   /** When true, the panel is off-viewport — heavy content (iframes, terminals) is hidden */
   frozen?: boolean
-  /** 0-based index of this panel in the panels array */
-  panelIndex?: number
-  /** When true, show the panel index number as an overlay badge */
-  showIndex?: boolean
 }
 
 /**
@@ -51,7 +48,7 @@ interface CanvasPanelProps {
  * Memoized so that only the panel whose data changed re-renders — prevents
  * iframes/terminals from being remounted when a *different* panel moves.
  */
-export const CanvasPanel = memo(function CanvasPanel({ panel, zoom, frozen = false, panelIndex, showIndex = false }: CanvasPanelProps) {
+export const CanvasPanel = memo(function CanvasPanel({ panel, commitPendingViewport, frozen = false }: CanvasPanelProps) {
   const bringToFront = useCanvasStore((s) => s.bringToFront)
   const updatePanel = useCanvasStore((s) => s.updatePanel)
   const removePanel = useCanvasStore((s) => s.removePanel)
@@ -78,8 +75,7 @@ export const CanvasPanel = memo(function CanvasPanel({ panel, zoom, frozen = fal
   const dragStart = useRef({ x: 0, y: 0, panelX: 0, panelY: 0 })
   const resizeStart = useRef({ x: 0, y: 0, w: 0, h: 0 })
   // Latest imperative geometry, committed to the store on mouseup. Held in
-  // refs (not effect-local vars) so an effect re-run mid-gesture — a zoom
-  // commit changes the `zoom` prop — can't lose the in-progress position.
+  // Refs keep in-progress geometry across unrelated renders.
   const dragCommit = useRef({ x: 0, y: 0 })
   const resizeCommit = useRef({ w: 0, h: 0 })
   const previousTaskStatusRef = useRef<TaskStatus | undefined>(undefined)
@@ -129,7 +125,7 @@ export const CanvasPanel = memo(function CanvasPanel({ panel, zoom, frozen = fal
       if (!e) return
       // Read the zoom from the live viewport — during a simultaneous pinch-zoom
       // the store value lags until the gesture commits.
-      const liveZoom = getLiveViewport().zoom || zoom || 1
+      const liveZoom = getLiveViewport().zoom || 1
       const dx = (e.clientX - dragStart.current.x) / liveZoom
       const dy = (e.clientY - dragStart.current.y) / liveZoom
       const newX = dragStart.current.panelX + dx
@@ -225,7 +221,7 @@ export const CanvasPanel = memo(function CanvasPanel({ panel, zoom, frozen = fal
       window.removeEventListener('mousemove', handleMove)
       window.removeEventListener('mouseup', handleUp)
     }
-  }, [isDragging, panel.id, panel.width, panel.height, zoom, updatePanel, setDraggingPanelId, setSnapGuides, setLiveDrag])
+  }, [isDragging, panel.id, panel.width, panel.height, updatePanel, setDraggingPanelId, setSnapGuides, setLiveDrag])
 
   // ── Resize handling ───────────────────────────────────────
   const handleResizeStart = useCallback(
@@ -260,7 +256,7 @@ export const CanvasPanel = memo(function CanvasPanel({ panel, zoom, frozen = fal
       rafId = null
       const e = lastEvent
       if (!e) return
-      const liveZoom = getLiveViewport().zoom || zoom || 1
+      const liveZoom = getLiveViewport().zoom || 1
       const dx = (e.clientX - resizeStart.current.x) / liveZoom
       const dy = (e.clientY - resizeStart.current.y) / liveZoom
       const minW = panel.minWidth ?? 200
@@ -298,7 +294,7 @@ export const CanvasPanel = memo(function CanvasPanel({ panel, zoom, frozen = fal
       window.removeEventListener('mousemove', handleMove)
       window.removeEventListener('mouseup', handleUp)
     }
-  }, [isResizing, panel.id, panel.minWidth, panel.minHeight, zoom, updatePanel])
+  }, [isResizing, panel.id, panel.minWidth, panel.minHeight, updatePanel])
 
   // ── Connect (edge drawing) ─────────────────────────────────
   // Local state tracks whether THIS panel initiated connecting — avoids global subscription
@@ -346,11 +342,12 @@ export const CanvasPanel = memo(function CanvasPanel({ panel, zoom, frozen = fal
       e.stopPropagation()
       const canvas = panelRef.current?.closest('[data-canvas-root]') as HTMLElement | null
       if (canvas) {
+        commitPendingViewport?.()
         const rect = canvas.getBoundingClientRect()
         focusPanel(panel.id, rect.width, rect.height)
       }
     },
-    [focusPanel, panel.id]
+    [focusPanel, panel.id, commitPendingViewport]
   )
 
   // ── Close ─────────────────────────────────────────────────
@@ -412,6 +409,12 @@ export const CanvasPanel = memo(function CanvasPanel({ panel, zoom, frozen = fal
     panel.type === 'task' ? s.tasks.find(t => t.id === panel.refId)?.status : undefined,
     [panel.type, panel.refId])
   )
+  // Lets a theme make a panel that waits for the user stand out on a busy canvas.
+  const waitingForUser = useAgentStore(useCallback((s) => {
+    if (panel.type !== 'task' && panel.type !== 'transcript') return false
+    const session = panel.refId ? s.sessions.get(panel.refId) : undefined
+    return Boolean(session?.pendingApproval && session.status !== SessionStatus.IDLE)
+  }, [panel.type, panel.refId]))
 
   useEffect(() => {
     if (panel.type !== 'task') {
@@ -514,6 +517,9 @@ export const CanvasPanel = memo(function CanvasPanel({ panel, zoom, frozen = fal
       ref={panelRef}
       data-canvas-panel="true"
       data-canvas-panel-selected={isSelected ? 'true' : 'false'}
+      data-panel-type={panel.type}
+      data-task-status={taskStatus}
+      data-attention={waitingForUser ? 'approval' : undefined}
       onMouseDown={handleMouseDown}
       onMouseEnter={handlePanelMouseEnter}
       onMouseLeave={handlePanelMouseLeave}
@@ -702,20 +708,6 @@ export const CanvasPanel = memo(function CanvasPanel({ panel, zoom, frozen = fal
           >
             <Globe className="h-3.5 w-3.5 text-orange-400" />
           </button>
-        </div>
-      )}
-
-      {/* Panel index badge — shown when Ctrl/Cmd is held */}
-      {showIndex && panelIndex !== undefined && panelIndex < 9 && (
-        <div
-          className="absolute inset-0 flex items-center justify-center pointer-events-none z-50"
-          style={{ background: 'rgba(0,0,0,0.5)', borderRadius: 'inherit' }}
-        >
-          <div className="flex items-center justify-center w-16 h-16 rounded-2xl bg-indigo-500/90 shadow-2xl shadow-indigo-500/40 border border-indigo-400/50">
-            <span className="text-3xl font-bold text-white tabular-nums">
-              {panelIndex + 1}
-            </span>
-          </div>
         </div>
       )}
     </div>

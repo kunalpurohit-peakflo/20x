@@ -26,6 +26,14 @@ export function createTestDb(): { db: DatabaseManager; rawDb: InstanceType<typeo
       updated_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS harness_instances (
+      id TEXT PRIMARY KEY,
+      harness_type TEXT NOT NULL CHECK (harness_type IN ('claude-code', 'codex')),
+      label TEXT NOT NULL,
+      home_path TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -224,6 +232,12 @@ export function createTestDb(): { db: DatabaseManager; rawDb: InstanceType<typeo
       revoked INTEGER NOT NULL DEFAULT 0
     );
 
+    CREATE TABLE IF NOT EXISTS mobile_push_subscriptions (
+      session_id TEXT PRIMARY KEY REFERENCES mobile_sessions(id) ON DELETE CASCADE,
+      endpoint TEXT NOT NULL UNIQUE,
+      subscription TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS transcript_parts (
       task_id TEXT NOT NULL,
       part_id TEXT NOT NULL,
@@ -240,6 +254,8 @@ export function createTestDb(): { db: DatabaseManager; rawDb: InstanceType<typeo
     );
     CREATE INDEX IF NOT EXISTS idx_transcript_parts_task_seq ON transcript_parts(task_id, seq);
     CREATE INDEX IF NOT EXISTS idx_transcript_parts_task_rev ON transcript_parts(task_id, rev);
+    CREATE INDEX IF NOT EXISTS idx_transcript_parts_rev ON transcript_parts(rev);
+    CREATE INDEX IF NOT EXISTS idx_transcript_parts_task_created ON transcript_parts(task_id, created_at, seq);
   `)
 
   const manager = new DatabaseManager()

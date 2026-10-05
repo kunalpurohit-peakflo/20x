@@ -16,8 +16,18 @@ import type {
   SessionMessage,
   MessagePart,
 } from './coding-agent-adapter'
+import type { AdapterUsageLimitsEvent, AdapterUsageReport, UsageLimitStop } from './coding-agent-adapter'
 import { SessionStatusType, MessagePartType, MessageRole } from './coding-agent-adapter'
 import { pickWindowsWhichMatch, resolveWindowsClaudeShim } from './claude-executable'
+import { realHomeFor } from '../harness-instances'
+import { homedir } from 'os'
+import type { ProviderUsageLimits } from '../../shared/usage'
+import {
+  claudeRateLimitInfoToUpdate,
+  claudeUsageResponseToLimits,
+  latestResetAt,
+  normalizeClaudeModelUsage
+} from '../usage/usage-normalize'
 
 type ClaudeSDK = typeof import('@anthropic-ai/claude-agent-sdk')
 type Query = import('@anthropic-ai/claude-agent-sdk').Query
@@ -26,6 +36,7 @@ type Options = import('@anthropic-ai/claude-agent-sdk').Options
 type McpServerConfig = import('@anthropic-ai/claude-agent-sdk').McpServerConfig
 type HookCallback = import('@anthropic-ai/claude-agent-sdk').HookCallback
 type HookCallbackMatcher = import('@anthropic-ai/claude-agent-sdk').HookCallbackMatcher
+type SDKUserMessage = import('@anthropic-ai/claude-agent-sdk').SDKUserMessage
 
 let ClaudeAgentSDK: ClaudeSDK | null = null
 
@@ -34,6 +45,11 @@ let resolvedClaudeExecutablePath: string | null = null
 
 /** Maximum number of messages to keep in the buffer per session */
 const MAX_MESSAGE_BUFFER_SIZE = 500
+
+/** Minimum interval between opportunistic plan-limit reads on a live session. */
+const PLAN_LIMITS_REFRESH_INTERVAL_MS = 5 * 60 * 1000
+/** Upper bound for a single plan-limit read (live session or ephemeral probe). */
+const PLAN_LIMITS_TIMEOUT_MS = 30 * 1000
 
 export enum ClaudeSystemSubtype {
   INIT = 'init',
@@ -88,6 +104,21 @@ interface ClaudeSession {
   config: SessionConfig // Store config for later use
   isResumed?: boolean // True if this session was resumed from persistence
   /**
+   * True when this adapter created the Claude session, so all of its usage was
+   * observed here. Unlike `isResumed` this never flips after process restarts.
+   */
+  createdInApp?: boolean
+  /**
+   * Rate-limit windows currently rejecting requests (`rate_limit_event` with
+   * status `rejected` and no overage), keyed by window type → reset time
+   * (ISO) or null when unknown. Cleared per window when it reports allowed.
+   */
+  rejectedLimitWindows?: Map<string, string | null>
+  /** The current turn's assistant reported `error: 'rate_limit'`. */
+  sawRateLimitError?: boolean
+  /** Set when the turn stopped on a subscription usage limit. */
+  usageLimit?: UsageLimitStop | null
+  /**
    * Subagent / bash tasks Claude Code is currently running in the background.
    * Claude Code backgrounds Task-tool subagents by default: the tool call returns
    * immediately, the assistant's turn ends (emitting `result`) and the subagent
@@ -110,8 +141,20 @@ interface ClaudeSession {
   releasePrompt: (() => void) | null
 }
 
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms)
+  })
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer)
+  })
+}
+
 export class ClaudeCodeAdapter implements CodingAgentAdapter {
   private sessions = new Map<string, ClaudeSession>()
+  /** Home of the harness instance this adapter serves. Sessions may override it per call. */
+  private readonly harnessHome: string | undefined
   private sdkLoading: Promise<void> | null = null
   private claudeExecutablePath: string | null = null
   /**
@@ -133,7 +176,18 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
    */
   onDataAvailable?: (sessionId: string) => void
 
-  constructor() {
+  /** Set by agent-manager: receives cumulative token usage from `result` messages. */
+  onUsage?: (report: AdapterUsageReport) => void
+
+  /** Set by agent-manager: receives subscription plan-limit snapshots/updates. */
+  onUsageLimits?: (event: AdapterUsageLimitsEvent) => void
+
+  /** Shared in-flight plan-limit read, so concurrent callers make one request. */
+  private planLimitsRead: Promise<ProviderUsageLimits> | null = null
+  private lastPlanLimitsReadAt = 0
+
+  constructor(options: { harnessHome?: string } = {}) {
+    this.harnessHome = options.harnessHome
     this.sdkLoading = this.loadSDK()
   }
 
@@ -263,11 +317,14 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
    * When secrets are configured, sets SHELL to the secret-shell.sh wrapper
    * so every bash command fetches secrets from the broker transparently.
    */
-  private buildClaudeEnvironment(): Record<string, string> {
+  private buildClaudeEnvironment(harnessHome: string | undefined = this.harnessHome): Record<string, string> {
     const env = { ...process.env } as Record<string, string>
 
     // Remove CLAUDECODE to prevent nested session error
     delete env.CLAUDECODE
+
+    // The instance's config directory selects its login and its session store.
+    if (harnessHome) env.CLAUDE_CONFIG_DIR = harnessHome
 
     return env
   }
@@ -365,6 +422,7 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
       lastError: null,
       config, // Store config for use in sendPrompt
       isResumed: false, // New session, not resumed
+      createdInApp: true,
       backgroundTasks: new Map(),
       sawResult: false,
       enqueuePrompt: null,
@@ -397,13 +455,12 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
    * Cleans the session file by removing messages with empty text blocks
    * This prevents API errors when resuming sessions
    */
-  private async cleanSessionFile(sessionId: string, workspaceDir: string): Promise<void> {
+  private async cleanSessionFile(sessionId: string, workspaceDir: string, harnessHome?: string): Promise<void> {
     try {
       const { readFileSync, writeFileSync, existsSync } = await import('fs')
       const { join } = await import('path')
-      const { homedir } = await import('os')
 
-      const claudeDir = join(homedir(), '.claude', 'projects')
+      const claudeDir = join(harnessHome ?? this.harnessHome ?? realHomeFor('claude-code'), 'projects')
       // Claude Code CLI encodes workspace paths by replacing all non-alphanumeric/non-hyphen chars with '-'
       const encodedWorkspace = workspaceDir.replace(/[^a-zA-Z0-9-]/g, '-')
       const sessionFile = join(claudeDir, encodedWorkspace, `${sessionId}.jsonl`)
@@ -467,21 +524,20 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
     const workspaceDir = config.workspaceDir
     if (!workspaceDir) return []
     try {
-      return await this.loadSessionHistory(sessionId, workspaceDir)
+      return await this.loadSessionHistory(sessionId, workspaceDir, config.harnessHome)
     } catch {
       return []
     }
   }
 
-  private async loadSessionHistory(sessionId: string, workspaceDir: string): Promise<SessionMessage[]> {
+  private async loadSessionHistory(sessionId: string, workspaceDir: string, harnessHome?: string): Promise<SessionMessage[]> {
     try {
       const { readFileSync, existsSync } = await import('fs')
       const { join } = await import('path')
-      const { homedir } = await import('os')
 
       // Session files are stored in: ~/.claude/projects/[encoded-workspace]/[sessionId].jsonl
       // Claude Code CLI encodes workspace paths by replacing all non-alphanumeric/non-hyphen chars with '-'
-      const claudeDir = join(homedir(), '.claude', 'projects')
+      const claudeDir = join(harnessHome ?? this.harnessHome ?? realHomeFor('claude-code'), 'projects')
       const encodedWorkspace = workspaceDir.replace(/[^a-zA-Z0-9-]/g, '-')
       const sessionFile = join(claudeDir, encodedWorkspace, `${sessionId}.jsonl`)
 
@@ -649,7 +705,7 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
     }
 
     // Clean session file to remove empty text blocks before resuming
-    await this.cleanSessionFile(sessionId, config.workspaceDir)
+    await this.cleanSessionFile(sessionId, config.workspaceDir, config.harnessHome)
 
     // Create session state (idle until user sends a message)
     const session: ClaudeSession = {
@@ -663,6 +719,7 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
       lastError: null,
       config, // Store config for later use
       isResumed: true, // Resumed from persistence
+      createdInApp: false,
       backgroundTasks: new Map(),
       sawResult: false,
       enqueuePrompt: null,
@@ -676,7 +733,7 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
     console.log(`[ClaudeCodeAdapter] Session resumed: ${sessionId} (waiting for user prompt)`)
 
     // Load conversation history from session file
-    const messages = await this.loadSessionHistory(sessionId, config.workspaceDir)
+    const messages = await this.loadSessionHistory(sessionId, config.workspaceDir, config.harnessHome)
 
     console.log(`[ClaudeCodeAdapter] Session loaded with ${messages.length} messages`)
 
@@ -720,6 +777,10 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
       session.sawResult = false
       session.status = 'busy'
       session.lastError = null
+      session.usageLimit = null
+      session.sawRateLimitError = false
+      // Only windows rejected during this turn count towards a limit stop.
+      session.rejectedLimitWindows?.clear()
       session.enqueuePrompt(promptText)
       return
     }
@@ -754,7 +815,7 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
     const options: Options = {
       cwd: config.workspaceDir,
       pathToClaudeCodeExecutable: claudePath,
-      env: this.buildClaudeEnvironment(),
+      env: this.buildClaudeEnvironment(config.harnessHome),
       mcpServers: config.mcpServers as Record<string, McpServerConfig> | undefined,
       model: config.model,
       effort,
@@ -856,6 +917,9 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
     session.queryIterator = query
     session.status = 'busy'
     session.lastError = null // Clear any previous error (e.g., rate limit) for recovery
+    session.usageLimit = null
+    session.sawRateLimitError = false
+    session.rejectedLimitWindows?.clear()
     if (!isFirstPrompt) {
       session.messageBuffer = [] // Clear buffer for new messages (but keep history for first prompt)
       session.messageCursor = 0
@@ -877,7 +941,11 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
     }
 
     if (session.lastError) {
-      return { type: SessionStatusType.ERROR, message: session.lastError }
+      return {
+        type: SessionStatusType.ERROR,
+        message: session.lastError,
+        ...(session.usageLimit ? { usageLimit: session.usageLimit } : {})
+      }
     }
 
     // getStatus is the 2s poll path, so it is also where a stalled background
@@ -1341,6 +1409,21 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
           session.lastError = text || 'Claude Code API error'
         }
 
+        // Subscription usage tracking. Never allowed to break the stream.
+        if (msg.type === 'rate_limit_event') {
+          this.reportRateLimitEvent(msg.rate_limit_info)
+          this.trackRejectedLimitWindow(session, msg.rate_limit_info)
+        } else if (msg.type === 'assistant' && (msg as Record<string, unknown>).error === 'rate_limit') {
+          session.sawRateLimitError = true
+        }
+        if (msg.type === 'result') {
+          this.detectUsageLimitStop(session, msg)
+        }
+        if (msg.type === 'result') {
+          this.reportResultUsage(sessionId, session, msg)
+          if (!msg.is_error) this.maybeRefreshPlanLimits(session)
+        }
+
         // Buffer message (only if we didn't throw above)
         session.messageBuffer.push(message)
 
@@ -1448,6 +1531,201 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
         // session ID rather than --continue (which targets most-recent in dir).
         session.isResumed = true
       }
+    }
+  }
+
+  // ── Usage-limit stops ────────────────────────────────────
+
+  private trackRejectedLimitWindow(session: ClaudeSession, info: unknown): void {
+    if (!info || typeof info !== 'object') return
+    const rateLimit = info as { status?: string; rateLimitType?: string; resetsAt?: number; overageStatus?: string }
+    const type = rateLimit.rateLimitType || 'unknown'
+    const windows = session.rejectedLimitWindows ?? (session.rejectedLimitWindows = new Map())
+    const overageAllowed = rateLimit.overageStatus === 'allowed' || rateLimit.overageStatus === 'allowed_warning'
+    if (rateLimit.status === 'rejected' && !overageAllowed) {
+      const resetsAt = typeof rateLimit.resetsAt === 'number' && rateLimit.resetsAt > 0
+        ? new Date(rateLimit.resetsAt * 1000).toISOString()
+        : null
+      windows.set(type, resetsAt)
+    } else if (rateLimit.status === 'allowed' || rateLimit.status === 'allowed_warning') {
+      windows.delete(type)
+    }
+  }
+
+  /**
+   * A turn stopped on a subscription usage limit when the CLI reports
+   * `terminal_reason: 'blocking_limit'` / HTTP 429, or the turn failed while a
+   * rate-limit window was rejecting requests. The reset time comes from the
+   * rejected windows (never parsed from message text).
+   */
+  private detectUsageLimitStop(session: ClaudeSession, msg: Record<string, unknown>): void {
+    const rejected = session.rejectedLimitWindows ?? new Map<string, string | null>()
+    // A plain HTTP 429 on an API-key login is a per-minute API rate limit, not a plan limit.
+    const subscription = session.config.authMethod !== 'api_key'
+    const blocking =
+      msg.terminal_reason === 'blocking_limit' ||
+      msg.terminal_reason === 'rapid_refill_breaker' ||
+      (subscription && msg.api_error_status === 429)
+    const failedWhileLimited = msg.is_error === true && (rejected.size > 0 || session.sawRateLimitError === true)
+    if (!blocking && !failedWhileLimited) return
+    // Authentication problems are not usage limits.
+    const text = typeof msg.result === 'string' ? msg.result : ''
+    if (/\bauthenticat|\boauth\b|\blog ?in\b/i.test(text) && !blocking) return
+
+    session.usageLimit = { resetAt: latestResetAt(Array.from(rejected.values())) }
+    session.status = 'error'
+    if (!session.lastError) {
+      session.lastError = text || 'Claude usage limit reached'
+    }
+  }
+
+  // ── Subscription usage tracking ──────────────────────────
+
+  /**
+   * `result.modelUsage` carries per-model running totals for the whole query
+   * (main loop + subagents + compaction), cumulative across turns of the
+   * streaming-input session. Reported as-is; the tracker computes deltas.
+   */
+  private reportResultUsage(sessionId: string, session: ClaudeSession, msg: Record<string, unknown>): void {
+    if (!this.onUsage) return
+    try {
+      const buckets = normalizeClaudeModelUsage(msg.modelUsage)
+      if (buckets.length === 0) return
+      const providerSessionId =
+        (typeof msg.session_id === 'string' && msg.session_id) || session.sessionId || sessionId
+      this.onUsage({
+        provider: 'claude-code',
+        providerSessionId,
+        taskId: session.config.taskId,
+        agentId: session.config.agentId,
+        newSession: session.createdInApp === true,
+        buckets
+      })
+    } catch (error) {
+      console.warn('[ClaudeCodeAdapter] Failed to report token usage:', error)
+    }
+  }
+
+  private reportRateLimitEvent(info: unknown): void {
+    if (!this.onUsageLimits) return
+    try {
+      const update = claudeRateLimitInfoToUpdate(info)
+      if (update) this.onUsageLimits({ kind: 'update', provider: 'claude-code', update })
+    } catch (error) {
+      console.warn('[ClaudeCodeAdapter] Failed to report rate-limit event:', error)
+    }
+  }
+
+  /**
+   * After a turn completes, read the full plan-limit picture (5-hour, weekly,
+   * per-model windows) from the live query — at most once per interval across
+   * all sessions. Streamed `rate_limit_event`s only carry the window that
+   * changed, so this keeps the other windows fresh too.
+   */
+  private maybeRefreshPlanLimits(session: ClaudeSession): void {
+    if (!this.onUsageLimits || !session.queryIterator) return
+    if (this.planLimitsRead) return
+    if (Date.now() - this.lastPlanLimitsReadAt < PLAN_LIMITS_REFRESH_INTERVAL_MS) return
+    const query = session.queryIterator
+    void this.readPlanLimits(() => this.readPlanLimitsFromQuery(query))
+      .then((limits) => this.onUsageLimits?.({ kind: 'snapshot', limits }))
+      .catch((error) => {
+        console.warn('[ClaudeCodeAdapter] Plan-limit refresh failed:', error instanceof Error ? error.message : error)
+      })
+  }
+
+  /**
+   * Reads the current Claude subscription plan limits. Uses a live session's
+   * query when one exists; otherwise starts a short-lived query that never
+   * sends a prompt (no model call, no tokens consumed) and closes it.
+   */
+  async probeUsageLimits(): Promise<ProviderUsageLimits | null> {
+    const live = Array.from(this.sessions.values()).find((s) => s.queryIterator)
+    const liveQuery = live?.queryIterator ?? null
+    try {
+      return await this.readPlanLimits(() =>
+        liveQuery ? this.readPlanLimitsFromQuery(liveQuery) : this.readPlanLimitsWithEphemeralQuery()
+      )
+    } catch (error) {
+      return {
+        provider: 'claude-code',
+        checkedAt: new Date().toISOString(),
+        windows: [],
+        unavailable: {
+          reason: 'probe_failed',
+          message: error instanceof Error ? error.message : String(error)
+        }
+      }
+    }
+  }
+
+  private readPlanLimits(read: () => Promise<ProviderUsageLimits>): Promise<ProviderUsageLimits> {
+    if (this.planLimitsRead) return this.planLimitsRead
+    this.lastPlanLimitsReadAt = Date.now()
+    const pending = read().finally(() => {
+      if (this.planLimitsRead === pending) this.planLimitsRead = null
+    })
+    this.planLimitsRead = pending
+    return pending
+  }
+
+  private async readPlanLimitsFromQuery(query: Query): Promise<ProviderUsageLimits> {
+    // Experimental SDK API: guard at runtime so a future SDK that renames it
+    // degrades to "no plan limits" instead of throwing inside the stream.
+    const readUsage = (query as unknown as {
+      usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET?: (opts?: { skipBehaviors?: boolean }) => Promise<unknown>
+    }).usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET
+    if (typeof readUsage !== 'function') {
+      throw new Error('This Claude Agent SDK version does not expose plan usage')
+    }
+    const response = await withTimeout(
+      readUsage.call(query, { skipBehaviors: true }),
+      PLAN_LIMITS_TIMEOUT_MS,
+      'Timed out reading Claude plan usage'
+    )
+    return claudeUsageResponseToLimits(response, new Date().toISOString())
+  }
+
+  private async readPlanLimitsWithEphemeralQuery(): Promise<ProviderUsageLimits> {
+    await this.ensureSDKLoaded()
+    if (!ClaudeAgentSDK) throw new Error('Claude Agent SDK not loaded')
+    const claudePath = await this.findClaudeExecutable()
+
+    let releasePrompt: () => void = () => {}
+    const promptReleased = new Promise<void>((resolve) => { releasePrompt = resolve })
+    // A prompt stream that never yields: the CLI initializes (auth, settings)
+    // but no user turn is sent, so no model call is made.
+    const prompt = (async function* (): AsyncGenerator<SDKUserMessage> {
+      await promptReleased
+    })()
+    const abortController = new AbortController()
+    const query = ClaudeAgentSDK.query({
+      prompt,
+      options: {
+        cwd: homedir(),
+        pathToClaudeCodeExecutable: claudePath,
+        env: this.buildClaudeEnvironment(),
+        abortController,
+        persistSession: false,
+        settingSources: ['user']
+      }
+    })
+    // Drain stream messages so the SDK never blocks on an unread buffer.
+    const drain = (async () => {
+      try {
+        for await (const message of query) { void message }
+      } catch {
+        // Expected when the probe is closed.
+      }
+    })()
+
+    try {
+      return await this.readPlanLimitsFromQuery(query)
+    } finally {
+      releasePrompt()
+      try { query.close() } catch { /* already closed */ }
+      abortController.abort()
+      void drain
     }
   }
 

@@ -6,6 +6,10 @@
 import { getAuthToken } from './auth'
 import type { Artifact, ArtifactContent, PullRequestDetails } from '@shared/artifacts'
 import type { VoiceCapabilities } from '@shared/voice'
+import type { ProviderUsageLimits, UsageLimitsRefreshResult, UsageSummary, UsageSummaryQuery } from '@shared/usage'
+import type { UsageLimitRecovery } from '@shared/usage-limit-recovery'
+import type { PushPreferences } from '@shared/push-notifications'
+import type { HarnessInstanceView } from '@shared/harness-instances'
 
 const MOBILE_API_PORT = '20620'
 // When served via a reverse proxy (Cloudflare tunnel, https with no explicit port),
@@ -49,6 +53,13 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
 }
 
 export const api = {
+  push: {
+    config: () => get<{ publicKey: string; preferences: PushPreferences }>('/api/push/config'),
+    subscription: () => get<{ subscription: PushSubscriptionJSON | null }>('/api/push/subscription'),
+    subscribe: (subscription: PushSubscriptionJSON | null) => post<{ success: boolean }>('/api/push/subscription', { subscription }),
+    preferences: (preferences: PushPreferences) => post<{ preferences: PushPreferences }>('/api/push/preferences', { preferences }),
+    test: () => post<{ success: boolean }>('/api/push/test')
+  },
   tasks: {
     list: (params?: Record<string, string>) => {
       const qs = params ? '?' + new URLSearchParams(params).toString() : ''
@@ -95,6 +106,24 @@ export const api = {
       post<Array<{ name: string; fullName: string; defaultBranch: string; cloneUrl: string; description: string; isPrivate: boolean }>>('/api/github/repos', { org, provider }),
     pullRequest: (url: string) =>
       get<PullRequestDetails>(`/api/github/pull-request?url=${encodeURIComponent(url)}`)
+  },
+  harnessInstances: {
+    list: () => get<HarnessInstanceView[]>('/api/harness-instances')
+  },
+  usage: {
+    limits: () => get<ProviderUsageLimits[]>('/api/usage/limits'),
+    refreshLimits: (force = false) => post<UsageLimitsRefreshResult>('/api/usage/limits/refresh', { force }),
+    limitRecovery: (taskId: string) => get<UsageLimitRecovery | null>(`/api/tasks/${encodeURIComponent(taskId)}/limit-recovery`),
+    setLimitRecoveryAutoResume: (taskId: string, autoResume: boolean) =>
+      post<UsageLimitRecovery | null>(`/api/tasks/${encodeURIComponent(taskId)}/limit-recovery`, { autoResume }),
+    summary: (query: UsageSummaryQuery = {}) => {
+      const params = new URLSearchParams()
+      for (const [key, value] of Object.entries(query)) {
+        if (value !== undefined && value !== null) params.set(key, String(value))
+      }
+      const qs = params.toString()
+      return get<UsageSummary | null>(`/api/usage/summary${qs ? `?${qs}` : ''}`)
+    }
   },
   capabilities: {
     /** What this client can do. Voice capture is desktop-only in phase 1. */

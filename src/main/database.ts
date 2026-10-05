@@ -7,6 +7,10 @@ import { createId } from '@paralleldrive/cuid2'
 import { TaskStatus } from '../shared/constants'
 import type { ReasoningEffort } from '../shared/reasoning-effort'
 import { startTaskApiServer } from './task-api-server'
+import { UsageStore } from './usage/usage-store'
+import { contextHandoffSettingKey, parseContextHandoffMarker, type ContextHandoffMarker } from './context-handoff'
+import { harnessTypeOf, type HarnessInstance, type HarnessType } from '../shared/harness-instances'
+import { normalizeHomePath } from './harness-instances'
 
 export interface AgentRow {
   id: string
@@ -35,6 +39,11 @@ export interface AgentMcpServerEntry {
 
 export interface AgentConfigRecord {
   coding_agent?: 'opencode' | 'claude-code' | 'codex' | 'cursor' | 'pi'
+  /**
+   * Harness instance (one subscription login of the coding_agent). Unset means
+   * the default instance of the coding_agent. Ignored for API-key agents.
+   */
+  harness_instance_id?: string
   model?: string
   reasoning_effort?: ReasoningEffort
   auth_method?: 'subscription' | 'api_key'
@@ -49,6 +58,28 @@ export interface AgentConfigRecord {
     anthropic?: string
     cursor?: string
   }
+}
+
+/** A stored harness instance. The implicit defaults ("Claude Code", "Codex") are not rows. */
+export type HarnessInstanceRecord = HarnessInstance
+
+interface HarnessInstanceRow {
+  id: string
+  harness_type: string
+  label: string
+  home_path: string
+  created_at: string
+}
+
+export interface CreateHarnessInstanceData {
+  harness_type: HarnessType
+  label: string
+  home_path: string
+}
+
+export interface UpdateHarnessInstanceData {
+  label?: string
+  home_path?: string
 }
 
 export interface McpServerConfigRecord {
@@ -584,6 +615,23 @@ function deserializeMcpServer(row: McpServerRow): McpServerRecord {
   }
 }
 
+function deserializeHarnessInstance(row: HarnessInstanceRow): HarnessInstanceRecord {
+  return {
+    id: row.id,
+    harness_type: row.harness_type as HarnessType,
+    label: row.label,
+    home_path: row.home_path,
+    created_at: row.created_at
+  }
+}
+
+/** Label for a migrated account_home: the harness name plus the directory name, e.g. "Codex · work". */
+function legacyInstanceLabel(homePath: string): string {
+  const base = homePath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? ''
+  const name = base.replace(/^\.+/, '') || 'account'
+  return name
+}
+
 function deserializeAgent(row: AgentRow): AgentRecord {
   return {
     ...row,
@@ -958,11 +1006,23 @@ function deserializeInstalledPlugin(row: InstalledPluginRow): InstalledPluginRec
  * they build the schema from `CREATE TABLE`, not from the migration path.
  *
  * 8 → 9: tasks.complete_at_source
+ * 9 → 10: harness_instances table; agent config account_home → harness_instance_id
  */
-const SCHEMA_VERSION = 9
+const SCHEMA_VERSION = 10
 
 export class DatabaseManager {
   public db!: Database.Database
+  private usageStore: UsageStore | null = null
+
+  /**
+   * Subscription usage persistence (token usage events, session totals, plan
+   * limits). Created lazily so the tables are ensured on whichever
+   * connection `db` currently holds (including in-memory test databases).
+   */
+  get usage(): UsageStore {
+    if (!this.usageStore) this.usageStore = new UsageStore(this.db)
+    return this.usageStore
+  }
 
   private ensureDbOpen(): boolean {
     return !!this.db?.open
@@ -985,6 +1045,7 @@ export class DatabaseManager {
     this.db.pragma('busy_timeout = 5000') // Retry on SQLITE_BUSY for up to 5s
 
     this.createTables()
+    this.ensureMobilePushEndpointColumn()
 
     const currentVersion = this.getSchemaVersion()
     if (currentVersion < SCHEMA_VERSION) {
@@ -1026,9 +1087,38 @@ export class DatabaseManager {
       // the column exists on a legacy DB. Idempotent + safe on a fresh DB, where
       // the column is declared in the CREATE TABLE and this simply adds the index.
       this.db.exec(`CREATE INDEX IF NOT EXISTS idx_transcript_parts_task_rev ON transcript_parts(task_id, rev)`)
+      // Global max rev, read on every streamed write batch
+      // (`upsertTranscriptParts`). Without this index MAX(rev) over the whole
+      // table is a linear scan, so write cost grows with every task's history.
+      this.db.exec(`CREATE INDEX IF NOT EXISTS idx_transcript_parts_rev ON transcript_parts(rev)`)
+      // Snapshot read order (created_at, seq) per task. Lets the snapshot query
+      // stream rows in order instead of sorting the task's whole history.
+      this.db.exec(`CREATE INDEX IF NOT EXISTS idx_transcript_parts_task_created ON transcript_parts(task_id, created_at, seq)`)
     } catch (err) {
       console.error('[Database] ensureTranscriptRevColumn failed:', err)
     }
+  }
+
+  private ensureMobilePushEndpointColumn(): void {
+    const columns = this.db.prepare('PRAGMA table_info(mobile_push_subscriptions)').all() as Array<{ name: string }>
+    if (!columns.some(column => column.name === 'endpoint')) {
+      this.db.exec('ALTER TABLE mobile_push_subscriptions ADD COLUMN endpoint TEXT')
+      const rows = this.db.prepare(`SELECT p.session_id, p.subscription FROM mobile_push_subscriptions p
+        JOIN mobile_sessions s ON s.id = p.session_id ORDER BY s.revoked ASC, s.last_seen DESC`).all() as Array<{ session_id: string; subscription: string }>
+      const seen = new Set<string>()
+      const update = this.db.prepare('UPDATE mobile_push_subscriptions SET endpoint = ? WHERE session_id = ?')
+      const remove = this.db.prepare('DELETE FROM mobile_push_subscriptions WHERE session_id = ?')
+      for (const row of rows) {
+        let endpoint: string | undefined
+        try { endpoint = JSON.parse(row.subscription).endpoint } catch { /* discard invalid legacy data */ }
+        if (typeof endpoint !== 'string' || seen.has(endpoint)) remove.run(row.session_id)
+        else {
+          seen.add(endpoint)
+          update.run(endpoint, row.session_id)
+        }
+      }
+    }
+    this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_mobile_push_endpoint ON mobile_push_subscriptions(endpoint)')
   }
 
   private getSchemaVersion(): number {
@@ -1090,6 +1180,14 @@ export class DatabaseManager {
         is_default INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS harness_instances (
+        id TEXT PRIMARY KEY,
+        harness_type TEXT NOT NULL CHECK (harness_type IN ('claude-code', 'codex')),
+        label TEXT NOT NULL,
+        home_path TEXT NOT NULL,
+        created_at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS settings (
@@ -1226,6 +1324,12 @@ export class DatabaseManager {
         paired_at INTEGER NOT NULL DEFAULT (unixepoch()),
         last_seen INTEGER NOT NULL DEFAULT (unixepoch()),
         revoked INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE TABLE IF NOT EXISTS mobile_push_subscriptions (
+        session_id TEXT PRIMARY KEY REFERENCES mobile_sessions(id) ON DELETE CASCADE,
+        endpoint TEXT NOT NULL UNIQUE,
+        subscription TEXT NOT NULL
       );
 
       -- Durable transcript projection: the main process is the source of truth
@@ -1473,6 +1577,9 @@ export class DatabaseManager {
 
     // Migrate inline MCP servers from agent configs → mcp_servers table
     this.migrateInlineMcpServers()
+
+    // Free-text account_home on agents → harness instances
+    this.migrateAccountHomesToHarnessInstances()
 
     // Migrate task_sources: add plugin_id + config columns
     const tsColumns = this.db.pragma('table_info(task_sources)') as { name: string }[]
@@ -1852,6 +1959,7 @@ If user approves (or if you're very confident), use \`update_task\` to apply:
 ## 4. Answering Questions
 
 Handle queries like:
+- "What's going on?" / "What needs me?" → Use \`get_overview\` (one call)
 - "What tasks are pending?" → Use \`list_tasks\` with status="not_started"
 - "Show high priority bugs" → Use \`list_tasks\` with priority="high" and labels=["bug"]
 - "How many tasks does Frontend Agent have?" → Use \`list_tasks\` with agent_id filter
@@ -1958,7 +2066,8 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
 
     // Define the tools available in the MCP server
     const tools = [
-      { name: 'list_tasks', description: 'List all tasks with optional filters (status, priority, agent, labels)' },
+      { name: 'get_overview', description: 'What needs the user, what is running, ready, late and next, in one call' },
+      { name: 'list_tasks', description: 'List task summaries with optional filters (status, priority, agent, labels, search)' },
       { name: 'create_task', description: 'Create a new task with title, description, type, priority, labels, assignee, agent_id, skill_ids, due date. Use cron field for recurring tasks (e.g. "0 9 * * 1-5")' },
       { name: 'get_task', description: 'Get detailed information about a specific task by ID' },
       { name: 'update_task', description: 'Update task metadata (labels, skills, agent assignment, priority, status)' },
@@ -1967,7 +2076,7 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
       { name: 'read_artifact_file', description: 'Read a file owned by an artifact workpiece' },
       { name: 'write_artifact_file', description: 'Write a file owned by an artifact workpiece' },
       { name: 'edit_artifact_file', description: 'Edit a file owned by an artifact workpiece' },
-      { name: 'list_agents', description: 'List all available agents with their configurations' },
+      { name: 'list_agents', description: 'List all available agents with their configurations and the current subscription plan usage of each agent harness (usage_limits)' },
       { name: 'list_skills', description: 'List all available skills with their descriptions' },
       { name: 'find_similar_tasks', description: 'Find historical tasks similar to given criteria for pattern analysis' },
       { name: 'get_task_statistics', description: 'Get aggregated statistics about tasks (label usage, agent workload, completion rate)' }
@@ -2266,6 +2375,26 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
     }))
   }
 
+  /**
+   * Records that a task left `fromAgentId` and its earlier conversation has not
+   * yet been handed to the agent that now owns it. A task with no transcript has
+   * nothing to hand over. When the task passes through unassigned, the agent it
+   * came from is kept.
+   */
+  markContextHandoff(taskId: string, fromAgentId: string | null): void {
+    // A task with neither transcript nor session has nothing to continue.
+    if (!this.hasTranscriptParts(taskId) && !this.getTask(taskId)?.session_id) return
+    // The first agent that held the conversation stays the source until the
+    // handoff is delivered, however many times the task changes agent before then.
+    const existing = parseContextHandoffMarker(this.getSetting(contextHandoffSettingKey(taskId)))
+    const marker: ContextHandoffMarker = {
+      fromAgentId: existing ? existing.fromAgentId : fromAgentId,
+      recordedAt: Date.now(),
+      announced: false
+    }
+    this.setSetting(contextHandoffSettingKey(taskId), JSON.stringify(marker))
+  }
+
   /** True when the task already has persisted transcript parts. */
   hasTranscriptParts(taskId: string): boolean {
     if (!this.ensureDbOpen()) return false
@@ -2371,6 +2500,11 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
       throw new Error('Only the sync service can change a task source link.')
     }
     const currentTask = this.getTask(id)
+    // Reassigning the agent keeps the session id. Whether the new agent resumes
+    // that session or continues by handoff is decided at resume time (see
+    // planContinuation), and the id is only replaced once a new session starts.
+    // So the id is never dropped before the context has been carried.
+    const agentChanged = !!currentTask && data.agent_id !== undefined && data.agent_id !== currentTask.agent_id
     const approvedStatusWrite = origin === 'session-feedback' || origin === 'task-source'
     if (!approvedStatusWrite && currentTask?.status === TaskStatus.AgentLearning && this.getSetting(`session-feedback-completion:${id}`) && !(data.status === TaskStatus.Completed && data.complete_at_source === false)) {
       data = { ...data, status: TaskStatus.AgentLearning }
@@ -2433,6 +2567,9 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
     this.db.prepare(
       `UPDATE tasks SET ${setClauses.join(', ')} WHERE id = ?`
     ).run(...values)
+
+    // Recorded only once the change is written, so a failed update leaves no marker.
+    if (agentChanged && currentTask) this.markContextHandoff(id, currentTask.agent_id)
 
     return this.getTask(id)
   }
@@ -2589,6 +2726,101 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
   deleteAgent(id: string): boolean {
     const result = this.db.prepare('DELETE FROM agents WHERE id = ?').run(id)
     return result.changes > 0
+  }
+
+  // ── Harness instance CRUD ──────────────────────────────────
+
+  listHarnessInstances(): HarnessInstanceRecord[] {
+    const rows = this.db.prepare('SELECT * FROM harness_instances ORDER BY harness_type ASC, label ASC').all() as HarnessInstanceRow[]
+    return rows.map(deserializeHarnessInstance)
+  }
+
+  getHarnessInstance(id: string): HarnessInstanceRecord | undefined {
+    const row = this.db.prepare('SELECT * FROM harness_instances WHERE id = ?').get(id) as HarnessInstanceRow | undefined
+    return row ? deserializeHarnessInstance(row) : undefined
+  }
+
+  createHarnessInstance(data: CreateHarnessInstanceData): HarnessInstanceRecord {
+    const id = `hi_${createId()}`
+    const now = new Date().toISOString()
+    this.db.prepare(`
+      INSERT INTO harness_instances (id, harness_type, label, home_path, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(id, data.harness_type, data.label.trim(), data.home_path, now)
+    return this.getHarnessInstance(id) ?? { id, harness_type: data.harness_type, label: data.label.trim(), home_path: data.home_path, created_at: now }
+  }
+
+  updateHarnessInstance(id: string, data: UpdateHarnessInstanceData): HarnessInstanceRecord | undefined {
+    const setClauses: string[] = []
+    const values: string[] = []
+    if (data.label !== undefined) {
+      setClauses.push('label = ?')
+      values.push(data.label.trim())
+    }
+    if (data.home_path !== undefined) {
+      setClauses.push('home_path = ?')
+      values.push(data.home_path)
+    }
+    if (setClauses.length > 0) {
+      this.db.prepare(`UPDATE harness_instances SET ${setClauses.join(', ')} WHERE id = ?`).run(...values, id)
+    }
+    return this.getHarnessInstance(id)
+  }
+
+  /**
+   * Removes an instance. Agents that pointed at it fall back to the default
+   * instance of their harness. Their sessions keep their ids.
+   */
+  deleteHarnessInstance(id: string): boolean {
+    const run = this.db.transaction((): boolean => {
+      for (const agent of this.getAgents()) {
+        if (agent.config?.harness_instance_id !== id) continue
+        const config = { ...agent.config }
+        delete config.harness_instance_id
+        this.updateAgent(agent.id, { config })
+      }
+      this.usage.forgetInstance(id)
+      return this.db.prepare('DELETE FROM harness_instances WHERE id = ?').run(id).changes > 0
+    })
+    return run()
+  }
+
+  /**
+   * Moves the free-text `account_home` of agents into harness instances. Each
+   * distinct directory becomes one instance, labelled from its directory name.
+   * The agent then points at it through `harness_instance_id`. Runs on every
+   * migration pass, so it is a no-op once no agent has an account_home left.
+   */
+  private migrateAccountHomesToHarnessInstances(): void {
+    const rows = this.db.prepare('SELECT id, config FROM agents').all() as Array<{ id: string; config: string }>
+    const run = this.db.transaction(() => {
+      for (const row of rows) {
+        let config: AgentConfigRecord & { account_home?: unknown }
+        try {
+          config = JSON.parse(row.config) as AgentConfigRecord & { account_home?: unknown }
+        } catch {
+          continue
+        }
+        if (!('account_home' in config)) continue
+
+        const { account_home: legacyHome, ...rest } = config
+        const harness = harnessTypeOf(rest.coding_agent)
+        const homePath = typeof legacyHome === 'string' ? normalizeHomePath(legacyHome) : undefined
+        if (harness && homePath && !rest.harness_instance_id) {
+          const existing = this.db.prepare(
+            'SELECT id FROM harness_instances WHERE harness_type = ? AND home_path = ?'
+          ).get(harness, homePath) as { id: string } | undefined
+          const instanceId = existing?.id ?? this.createHarnessInstance({
+            harness_type: harness,
+            label: legacyInstanceLabel(homePath),
+            home_path: homePath
+          }).id
+          rest.harness_instance_id = instanceId
+        }
+        this.db.prepare('UPDATE agents SET config = ? WHERE id = ?').run(JSON.stringify(rest), row.id)
+      }
+    })
+    run()
   }
 
   // ── MCP Server CRUD ────────────────────────────────────────
@@ -3213,11 +3445,34 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
   }
 
   revokeMobileSession(id: string): boolean {
+    this.db.prepare('DELETE FROM mobile_push_subscriptions WHERE session_id = ?').run(id)
     const result = this.db.prepare('UPDATE mobile_sessions SET revoked = 1 WHERE id = ?').run(id)
     return result.changes > 0
   }
 
   revokeAllMobileSessions(): void {
+    this.db.prepare('DELETE FROM mobile_push_subscriptions').run()
     this.db.prepare('UPDATE mobile_sessions SET revoked = 1').run()
+  }
+
+  setMobilePushSubscription(sessionId: string, subscription: string | null): void {
+    if (subscription === null) {
+      this.db.prepare('DELETE FROM mobile_push_subscriptions WHERE session_id = ?').run(sessionId)
+    } else {
+      const endpoint = (JSON.parse(subscription) as { endpoint: string }).endpoint
+      this.db.transaction(() => {
+        this.db.prepare('DELETE FROM mobile_push_subscriptions WHERE endpoint = ? OR session_id = ?').run(endpoint, sessionId)
+        this.db.prepare('INSERT INTO mobile_push_subscriptions (session_id, endpoint, subscription) VALUES (?, ?, ?)').run(sessionId, endpoint, subscription)
+      })()
+    }
+  }
+
+  getMobilePushSubscription(sessionId: string): { session_id: string; endpoint: string; subscription: string } | undefined {
+    return this.db.prepare('SELECT session_id, endpoint, subscription FROM mobile_push_subscriptions WHERE session_id = ?').get(sessionId) as { session_id: string; endpoint: string; subscription: string } | undefined
+  }
+
+  getMobilePushSubscriptions(): Array<{ session_id: string; endpoint: string; subscription: string }> {
+    return this.db.prepare(`SELECT p.session_id, p.endpoint, p.subscription FROM mobile_push_subscriptions p
+      JOIN mobile_sessions s ON s.id = p.session_id WHERE s.revoked = 0`).all() as Array<{ session_id: string; endpoint: string; subscription: string }>
   }
 }
