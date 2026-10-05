@@ -12,6 +12,10 @@ import { ClaudeCodeAdapter } from './claude-code-adapter'
 import { CodexAppServerAdapter } from './codex-app-server-adapter'
 import { SessionStatusType } from './coding-agent-adapter'
 
+// Reset times relative to now: the adapters ignore resets that already passed.
+const RESET_SOON = Math.floor(Date.now() / 1000) + 2 * 3600
+const RESET_LATER = Math.floor(Date.now() / 1000) + 7 * 24 * 3600
+
 function claudeSetup(messages: unknown[]) {
   const adapter = new ClaudeCodeAdapter()
   const queue = [...messages]
@@ -40,7 +44,7 @@ const rejected = (type: string, resetsAt?: number) => ({
 describe('Claude usage-limit stops', () => {
   it('flags a blocking_limit turn with the latest reset among rejected windows', async () => {
     const { adapter, session } = claudeSetup([
-      rejected('five_hour', 1_791_200_000),
+      rejected('five_hour', RESET_SOON),
       rejected('seven_day_opus', 1_791_300_000),
       { type: 'result', subtype: 'success', is_error: false, terminal_reason: 'blocking_limit', result: "You've hit your limit", uuid: 'r1' }
     ])
@@ -55,7 +59,7 @@ describe('Claude usage-limit stops', () => {
 
   it('reports an unknown reset when a rejected window has no reset time', async () => {
     const { adapter, session } = claudeSetup([
-      rejected('five_hour', 1_791_200_000),
+      rejected('five_hour', RESET_SOON),
       rejected('seven_day'),
       { type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['rate limited'], uuid: 'r1' }
     ])
@@ -65,7 +69,7 @@ describe('Claude usage-limit stops', () => {
 
   it('does not flag ordinary errors, and windows that recover are dropped', async () => {
     const { adapter, session } = claudeSetup([
-      rejected('five_hour', 1_791_200_000),
+      rejected('five_hour', RESET_SOON),
       { type: 'rate_limit_event', uuid: 'ok', session_id: 's1', rate_limit_info: { status: 'allowed', rateLimitType: 'five_hour', utilization: 0.2 } },
       { type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['tool crashed'], uuid: 'r1' }
     ])
@@ -120,7 +124,7 @@ describe('Codex usage-limit stops', () => {
     }
     priv.sessions.set('thread-1', session)
     vi.spyOn(priv, 'sendRpcRequest').mockResolvedValue({
-      rateLimits: { limitId: 'codex', primary: { usedPercent: 100, windowDurationMins: 300, resetsAt: 1_791_200_000 }, secondary: { usedPercent: 60, windowDurationMins: 10080, resetsAt: 1_791_600_000 } }
+      rateLimits: { limitId: 'codex', primary: { usedPercent: 100, windowDurationMins: 300, resetsAt: RESET_SOON }, secondary: { usedPercent: 60, windowDurationMins: 10080, resetsAt: RESET_LATER } }
     })
     return { adapter, priv, session }
   }
@@ -137,7 +141,7 @@ describe('Codex usage-limit stops', () => {
     // The adapter reads the plan windows right away to learn the reset time.
     await new Promise((resolve) => setImmediate(resolve))
     const status = await adapter.getStatus('thread-1', {} as any)
-    expect(status.usageLimit).toEqual({ resetAt: new Date(1_791_200_000 * 1000).toISOString() })
+    expect(status.usageLimit).toEqual({ resetAt: new Date(RESET_SOON * 1000).toISOString() })
   })
 
   it('ignores a cached window whose reset already passed and reads fresh windows', async () => {
