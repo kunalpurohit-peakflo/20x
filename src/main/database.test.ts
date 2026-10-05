@@ -800,3 +800,115 @@ describe('transcript_parts.rev migration on a legacy DB (no rev column)', () => 
     expect(after).toBe(before)
   })
 })
+
+describe('Context handoff marker on agent reassignment', () => {
+  const key = (taskId: string) => `context-handoff:${taskId}`
+  // createTask does not store agent_id; assignment is an update, as in the app.
+  const assigned = (agentId: string) => {
+    const task = db.createTask(makeTask())!
+    db.updateTask(task.id, { agent_id: agentId })
+    return task
+  }
+
+  it('records the agent a task left once it has a transcript', () => {
+    const first = db.createAgent(makeAgent({ name: 'First' }))!
+    const second = db.createAgent(makeAgent({ name: 'Second' }))!
+    const task = assigned(first.id)
+    db.upsertTranscriptParts(task.id, [{ id: 'p1', role: 'user', content: 'hello' }])
+
+    db.updateTask(task.id, { agent_id: second.id })
+
+    expect(JSON.parse(db.getSetting(key(task.id))!)).toMatchObject({ fromAgentId: first.id })
+  })
+
+  it('records nothing for a task without a transcript', () => {
+    const first = db.createAgent(makeAgent({ name: 'First' }))!
+    const second = db.createAgent(makeAgent({ name: 'Second' }))!
+    const task = assigned(first.id)
+
+    db.updateTask(task.id, { agent_id: second.id })
+
+    expect(db.getSetting(key(task.id))).toBeUndefined()
+  })
+
+  it('keeps the original agent when the task passes through unassigned', () => {
+    const first = db.createAgent(makeAgent({ name: 'First' }))!
+    const second = db.createAgent(makeAgent({ name: 'Second' }))!
+    const task = assigned(first.id)
+    db.upsertTranscriptParts(task.id, [{ id: 'p1', role: 'user', content: 'hello' }])
+
+    db.updateTask(task.id, { agent_id: null })
+    db.updateTask(task.id, { agent_id: second.id })
+
+    expect(JSON.parse(db.getSetting(key(task.id))!)).toMatchObject({ fromAgentId: first.id })
+  })
+
+  it('keeps the first agent through several reassignments before the handoff is delivered', () => {
+    const first = db.createAgent(makeAgent({ name: 'First' }))!
+    const second = db.createAgent(makeAgent({ name: 'Second' }))!
+    const third = db.createAgent(makeAgent({ name: 'Third' }))!
+    const task = assigned(first.id)
+    db.upsertTranscriptParts(task.id, [{ id: 'p1', role: 'user', content: 'hello' }])
+
+    db.updateTask(task.id, { agent_id: second.id })
+    db.updateTask(task.id, { agent_id: third.id })
+
+    expect(JSON.parse(db.getSetting(key(task.id))!)).toMatchObject({ fromAgentId: first.id, announced: false })
+  })
+
+  it('clears the session of the task when it is reassigned to another harness', () => {
+    const first = db.createAgent(makeAgent({ name: 'First', config: { coding_agent: 'claude-code' } }))!
+    const second = db.createAgent(makeAgent({ name: 'Second', config: { coding_agent: 'codex' } }))!
+    const task = assigned(first.id)
+    db.updateTask(task.id, { session_id: 'backend-session-1' })
+
+    const updated = db.updateTask(task.id, { agent_id: second.id })
+
+    expect(updated?.session_id).toBeNull()
+  })
+
+  it('keeps the session when the task moves to another agent of the same harness', () => {
+    const first = db.createAgent(makeAgent({ name: 'First', config: { coding_agent: 'claude-code' } }))!
+    const second = db.createAgent(makeAgent({ name: 'Second', config: { coding_agent: 'claude-code', model: 'other' } }))!
+    const task = assigned(first.id)
+    db.upsertTranscriptParts(task.id, [{ id: 'p1', role: 'user', content: 'hello' }])
+    db.updateTask(task.id, { session_id: 'backend-session-1' })
+
+    const updated = db.updateTask(task.id, { agent_id: second.id })
+
+    expect(updated?.session_id).toBe('backend-session-1')
+    expect(updated?.agent_id).toBe(second.id)
+    // The marker is still written, so a failed native resume can fall back to the handoff.
+    expect(JSON.parse(db.getSetting(key(task.id))!)).toMatchObject({ fromAgentId: first.id, announced: false })
+  })
+
+  it('clears the session when the task is unassigned', () => {
+    const first = db.createAgent(makeAgent({ name: 'First', config: { coding_agent: 'claude-code' } }))!
+    const task = assigned(first.id)
+    db.updateTask(task.id, { session_id: 'backend-session-1' })
+
+    const updated = db.updateTask(task.id, { agent_id: null })
+
+    expect(updated?.session_id).toBeNull()
+  })
+
+  it('keeps the session when the agent does not change', () => {
+    const first = db.createAgent(makeAgent({ name: 'First' }))!
+    const task = assigned(first.id)
+    db.updateTask(task.id, { session_id: 'backend-session-1' })
+
+    const updated = db.updateTask(task.id, { title: 'Renamed', agent_id: first.id })
+
+    expect(updated?.session_id).toBe('backend-session-1')
+  })
+
+  it('does not record a change when the same agent is assigned again', () => {
+    const first = db.createAgent(makeAgent({ name: 'First' }))!
+    const task = assigned(first.id)
+    db.upsertTranscriptParts(task.id, [{ id: 'p1', role: 'user', content: 'hello' }])
+
+    db.updateTask(task.id, { agent_id: first.id })
+
+    expect(db.getSetting(key(task.id))).toBeUndefined()
+  })
+})

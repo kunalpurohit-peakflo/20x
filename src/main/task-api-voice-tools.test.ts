@@ -160,6 +160,28 @@ describe('get_messages', () => {
     )) as { messages: Array<{ role: string }> }
     expect(result.messages.every((m) => m.role === 'user')).toBe(true)
   })
+
+  it('reads one message by seq, as a context handoff reference points to it', async () => {
+    const result = (await handleTaskApiRoute('/get_messages', { task_id: 't1', seq: 2 }, makeDb())) as {
+      messages: Array<{ seq: number; content: string }>
+    }
+    expect(result.messages).toEqual([expect.objectContaining({ seq: 2, content: 'I am looking at it' })])
+  })
+
+  it('reads a tool result by seq only when include_tools is set', async () => {
+    const db = makeDb()
+    const without = (await handleTaskApiRoute('/get_messages', { task_id: 't1', seq: 3 }, db)) as {
+      messages: unknown[]
+    }
+    expect(without.messages).toEqual([])
+
+    const withTools = (await handleTaskApiRoute(
+      '/get_messages',
+      { task_id: 't1', seq: 3, include_tools: true },
+      db
+    )) as { messages: Array<{ seq: number; type: string }> }
+    expect(withTools.messages).toEqual([expect.objectContaining({ seq: 3, type: 'tool' })])
+  })
 })
 
 describe('get_session_status', () => {
@@ -338,5 +360,59 @@ describe('get_ui_state', () => {
       selectedTaskId: string
     }
     expect(result).toMatchObject({ available: true, view: 'canvas', selectedTaskId: 't1' })
+  })
+})
+
+describe('get_messages tool output from the adapters', () => {
+  // Real part shapes: Claude stores its output in `tool` with a placeholder content;
+  // ACP and Codex leave content empty.
+  const ADAPTER_PARTS = [
+    { ...part(1, 'user', 'list the files'), partType: 'text' },
+    { ...part(2, 'assistant', 'Tool completed', 'tool'), tool: { name: 'Bash', status: 'success', output: 'README.md\nsrc' } },
+    { ...part(3, 'assistant', '', 'tool'), tool: { name: 'execute', status: 'completed', output: 'a.txt' } },
+  ]
+
+  it('returns the real output of a tool part instead of its placeholder content', async () => {
+    const db = { ...makeDb() as object, getTranscriptParts: vi.fn(() => ADAPTER_PARTS) } as never
+    const result = (await handleTaskApiRoute('/get_messages', { task_id: 't1', include_tools: true }, db)) as {
+      messages: Array<{ seq: number; type: string; content: string }>
+    }
+    const byseq = Object.fromEntries(result.messages.map((m) => [m.seq, m]))
+    expect(byseq[2].content).toBe('README.md\nsrc')
+    expect(byseq[3].content).toBe('a.txt')
+  })
+
+  it('reads one message by seq', async () => {
+    const db = { ...makeDb() as object, getTranscriptParts: vi.fn(() => ADAPTER_PARTS) } as never
+    const result = (await handleTaskApiRoute('/get_messages', { task_id: 't1', seq: 2, include_tools: true }, db)) as {
+      messages: Array<{ seq: number }>
+    }
+    expect(result.messages.map((m) => m.seq)).toEqual([2])
+  })
+})
+
+describe('get_messages reads long tool output in pages', () => {
+  it('returns the output page by page, so a referenced message can be read in full', async () => {
+    const big = 'k'.repeat(45_000)
+    const parts = [{ ...part(1, 'assistant', '', 'tool'), tool: { name: 'bash', status: 'success', output: big } }]
+    const db = { ...makeDb() as object, getTranscriptParts: vi.fn(() => parts) } as never
+
+    const first = (await handleTaskApiRoute('/get_messages', { task_id: 't1', seq: 1, include_tools: true }, db)) as {
+      messages: Array<{ content: string; output_total_chars: number; output_next_offset?: number }>
+    }
+    expect(first.messages[0].output_total_chars).toBe(big.length)
+    expect(first.messages[0].output_next_offset).toBeGreaterThan(0)
+
+    let text = ''
+    let offset: number | undefined = 0
+    while (offset !== undefined) {
+      const page = (await handleTaskApiRoute('/get_messages', { task_id: 't1', seq: 1, include_tools: true, output_offset: offset }, db)) as {
+        messages: Array<{ content: string; output_next_offset?: number }>
+      }
+      const message = page.messages[0]
+      text += message.content.split('\n… [output continues')[0]
+      offset = message.output_next_offset
+    }
+    expect(text).toBe(big)
   })
 })

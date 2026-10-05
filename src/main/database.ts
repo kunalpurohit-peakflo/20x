@@ -8,6 +8,7 @@ import { TaskStatus } from '../shared/constants'
 import type { ReasoningEffort } from '../shared/reasoning-effort'
 import { startTaskApiServer } from './task-api-server'
 import { UsageStore } from './usage/usage-store'
+import { contextHandoffSettingKey, isSameHarness, parseContextHandoffMarker, type ContextHandoffMarker } from './context-handoff'
 
 export interface AgentRow {
   id: string
@@ -2285,6 +2286,25 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
     }))
   }
 
+  /**
+   * Records that a task left `fromAgentId` and its earlier conversation has not
+   * yet been handed to the agent that now owns it. A task with no transcript has
+   * nothing to hand over. When the task passes through unassigned, the agent it
+   * came from is kept.
+   */
+  markContextHandoff(taskId: string, fromAgentId: string | null): void {
+    if (!this.hasTranscriptParts(taskId)) return
+    // The first agent that held the conversation stays the source until the
+    // handoff is delivered, however many times the task changes agent before then.
+    const existing = parseContextHandoffMarker(this.getSetting(contextHandoffSettingKey(taskId)))
+    const marker: ContextHandoffMarker = {
+      fromAgentId: existing ? existing.fromAgentId : fromAgentId,
+      recordedAt: Date.now(),
+      announced: false
+    }
+    this.setSetting(contextHandoffSettingKey(taskId), JSON.stringify(marker))
+  }
+
   /** True when the task already has persisted transcript parts. */
   hasTranscriptParts(taskId: string): boolean {
     if (!this.ensureDbOpen()) return false
@@ -2390,6 +2410,16 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
       throw new Error('Only the sync service can change a task source link.')
     }
     const currentTask = this.getTask(id)
+    // Reassigning to an agent of another harness ends the backend session: the
+    // new agent starts from a handoff. Within the same harness the session id
+    // is kept, and the new agent continues it with its own configuration.
+    const agentChanged = !!currentTask && data.agent_id !== undefined && data.agent_id !== currentTask.agent_id
+    if (agentChanged && data.session_id === undefined) {
+      const fromAgent = currentTask!.agent_id ? this.getAgent(currentTask!.agent_id) : undefined
+      const toAgent = data.agent_id ? this.getAgent(data.agent_id) : undefined
+      const keepSession = !!fromAgent && !!toAgent && isSameHarness(fromAgent.config?.coding_agent, toAgent.config?.coding_agent)
+      if (!keepSession) data = { ...data, session_id: null }
+    }
     const approvedStatusWrite = origin === 'session-feedback' || origin === 'task-source'
     if (!approvedStatusWrite && currentTask?.status === TaskStatus.AgentLearning && this.getSetting(`session-feedback-completion:${id}`) && !(data.status === TaskStatus.Completed && data.complete_at_source === false)) {
       data = { ...data, status: TaskStatus.AgentLearning }
@@ -2452,6 +2482,9 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
     this.db.prepare(
       `UPDATE tasks SET ${setClauses.join(', ')} WHERE id = ?`
     ).run(...values)
+
+    // Recorded only once the change is written, so a failed update leaves no marker.
+    if (agentChanged && currentTask) this.markContextHandoff(id, currentTask.agent_id)
 
     return this.getTask(id)
   }

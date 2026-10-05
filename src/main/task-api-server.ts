@@ -29,6 +29,7 @@ import {
 } from '../shared/ui-commands'
 import { buildSimilarTasksQuery } from './task-search'
 import { limitsByProvider, summarizeAgentUsage } from './usage/agent-usage-summary'
+import { isSameHarness, toolOutputPage } from './context-handoff'
 import {
   createRegisteredTaskArtifact,
   editRegisteredTaskArtifactFile,
@@ -461,6 +462,18 @@ export async function handleRoute(db: DatabaseManager, route: string, params: Re
       if (params.labels !== undefined) { updates.push('labels = ?'); qParams.push(JSON.stringify(params.labels)) }
       if (params.skill_ids !== undefined) { updates.push('skill_ids = ?'); qParams.push(JSON.stringify(params.skill_ids)) }
       if (params.agent_id !== undefined) { updates.push('agent_id = ?'); qParams.push(params.agent_id) }
+      // The raw update below bypasses DatabaseManager.updateTask, so the agent
+      // change is recorded here for the context handoff.
+      const previousAgentId = params.agent_id !== undefined
+        ? (rawDb.prepare('SELECT agent_id FROM tasks WHERE id = ?').get(params.task_id) as { agent_id: string | null } | undefined)?.agent_id ?? null
+        : undefined
+      // A new agent of another harness does not resume the old session. DatabaseManager.updateTask does the same.
+      if (previousAgentId !== undefined && params.agent_id !== previousAgentId && params.session_id === undefined) {
+        const fromAgent = previousAgentId ? db.getAgent(previousAgentId) : undefined
+        const toAgent = params.agent_id ? db.getAgent(String(params.agent_id)) : undefined
+        const keepSession = !!fromAgent && !!toAgent && isSameHarness(fromAgent.config?.coding_agent, toAgent.config?.coding_agent)
+        if (!keepSession) { updates.push('session_id = ?'); qParams.push(null) }
+      }
       // Lets a caller with no window hand the task straight to its agent.
       if (params.auto_start_agent !== undefined) {
         updates.push('auto_start_agent = ?')
@@ -488,6 +501,9 @@ export async function handleRoute(db: DatabaseManager, route: string, params: Re
 
       const result = rawDb.prepare(`UPDATE tasks SET ${updates.join(', ')} WHERE id = ?`).run(...qParams)
       if (result.changes === 0) return { error: 'Task not found' }
+      if (previousAgentId !== undefined && params.agent_id !== previousAgentId) {
+        db.markContextHandoff(params.task_id as string, previousAgentId)
+      }
 
       const updated = rawDb.prepare('SELECT * FROM tasks WHERE id = ?').get(params.task_id) as Record<string, unknown>
       const parsedUpdated = parseTask(updated)
@@ -765,12 +781,19 @@ export async function handleRoute(db: DatabaseManager, route: string, params: Re
       const taskId = String(params.task_id)
       const limit = Math.min(Number(params.limit) || 20, 200)
       const includeTools = params.include_tools === true
+      const outputOffset = params.output_offset !== undefined ? Number(params.output_offset) : 0
       const role = params.role ? String(params.role) : null
 
       let parts = db.getTranscriptParts(taskId)
-      // Tool output is enormous and is rarely what a question is about, so it
-      // is left out unless it is asked for. This keeps a reply readable.
-      if (!includeTools) {
+      // One message by its sequence number, as cited by a context handoff. Tool
+      // output is returned here only when the caller asks for it, as below.
+      if (params.seq !== undefined) {
+        const seq = Number(params.seq)
+        parts = parts.filter((part) => part.seq === seq)
+        if (!includeTools) parts = parts.filter((part) => part.partType !== 'tool')
+      } else if (!includeTools) {
+        // Tool output is enormous and is rarely what a question is about, so it
+        // is left out unless it is asked for. This keeps a reply readable.
         parts = parts.filter((part) => part.role === 'user' || part.role === 'assistant')
         parts = parts.filter((part) => !part.partType || part.partType === 'text')
       }
@@ -784,13 +807,20 @@ export async function handleRoute(db: DatabaseManager, route: string, params: Re
 
       return {
         task_id: taskId,
-        messages: page.map((part) => ({
-          seq: part.seq,
-          role: part.role,
-          type: part.partType ?? 'text',
-          content: part.content,
-          created_at: new Date(part.createdAt).toISOString()
-        })),
+        messages: page.map((part) => {
+          // Tool parts carry their real output in `tool`; `content` is often a placeholder.
+          // Output is returned in pages, so a long result can be read in full.
+          const output = part.partType === 'tool' ? toolOutputPage(part, outputOffset) : null
+          return {
+            seq: part.seq,
+            role: part.role,
+            type: part.partType ?? 'text',
+            content: output ? output.text : part.content,
+            ...(output ? { output_total_chars: output.total } : {}),
+            ...(output && output.next !== null ? { output_next_offset: output.next } : {}),
+            created_at: new Date(part.createdAt).toISOString()
+          }
+        }),
         next_before_seq: page.length === limit ? page[page.length - 1].seq : null,
         total_available: ordered.length
       }

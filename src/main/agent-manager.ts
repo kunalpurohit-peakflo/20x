@@ -48,6 +48,19 @@ import {
   type UsageSummaryQuery
 } from '../shared/usage'
 import { inspectTaskArtifact } from './artifacts'
+import {
+  buildContextHandoff,
+  CONTEXT_HANDOFF_BUDGET_SETTING,
+  CONTEXT_HANDOFF_DEFAULT_TOKEN_BUDGET,
+  CONTEXT_HANDOFF_SEPARATOR,
+  contextHandoffSettingKey,
+  harnessLabel,
+  parseContextHandoffMarker,
+  planContinuation,
+  type ContextHandoffResult,
+  type ContinuationAgent,
+  type ContinuationPlan
+} from './context-handoff'
 import { ArtifactType, pullRequestUrlFromTool, type Artifact } from '../shared/artifacts'
 import { buildSystemMessage, computeDeliveryId, SystemMessageOrigin } from '../shared/system-authority'
 
@@ -58,6 +71,16 @@ enum CodingAgentType {
   CODEX = 'codex',
   CURSOR = 'cursor',
   PI = 'pi'
+}
+
+/** Handoff block ready to send with the next prompt of a session. */
+interface PreparedContextHandoff {
+  block: string
+  carried: number
+  omitted: number
+  previousAgentName: string
+  /** False when the transcript note was already shown for this handoff. */
+  announce: boolean
 }
 
 const ARTIFACT_WORKSPACE_INSTRUCTIONS = `
@@ -2032,6 +2055,11 @@ If a PR, deploy, or linked issue should be checked after this task, write \`hear
       const memoryFileName = this.getMemoryFileName(agentId)
       promptText += `\n\nIMPORTANT: First, read the \`${memoryFileName}\` file in the working directory — it has workspace config, skills, and project context.`
 
+      // A reassigned task's earlier conversation is prepared here, before the
+      // prompt is shown, so the transcript note sits ahead of the prompt.
+      const handoff = this.prepareContextHandoff(taskId, agentId)
+      if (handoff?.announce) this.announceContextHandoff(adapterSessionId, taskId, handoff)
+
       // Show the full prompt in the UI so the user can see the complete
       // context sent to the agent (repos, skills, secrets, heartbeat, etc.)
       this.sendToRenderer('agent:output', {
@@ -2050,12 +2078,14 @@ If a PR, deploy, or linked issue should be checked after this task, write \`hear
       // the race where the first tick() runs before we get here and forwards
       // the duplicate user message echoed by the adapter.
 
-      // Send prompt via adapter
+      // Send prompt via adapter. A reassigned task's earlier conversation goes
+      // in front of the prompt; the UI keeps showing only the prompt itself.
       const parts: MessagePart[] = [
-        { type: MessagePartType.TEXT, text: promptText }
+        { type: MessagePartType.TEXT, text: handoff ? handoff.block + CONTEXT_HANDOFF_SEPARATOR + promptText : promptText }
       ]
       try {
         await adapter.sendPrompt(adapterSessionId, parts, sessionConfig)
+        if (handoff) this.completeContextHandoff(taskId)
       } catch (sendError) {
         console.error(`[AgentManager] sendPrompt FAILED:`, sendError)
         // Write to crash log for visibility
@@ -3059,6 +3089,15 @@ If a PR, deploy, or linked issue should be checked after this task, write \`hear
 
     const agent = this.db.getAgent(agentId)!
 
+    // A session of another harness cannot be resumed here. Drop the reference
+    // and return the sentinel; the caller starts a new session, which receives the handoff.
+    const resumePlan = this.planResume(taskId, agentId, adapterSessionId)
+    if (resumePlan === 'handoff') {
+      console.log(`[AgentManager] Session ${adapterSessionId} belongs to another harness; not resuming. Task ${taskId} continues by handoff.`)
+      this.updateTaskFromLocalAgent(taskId, { session_id: null })
+      return ''
+    }
+
     // Use the same workspace resolution as startSession: try git worktree first,
     // then fall back to the default workspace dir. This is critical because Claude
     // Code stores session files under ~/.claude/projects/<encoded-workspaceDir>/,
@@ -3158,6 +3197,15 @@ If a PR, deploy, or linked issue should be checked after this task, write \`hear
         errorMessage.includes('SESSION_FILE_NOT_FOUND') ||
         errorMessage.includes('Session no longer exists on server')
       ) {
+        // The task has a pending handoff, so the conversation is not lost: drop the
+        // dead session and leave the marker in place. The next session of this agent
+        // receives the handoff block. No dialog is needed.
+        if (parseContextHandoffMarker(this.db.getSetting(contextHandoffSettingKey(taskId)))) {
+          console.warn(`[AgentManager] Session ${adapterSessionId} is gone; task ${taskId} continues by handoff`)
+          this.updateTaskFromLocalAgent(taskId, { session_id: null })
+          return ''
+        }
+
         console.warn(`[AgentManager] Session not found or incompatible: ${adapterSessionId}`)
 
         // For completed/review tasks, the session may have ended normally.
@@ -3203,6 +3251,11 @@ If a PR, deploy, or linked issue should be checked after this task, write \`hear
 
       // Re-throw other errors
       throw error
+    }
+
+    // The resumed backend session already holds the conversation, so there is nothing to hand over.
+    if (resumePlan === 'native-resume' && this.db.getSetting(contextHandoffSettingKey(taskId))) {
+      this.db.deleteSetting(contextHandoffSettingKey(taskId))
     }
 
     // Same attach-truthfulness rewrite as startAdapterSession: OpenCode may fail
@@ -4560,6 +4613,10 @@ If a PR, deploy, or linked issue should be checked after this task, write \`hear
 
     const userFacingMessage = this.buildDisplayMessage(message, attachments)
 
+    // First message of a session that took over a reassigned task: announce the carried-over context.
+    const handoff = this.prepareContextHandoff(session.taskId, session.agentId)
+    if (handoff?.announce) this.announceContextHandoff(sessionId, session.taskId, handoff)
+
     // Show user's message in UI
     this.sendToRenderer('agent:output', {
       sessionId,
@@ -4604,8 +4661,10 @@ If a PR, deploy, or linked issue should be checked after this task, write \`hear
     if (currentTask) {
       promptText += this.buildTaskContextReminder(currentTask, liveTaskContextMode)
     }
+    if (handoff) promptText = handoff.block + CONTEXT_HANDOFF_SEPARATOR + promptText
     const parts: MessagePart[] = [{ type: MessagePartType.TEXT, text: promptText }]
     await session.adapter.sendPrompt(sessionId, parts, sessionConfig)
+    if (handoff) this.completeContextHandoff(session.taskId)
     analytics()?.record('provider.turn.sent', {
       provider: getAgentProvider(this.db.getAgent(session.agentId)),
       model: sessionConfig.model,
@@ -5867,6 +5926,122 @@ Important:
     for (const fn of this.externalListeners) {
       try { fn('artifact:updated', artifactPayload) } catch { /* ignore */ }
     }
+  }
+
+  /**
+   * Plans a resume of the task's backend session on `agentId`. With no handoff
+   * marker the session belongs to the current agent, so it is resumed natively.
+   */
+  private planResume(taskId: string, agentId: string, sessionId: string): ContinuationPlan {
+    const marker = parseContextHandoffMarker(this.db.getSetting(contextHandoffSettingKey(taskId)))
+    if (!marker) return 'native-resume'
+    const from = marker.fromAgentId ? this.db.getAgent(marker.fromAgentId) : undefined
+    const to = this.db.getAgent(agentId)
+    return planContinuation(
+      { session_id: sessionId },
+      from ? this.continuationAgent(from.id, from.config?.coding_agent) : null,
+      this.continuationAgent(agentId, to?.config?.coding_agent),
+      { hasHistory: true, sessionReachable: true }
+    )
+  }
+
+  private continuationAgent(id: string, codingAgent: string | undefined): ContinuationAgent {
+    return { id, codingAgent }
+  }
+
+  /**
+   * Builds the handoff block when a task was moved to the agent that is starting
+   * a session and its earlier conversation has not been handed over yet. Returns
+   * null otherwise. Only the task's current agent receives the block, so a
+   * session still running for the previous agent is left alone.
+   */
+  private prepareContextHandoff(taskId: string, agentId: string): PreparedContextHandoff | null {
+    const key = contextHandoffSettingKey(taskId)
+    const marker = parseContextHandoffMarker(this.db.getSetting(key))
+    if (!marker) return null
+    const task = this.db.getTask(taskId)
+    if (!task || task.agent_id !== agentId) return null
+    if (marker.fromAgentId === agentId) {
+      this.db.deleteSetting(key)
+      return null
+    }
+
+    // This runs for a session that was NOT resumed natively: a new session, or a live one
+    // started without a resume. A native resume consumes the marker before it gets here.
+    // So a pending marker always means the backend session does not hold the conversation,
+    // whatever session_id the task has now. The session id saved by a fresh start must not
+    // make a same-harness handoff look native, so the reachability is always false here.
+    const previous = marker.fromAgentId ? this.db.getAgent(marker.fromAgentId) : undefined
+    const current = this.db.getAgent(agentId)
+    const transcript = this.db.getTranscriptParts(taskId)
+    const plan = planContinuation(
+      { session_id: null },
+      previous ? this.continuationAgent(previous.id, previous.config?.coding_agent) : null,
+      this.continuationAgent(agentId, current?.config?.coding_agent),
+      { hasHistory: transcript.length > 0, sessionReachable: false }
+    )
+    if (plan !== 'handoff') {
+      this.db.deleteSetting(key)
+      return null
+    }
+
+    const budgetSetting = Number(this.db.getSetting(CONTEXT_HANDOFF_BUDGET_SETTING))
+    const tokenBudget = Number.isFinite(budgetSetting) && budgetSetting > 0
+      ? budgetSetting
+      : CONTEXT_HANDOFF_DEFAULT_TOKEN_BUDGET
+
+    const built: ContextHandoffResult | null = buildContextHandoff(transcript, {
+      previousAgentLabel: previous
+        ? `${previous.name} (${harnessLabel(previous.config?.coding_agent)})`
+        : 'a previous agent',
+      tokenBudget,
+      // The task's own request, not the previous agent's startup prompt.
+      request: { title: task.title, description: task.description }
+    })
+    if (!built) {
+      this.db.deleteSetting(key)
+      return null
+    }
+    console.log(`[AgentManager] Context handoff for task ${taskId} to ${current?.name ?? agentId}: ${built.carried} carried, ${built.omitted} omitted, ~${built.usedTokens} tokens`)
+    return {
+      block: built.text,
+      carried: built.carried,
+      omitted: built.omitted,
+      previousAgentName: previous?.name ?? 'previous agent',
+      announce: !marker.announced
+    }
+  }
+
+  /** Shows the transcript note saying which context was carried over, once per handoff. */
+  private announceContextHandoff(sessionId: string, taskId: string, handoff: PreparedContextHandoff): void {
+    this.sendToRenderer('agent:output', {
+      sessionId,
+      taskId,
+      type: 'message',
+      data: {
+        id: `context-handoff-${taskId}-${Date.now()}`,
+        role: 'system',
+        partType: 'context-handoff',
+        content: `Context from ${handoff.previousAgentName} carried over (${handoff.carried} messages, ${handoff.omitted} omitted)`
+      }
+    })
+    const key = contextHandoffSettingKey(taskId)
+    const marker = parseContextHandoffMarker(this.db.getSetting(key))
+    if (marker) this.db.setSetting(key, JSON.stringify({ ...marker, announced: true }))
+  }
+
+  /** Called once the handoff has reached the adapter. Until then the marker stays, so a failed send is retried. */
+  private completeContextHandoff(taskId: string): void {
+    this.db.deleteSetting(contextHandoffSettingKey(taskId))
+  }
+
+  /**
+   * Called after the user reassigns a task in the agent dropdown. Stops the
+   * live session of the previous agent. The task's session_id was already
+   * cleared by the database write, so the next session starts from a handoff.
+   */
+  async handleTaskAgentChanged(taskId: string): Promise<void> {
+    await this.stopByTaskId(taskId)
   }
 
   private sendToRenderer(channel: string, data: unknown): void {
