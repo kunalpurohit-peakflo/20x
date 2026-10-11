@@ -114,3 +114,31 @@ describe('AgentForm — permission_mode default', () => {
     expect(onSubmit.mock.calls[0][0].config.permission_mode).toBe('ask')
   })
 })
+
+describe('AgentForm server URL', () => {
+  it('asks for the coding agent right after the name, with no server URL until OpenCode is chosen', () => {
+    render(<AgentForm onSubmit={vi.fn()} onCancel={vi.fn()} />)
+    const name = screen.getByLabelText('Name')
+    const harness = screen.getByLabelText('Coding Agent')
+    expect(name.compareDocumentPosition(harness) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.queryByLabelText('Server URL')).toBeNull()
+  })
+
+  it('shows the server URL below the coding agent only for OpenCode', () => {
+    render(<AgentForm onSubmit={vi.fn()} onCancel={vi.fn()} />)
+    selectCodingAgent('opencode')
+    const url = screen.getByLabelText('Server URL')
+    expect(screen.getByLabelText('Coding Agent').compareDocumentPosition(url) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+    for (const harness of ['claude-code', 'codex', 'cursor', 'pi', 'acp']) {
+      selectCodingAgent(harness)
+      expect(screen.queryByLabelText('Server URL')).toBeNull()
+    }
+  })
+
+  it('no longer shows the "runs locally via CLI" notes', () => {
+    render(<AgentForm onSubmit={vi.fn()} onCancel={vi.fn()} />)
+    selectCodingAgent('claude-code')
+    expect(screen.queryByText(/doesn't require a server URL/)).toBeNull()
+  })
+})

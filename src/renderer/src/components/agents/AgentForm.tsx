@@ -414,12 +414,8 @@ export function AgentForm({ agent, onSubmit, onCancel }: AgentFormProps) {
         )}
       </div>
 
-      {/* Every other harness runs locally (CLI spawn or in-process SDK/ACP
-          client) — only OpenCode talks to a real HTTP server the user
-          configures. serverUrl still defaults to OpenCode's placeholder
-          even when hidden, so this field is the only thing gating whether
-          that default is ever actually used. */}
-      {(codingAgent === CodingAgentType.OPENCODE || codingAgent === '') && (
+      {/* Only OpenCode talks to a server; every other harness runs locally. */}
+      {codingAgent === CodingAgentType.OPENCODE && (
         <div className="space-y-1.5">
           <Label htmlFor="agent-url">Server URL</Label>
           <Input
