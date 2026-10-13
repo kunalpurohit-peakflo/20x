@@ -5,12 +5,22 @@ import { identifyAnalyticsUser, resetAnalyticsUser, setAnalyticsEnterpriseEmail 
 import { useEnterpriseStore } from '@/stores/enterprise-store'
 import { useUserStore } from '@/stores/user-store'
 
+interface CursorRetryRequest {
+  taskId: string
+  taskTitle: string
+  operation: 'start' | 'resume'
+  retry: () => Promise<string>
+}
+
 export default function App() {
-  const [cursorRetry, setCursorRetry] = useState<(() => Promise<string>) | null>(null)
+  const [cursorRetries, setCursorRetries] = useState<CursorRetryRequest[]>([])
+  const activeCursorRetry = cursorRetries[0]
   useEffect(() => {
     const onMissing = (event: Event) => {
-      const retry = (event as CustomEvent<{ retry: () => Promise<string> }>).detail.retry
-      setCursorRetry(() => retry)
+      const request = (event as CustomEvent<CursorRetryRequest>).detail
+      setCursorRetries((pending) => pending.some((item) => item.taskId === request.taskId && item.operation === request.operation)
+        ? pending
+        : [...pending, request])
     }
     window.addEventListener('cursor-cli-missing', onMissing)
     return () => window.removeEventListener('cursor-cli-missing', onMissing)
@@ -41,9 +51,16 @@ export default function App() {
     <>
       <AppLayout />
       <CursorCliSetupDialog
-        open={!!cursorRetry}
-        onOpenChange={(open) => { if (!open) setCursorRetry(null) }}
-        onRetry={async () => { await cursorRetry?.(); setCursorRetry(null) }}
+        key={activeCursorRetry ? `${activeCursorRetry.taskId}:${activeCursorRetry.operation}` : 'cursor-cli'}
+        open={!!activeCursorRetry}
+        taskTitle={activeCursorRetry?.taskTitle || ''}
+        onOpenChange={(open) => {
+          if (!open) setCursorRetries((pending) => pending.filter((item) => item !== activeCursorRetry))
+        }}
+        onRetry={async () => {
+          await activeCursorRetry?.retry()
+          setCursorRetries((pending) => pending.filter((item) => item !== activeCursorRetry))
+        }}
       />
     </>
   )

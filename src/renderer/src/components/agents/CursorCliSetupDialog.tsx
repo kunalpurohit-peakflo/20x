@@ -6,11 +6,12 @@ const CURSOR_INSTALL_URL = 'https://cursor.com/docs/cli/installation'
 
 interface CursorCliSetupDialogProps {
   open: boolean
+  taskTitle: string
   onOpenChange: (open: boolean) => void
   onRetry: () => Promise<void>
 }
 
-export function CursorCliSetupDialog({ open, onOpenChange, onRetry }: CursorCliSetupDialogProps) {
+export function CursorCliSetupDialog({ open, taskTitle, onOpenChange, onRetry }: CursorCliSetupDialogProps) {
   const [checking, setChecking] = useState(false)
   const [error, setError] = useState('')
   const installCommand = navigator.userAgent.includes('Windows')
@@ -40,7 +41,7 @@ export function CursorCliSetupDialog({ open, onOpenChange, onRetry }: CursorCliS
         <DialogHeader><DialogTitle>Install Cursor CLI</DialogTitle></DialogHeader>
         <DialogBody className="space-y-4">
           <DialogDescription>
-            Cursor CLI (<code>cursor-agent</code>) is not installed or is not in 20x’s PATH. Install it, then retry this task.
+            Cursor CLI (<code>cursor-agent</code>) is not installed or is not in 20x’s PATH. Install it, then retry <strong>{taskTitle}</strong>.
           </DialogDescription>
           <code className="block rounded bg-muted p-3 text-xs break-all">{installCommand}</code>
           <a href={CURSOR_INSTALL_URL} target="_blank" rel="noopener noreferrer" className="text-sm text-primary underline">
