@@ -195,7 +195,7 @@ export function TaskListPage({ onNavigate }: { onNavigate: (route: Route) => voi
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search tasks..."
-          className="glass-control pointer-events-auto w-full px-5 h-[48px] text-sm text-foreground placeholder:text-[var(--glass-placeholder)] focus:outline-none focus:border-ring focus:ring-1 focus:ring-ring/30 mb-2"
+          className="glass-control pointer-events-auto w-full px-5 h-[44px] text-sm text-foreground placeholder:text-[var(--glass-placeholder)] focus:outline-none focus:border-ring focus:ring-1 focus:ring-ring/30 mb-2"
         />
 
         {/* Filter pills */}
@@ -204,10 +204,10 @@ export function TaskListPage({ onNavigate }: { onNavigate: (route: Route) => voi
             <button
               key={opt.value}
               onClick={() => setFilter(opt.value)}
-              className={`shrink-0 px-3 py-1 rounded-full text-xs font-medium transition-colors min-h-[28px] ${
+              className={`glass-filter-block shrink-0 px-3 py-1 rounded-full text-xs font-medium transition-colors min-h-[28px] ${
                 filter === opt.value
                   ? 'glass-filter-active'
-                  : 'bg-muted text-muted-foreground active:bg-accent'
+                  : 'text-muted-foreground active:bg-accent'
               }`}
             >
               {opt.label}
@@ -243,9 +243,7 @@ export function TaskListPage({ onNavigate }: { onNavigate: (route: Route) => voi
             )}
           </>
         )}
-
       </div>
-      <div aria-hidden="true" className="scroll-edge-overlay h-[188px]" />
     </div>
   )
 }

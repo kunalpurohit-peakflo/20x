@@ -73,6 +73,7 @@ export function AppLayout() {
   const activeModal = useUIStore((s) => s.activeModal)
   const desktopBackdrop = useThemeStore((s) => s.desktopBackdrop)
   const glassOpacity = useThemeStore((s) => s.glassOpacity)
+  const themeMode = useThemeStore((s) => s.mode)
   const editingTaskId = useUIStore((s) => s.editingTaskId)
   const deletingTaskId = useUIStore((s) => s.deletingTaskId)
   const openCreateModal = useUIStore((s) => s.openCreateModal)
@@ -720,11 +721,17 @@ export function AppLayout() {
     if (!isMac || !setBackdrop) return
     const reducedTransparency = window.matchMedia('(prefers-reduced-transparency: reduce)')
     let cancelled = false
+    const onFullScreenChanged = (fullScreen: boolean): void => {
+      document.documentElement.classList.toggle('native-fullscreen-backdrop', fullScreen)
+    }
+    const stopFullScreenListener = window.electronAPI?.app?.onFullScreenChanged?.(onFullScreenChanged)
     const update = (): void => {
       const enabled = backdropEnabled && !reducedTransparency.matches
       document.documentElement.classList.remove('native-desktop-backdrop')
-      void setBackdrop(enabled).then((active) => {
-        if (!cancelled && enabled && active) document.documentElement.classList.add('native-desktop-backdrop')
+      void setBackdrop(enabled, themeMode).then(({ active, fullScreen }) => {
+        if (cancelled) return
+        onFullScreenChanged(fullScreen)
+        if (enabled && active) document.documentElement.classList.add('native-desktop-backdrop')
       }).catch(() => { /* Keep solid page backgrounds if native vibrancy is unavailable. */ })
     }
     update()
@@ -732,10 +739,12 @@ export function AppLayout() {
     return () => {
       cancelled = true
       reducedTransparency.removeEventListener('change', update)
+      stopFullScreenListener?.()
       document.documentElement.classList.remove('native-desktop-backdrop')
-      void setBackdrop(false)
+      document.documentElement.classList.remove('native-fullscreen-backdrop')
+      void setBackdrop(false, themeMode)
     }
-  }, [backdropEnabled])
+  }, [backdropEnabled, themeMode])
   return (
     <>
       {completionDialog}

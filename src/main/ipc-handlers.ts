@@ -1,5 +1,5 @@
 import { updateTaskFromUser } from './session-feedback'
-import { ipcMain, dialog, shell, Notification, app, session, BrowserWindow, clipboard as electronClipboard, ClipboardItem } from 'electron'
+import { ipcMain, dialog, shell, Notification, app, session, BrowserWindow, nativeTheme, clipboard as electronClipboard, ClipboardItem } from 'electron'
 import * as childProcess from 'child_process'
 import { copyFileSync, existsSync, unlinkSync, readdirSync, statSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { join, basename, extname } from 'path'
@@ -92,6 +92,8 @@ const MIME_MAP: Record<string, string> = {
 function getMimeType(filename: string): string {
   return MIME_MAP[extname(filename).toLowerCase()] || 'application/octet-stream'
 }
+
+const desktopBackdropStates = new WeakMap<BrowserWindow, { enabled: boolean }>()
 
 export function registerIpcHandlers(
   db: DatabaseManager,
@@ -1174,12 +1176,31 @@ export function registerIpcHandlers(
     return app.getVersion()
   })
 
-  ipcMain.handle('app:setDesktopBackdrop', (event, enabled: boolean) => {
-    if (process.platform !== 'darwin') return false
+  ipcMain.handle('app:setDesktopBackdrop', (event, enabled: boolean, themeMode: 'light' | 'dark' | 'system') => {
+    if (process.platform !== 'darwin') return { active: false, fullScreen: false }
     const window = BrowserWindow.fromWebContents(event.sender)
-    if (!window) return false
-    window.setVibrancy(enabled === true ? 'under-window' : null)
-    return enabled === true
+    if (!window) return { active: false, fullScreen: false }
+    if (themeMode === 'light' || themeMode === 'dark' || themeMode === 'system') {
+      nativeTheme.themeSource = themeMode
+    }
+    let state = desktopBackdropStates.get(window)
+    if (!state) {
+      state = { enabled: false }
+      desktopBackdropStates.set(window, state)
+      const backdropState = state
+      window.on('enter-full-screen', () => {
+        window.setVibrancy(backdropState.enabled ? 'fullscreen-ui' : null)
+        window.webContents.send('app:fullscreen-changed', true)
+      })
+      window.on('leave-full-screen', () => {
+        window.setVibrancy(backdropState.enabled ? 'under-window' : null)
+        window.webContents.send('app:fullscreen-changed', false)
+      })
+    }
+    state.enabled = enabled === true
+    const fullScreen = window.isFullScreen()
+    window.setVibrancy(state.enabled ? (fullScreen ? 'fullscreen-ui' : 'under-window') : null)
+    return { active: state.enabled, fullScreen }
   })
 
   // Crash log path
