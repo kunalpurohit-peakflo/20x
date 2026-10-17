@@ -151,16 +151,16 @@ export function TaskListPage({ onNavigate }: { onNavigate: (route: Route) => voi
   }
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="relative flex flex-col h-full">
       {/* Header */}
-      <div className="shrink-0 px-4 pt-3 pb-2 border-b border-border/30">
-        <div className="flex items-center justify-between mb-2">
+      <div className="glass-bar pointer-events-none relative z-10 shrink-0 -mb-[160px] px-4 pt-3 pb-2">
+        <div className="pointer-events-auto flex items-center justify-between mb-2">
           <h1 className="text-lg font-semibold">Tasks</h1>
           <div className="flex items-center gap-1">
             <button
               onClick={() => syncAndFetch()}
               disabled={isLoading || isSyncing}
-              className="p-2 active:opacity-60 hover:bg-accent rounded-md transition-colors disabled:opacity-40"
+              className="glass-action !h-[44px] !w-[44px] disabled:opacity-40"
               aria-label="Sync and refresh tasks"
               title="Sync all sources"
             >
@@ -170,7 +170,7 @@ export function TaskListPage({ onNavigate }: { onNavigate: (route: Route) => voi
             </button>
             <button
               onClick={() => onNavigate({ page: 'settings' })}
-              className="p-2 active:opacity-60 hover:bg-accent rounded-md transition-colors"
+              className="glass-action !h-[44px] !w-[44px]"
               aria-label="Settings"
               title="Settings"
             >
@@ -178,6 +178,13 @@ export function TaskListPage({ onNavigate }: { onNavigate: (route: Route) => voi
                 <circle cx="12" cy="12" r="3" />
                 <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
               </svg>
+            </button>
+            <button
+              onClick={() => onNavigate({ page: 'create' })}
+              className="glass-action !h-[44px] !w-[44px]"
+              aria-label="Create task"
+            >
+              <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
             </button>
           </div>
         </div>
@@ -188,18 +195,18 @@ export function TaskListPage({ onNavigate }: { onNavigate: (route: Route) => voi
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search tasks..."
-          className="w-full bg-transparent border border-input rounded-md px-3 py-1 h-9 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-ring focus:ring-1 focus:ring-ring/30 mb-2"
+          className="glass-control pointer-events-auto w-full px-5 h-[48px] text-sm text-foreground placeholder:text-[var(--glass-placeholder)] focus:outline-none focus:border-ring focus:ring-1 focus:ring-ring/30 mb-2"
         />
 
         {/* Filter pills */}
-        <div className="flex gap-1.5 overflow-x-auto pb-1 -mx-1 px-1">
+        <div className="pointer-events-auto flex gap-1.5 overflow-x-auto pb-1 -mx-1 px-1">
           {FILTER_OPTIONS.map((opt) => (
             <button
               key={opt.value}
               onClick={() => setFilter(opt.value)}
               className={`shrink-0 px-3 py-1 rounded-full text-xs font-medium transition-colors min-h-[28px] ${
                 filter === opt.value
-                  ? 'bg-primary text-primary-foreground'
+                  ? 'glass-filter-active'
                   : 'bg-muted text-muted-foreground active:bg-accent'
               }`}
             >
@@ -210,7 +217,7 @@ export function TaskListPage({ onNavigate }: { onNavigate: (route: Route) => voi
       </div>
 
       {/* Task list (relative for FAB positioning) */}
-      <div className="flex-1 overflow-y-auto relative">
+      <div className="flex-1 overflow-y-auto relative pt-[168px]">
         {active.length === 0 && completed.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-muted-foreground">
             <svg className="w-12 h-12 mb-3 opacity-20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -237,17 +244,8 @@ export function TaskListPage({ onNavigate }: { onNavigate: (route: Route) => voi
           </>
         )}
 
-        {/* FAB — Create Task */}
-        <button
-          onClick={() => onNavigate({ page: 'create' })}
-          className="sticky bottom-4 left-full -translate-x-4 ml-auto w-12 h-12 rounded-full bg-primary text-primary-foreground shadow-lg flex items-center justify-center active:scale-95 transition-transform"
-          aria-label="Create task"
-        >
-          <svg className="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M5 12h14"/><path d="M12 5v14"/>
-          </svg>
-        </button>
       </div>
+      <div aria-hidden="true" className="scroll-edge-overlay h-[188px]" />
     </div>
   )
 }

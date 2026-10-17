@@ -125,6 +125,7 @@ function TaskWorkspaceComponent({
 
   const [changesSummary, setChangesSummary] = useState<{ files: number; additions: number; deletions: number } | null>(null)
   const [kickoffMessage, setKickoffMessage] = useState('')
+  const [transcriptSearchRequest, setTranscriptSearchRequest] = useState(0)
   const [showGhSetup, setShowGhSetup] = useState(false)
   const [showOrgPicker, setShowOrgPicker] = useState(false)
   const [showRepoSelector, setShowRepoSelector] = useState(false)
@@ -1103,10 +1104,13 @@ Update existing skills that were helpful or create new ones for patterns worth r
   )
 
   const transcriptView = (
-    <div className="flex h-full min-h-0 flex-col bg-background">
+    <div className="native-backdrop-page flex h-full min-h-0 flex-col bg-background">
       <AgentApprovalBanner request={session.pendingApproval} onApprove={handleApprove} onReject={handleReject} />
-      <UsageLimitRecoveryBanner taskId={task.id} />
+      <UsageLimitRecoveryBanner taskId={task.id} floatingHeader={hasSession && panelLayout !== 'task-only'} />
       <AgentTranscriptPanel
+        embeddedHeader
+        externalHeaderHeight={hasSession && panelLayout !== 'task-only' ? 48 : 0}
+        searchRequest={transcriptSearchRequest}
         messages={session.messages}
         status={session.status}
         systemStatus={session.systemStatus}
@@ -1120,7 +1124,7 @@ Update existing skills that were helpful or create new ones for patterns worth r
         agentId={task.agent_id ?? undefined}
         pendingApproval={session.pendingApproval ?? undefined}
         pendingSend={session.pendingSend}
-        className="h-full min-h-0 border-0 bg-background"
+        className="native-backdrop-page h-full min-h-0 border-0 bg-background"
       />
     </div>
   )
@@ -1132,8 +1136,9 @@ Update existing skills that were helpful or create new ones for patterns worth r
 
   return (
     <>
-      <div className="relative flex h-full min-h-0 flex-col bg-background">
+      <div className="native-backdrop-page relative flex h-full min-h-0 flex-col bg-background">
         <TaskHeaderBar
+          floating={hasSession && panelLayout !== 'task-only'}
           task={task}
           agent={assignedAgent}
           agents={agents}
@@ -1141,6 +1146,9 @@ Update existing skills that were helpful or create new ones for patterns worth r
           action={primaryAction}
           onAction={handlePrimaryAction}
           onComplete={() => void handleCompleteTask()}
+          onSearchTranscript={hasSession && panelLayout !== 'task-only' ? () => setTranscriptSearchRequest((request) => request + 1) : undefined}
+          onRestartSession={hasSession && session.messages.length > 0 ? handleStartFreshSession : undefined}
+          onStopSession={hasSession && (session.status === SessionStatus.WORKING || session.status === SessionStatus.WAITING_APPROVAL) ? handleAbort : undefined}
           onStatusChange={handleStatusChange}
           onBack={onBack}
           onRename={handleRename}
@@ -1156,11 +1164,11 @@ Update existing skills that were helpful or create new ones for patterns worth r
         />
         <div ref={workspaceBodyRef} className="relative flex min-h-0 flex-1 overflow-hidden">
           {panelLayout === 'task-only' || (!hasSession && panelLayout === 'both') ? (
-            <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-background">
+            <div className="native-backdrop-page flex min-h-0 min-w-0 flex-1 flex-col bg-background">
               <div className="min-h-0 flex-1">{detailsView}</div>
               {!hasSession && panelLayout === 'both' && !isTaskClosed(task.status) && (
-                <div className="sticky bottom-0 mx-auto w-full max-w-[780px] shrink-0 border-t border-border/50 bg-background/95 px-6 py-3 backdrop-blur">
-                  <div className="flex items-end gap-2 rounded-xl border border-border/50 bg-card p-2 shadow-lg">
+                <div className="sticky bottom-0 z-10 mx-auto w-full max-w-[780px] shrink-0 px-6 py-4">
+                  <div className="flex items-end gap-2 glass-composer rounded-full p-2">
                     <textarea
                       value={kickoffMessage}
                       onChange={(event) => setKickoffMessage(event.target.value)}
@@ -1171,7 +1179,7 @@ Update existing skills that were helpful or create new ones for patterns worth r
                       className="max-h-32 min-h-10 flex-1 resize-none bg-transparent px-2 py-2 text-sm outline-none placeholder:text-muted-foreground"
                       aria-label="Kickoff instructions"
                     />
-                    <Button onClick={() => void handleKickoff()} disabled={!kickoffMessage.trim()} className="h-9 gap-1.5">
+                    <Button onClick={() => void handleKickoff()} disabled={!kickoffMessage.trim()} className="glass-send !h-10 rounded-full px-4">
                       {task.agent_id ? <Send className="h-3.5 w-3.5" /> : <Sparkles className="h-3.5 w-3.5" />}
                       {task.agent_id ? 'Start' : 'Triage'}
                     </Button>
@@ -1213,11 +1221,12 @@ Update existing skills that were helpful or create new ones for patterns worth r
                     details={detailsView}
                     changes={<ChangesPanel taskId={task.id} repos={task.repos} className="h-full" onSummary={setChangesSummary} onPullRequests={handlePullRequests} />}
                     output={<OutputFieldsDisplay fields={task.output_fields} onChange={onUpdateOutputFields} isActive={!isTaskClosed(task.status)} onComplete={handleCompleteTask} taskUpdatedAt={task.updated_at} />}
-                    className="min-w-[320px] flex-1 border-l border-border/50"
+                    className="min-w-[320px] flex-1 border-l border-border/50 pt-12"
                   />
                 </>
               ) : (
                 <ArtifactRail
+                  className="pt-12"
                   artifacts={artifacts}
                   expanded={artifactUI.railExpanded}
                   activeTabId={artifactUI.activeTabId}

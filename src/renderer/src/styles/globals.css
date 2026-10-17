@@ -96,11 +96,32 @@
   --sidebar-muted: #eeeeef;
 
   /* Frosted chrome surfaces (top bar / sidebar translucency) */
-  --chrome: rgba(244, 244, 245, 0.72);
+  --glass-panel: color-mix(in srgb, color-mix(in srgb, rgba(255, 255, 255, .69) var(--glass-opacity), transparent) calc(100% - var(--glass-solid-mix)), var(--glass-solid) var(--glass-solid-mix));
+  --glass-popover: color-mix(in srgb, rgba(255, 255, 255, var(--glass-popover-alpha)) calc(100% - var(--glass-solid-mix)), var(--glass-solid) var(--glass-solid-mix));
+  --glass-opacity: 55%;
+  --glass-solid-mix: 0%;
+  --glass-blur-factor: 1;
+  --glass-popover-alpha: .84;
+  --glass-blur: calc(12px * var(--glass-blur-factor));
+  --glass-saturation: 1.1;
+  --glass-control: color-mix(in srgb, color-mix(in srgb, rgba(255, 255, 255, .82) var(--glass-opacity), transparent) calc(100% - var(--glass-solid-mix)), var(--glass-solid) var(--glass-solid-mix));
+  --glass-composer-fill: color-mix(in srgb, rgba(255, 255, 255, .62) calc(100% - var(--glass-solid-mix)), var(--glass-solid) var(--glass-solid-mix));
+  --glass-composer-blur: calc(24px * var(--glass-blur-factor));
+  --glass-edge-blur: calc(22px * var(--glass-blur-factor));
+  --glass-inset: rgba(0, 0, 0, .045);
+  --glass-placeholder: #62636a;
+  --glass-edge: rgba(0, 0, 0, 0.08);
+  --glass-outline: rgba(0, 0, 0, 0.11);
+  --glass-solid: #f4f4f5;
+  --glass-shadow: 0 10px 28px rgba(0, 0, 0, 0.13), 0 2px 5px rgba(0, 0, 0, 0.08);
+  --glass-shadow-control: 0 2px 5px rgba(0, 0, 0, .10), 0 1px 2px rgba(0, 0, 0, .06);
+  --glass-rim: inset 0 1px 0 rgba(255, 255, 255, 0.45);
+  --glass-edge-wash: rgba(244, 244, 245, 0.62);
   --chrome-solid: #f4f4f5;
-  --overlay: rgba(0, 0, 0, 0.30);
+  --overlay: rgba(18, 18, 18, 0.40);
 
   /* Infinite-canvas surfaces */
+  --desktop-backdrop-wash: rgba(244, 244, 245, .28);
   --canvas-bg: #ededee;
   --canvas-panel: #ffffff;
   --canvas-chrome: #f4f4f5;
@@ -158,11 +179,25 @@
   --sidebar-accent: #282828;
   --sidebar-muted: #232323;
 
-  --chrome: rgba(20, 20, 20, 0.68);
+  --glass-panel: color-mix(in srgb, color-mix(in srgb, rgba(34, 38, 44, .62) var(--glass-opacity), transparent) calc(100% - var(--glass-solid-mix)), var(--glass-solid) var(--glass-solid-mix));
+  --glass-popover: color-mix(in srgb, rgba(24, 27, 32, var(--glass-popover-alpha)) calc(100% - var(--glass-solid-mix)), var(--glass-solid) var(--glass-solid-mix));
+  --glass-blur: calc(16px * var(--glass-blur-factor));
+  --glass-control: color-mix(in srgb, color-mix(in srgb, rgba(255, 255, 255, .30) var(--glass-opacity), transparent) calc(100% - var(--glass-solid-mix)), var(--glass-solid) var(--glass-solid-mix));
+  --glass-composer-fill: color-mix(in srgb, rgba(39, 41, 44, .58) calc(100% - var(--glass-solid-mix)), var(--glass-solid) var(--glass-solid-mix));
+  --glass-inset: rgba(255, 255, 255, .06);
+  --glass-placeholder: #a4a4a8;
+  --glass-edge: rgba(255, 255, 255, 0.1);
+  --glass-outline: rgba(255, 255, 255, 0.1);
+  --glass-solid: #1e1e1e;
+  --glass-shadow: 0 12px 32px rgba(0, 0, 0, 0.42), 0 2px 5px rgba(0, 0, 0, 0.26);
+  --glass-shadow-control: 0 2px 6px rgba(0, 0, 0, .22), 0 1px 2px rgba(0, 0, 0, .16);
+  --glass-rim: inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  --glass-edge-wash: rgba(9, 11, 15, 0.5);
   --chrome-solid: #141414;
-  --overlay: rgba(0, 0, 0, 0.6);
+  --overlay: rgba(0, 0, 0, 0.50);
 
   /* Infinite-canvas surfaces (true-gray, matching the dark theme) */
+  --desktop-backdrop-wash: rgba(15, 15, 15, .28);
   --canvas-bg: #0f0f0f;
   --canvas-panel: #1e1e1e;
   --canvas-chrome: #242424;
@@ -268,6 +303,42 @@ html, body, #root {
   flex-direction: column;
 }
 
+/* The system blurs the desktop once behind the window. Only page shells expose
+   it; message bodies, editors, forms, dialogs, and canvas panels keep their fill. */
+html.native-desktop-backdrop,
+html.native-desktop-backdrop body,
+html.native-desktop-backdrop #root,
+html.native-desktop-backdrop .app-chrome-field,
+html.native-desktop-backdrop .native-backdrop-page,
+html.native-desktop-backdrop [data-canvas-root] {
+  background: transparent;
+}
+
+html.native-desktop-backdrop .canvas-workspace-surface,
+html.native-desktop-backdrop .native-backdrop-panel {
+  background: var(--desktop-backdrop-wash);
+}
+
+html.glass-solid-mode.native-desktop-backdrop,
+html.glass-solid-mode.native-desktop-backdrop body,
+html.glass-solid-mode.native-desktop-backdrop #root,
+html.glass-solid-mode.native-desktop-backdrop .app-chrome-field,
+html.glass-solid-mode.native-desktop-backdrop .native-backdrop-page { background: var(--background); }
+html.glass-solid-mode.native-desktop-backdrop .canvas-workspace-surface,
+html.glass-solid-mode.native-desktop-backdrop .native-backdrop-panel { background: var(--card); }
+html.glass-solid-mode.native-desktop-backdrop [data-canvas-root] { background: var(--canvas-bg); }
+
+@media (prefers-reduced-transparency: reduce) {
+  html.native-desktop-backdrop,
+  html.native-desktop-backdrop body,
+  html.native-desktop-backdrop #root,
+  html.native-desktop-backdrop .app-chrome-field,
+  html.native-desktop-backdrop .native-backdrop-page { background: var(--background); }
+  html.native-desktop-backdrop .canvas-workspace-surface,
+  html.native-desktop-backdrop .native-backdrop-panel { background: var(--card); }
+  html.native-desktop-backdrop [data-canvas-root] { background: var(--canvas-bg); }
+}
+
 /* Smooth theme transitions on surfaces (not on transforms/opacity) */
 body, .theme-transition {
   transition: background-color 0.25s ease, color 0.25s ease, border-color 0.25s ease;
@@ -275,18 +346,76 @@ body, .theme-transition {
 
 /* ── Utility layer ──────────────────────────────────────────────────────── */
 @layer utilities {
-  /* Frosted glass chrome — used by top bar + sidebar */
-  .frost {
-    background-color: var(--chrome);
-    backdrop-filter: saturate(180%) blur(20px);
-    -webkit-backdrop-filter: saturate(180%) blur(20px);
-  }
   .shadow-xs   { box-shadow: var(--shadow-xs); }
   .shadow-card { box-shadow: var(--shadow-sm); }
   .shadow-pop  { box-shadow: var(--shadow-pop); }
   .shadow-float{ box-shadow: var(--shadow-lg); }
   .font-mono   { font-family: var(--font-mono); }
   .ring-focus  { box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 30%, transparent); }
+}
+
+/* The overlay follows the scroll content in paint order and sits below its
+   controls, allowing the backdrop filter to sample the actual scrolling rows. */
+@layer components {
+.glass-bar { background: transparent; border-color: transparent; box-shadow: none; }
+.scroll-edge-overlay {
+  position: absolute; inset-inline: 0; top: 0; z-index: 9; pointer-events: none;
+  background: var(--glass-edge-wash);
+  backdrop-filter: blur(var(--glass-edge-blur)) saturate(110%);
+  -webkit-backdrop-filter: blur(var(--glass-edge-blur)) saturate(110%);
+  mask-image: linear-gradient(to bottom, black 0%, black calc(100% - 44px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, black 0%, black calc(100% - 44px), transparent 100%);
+}
+.glass-panel, .glass-popover, .glass-control, .glass-action {
+  border-color: var(--glass-outline);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
+}
+.glass-panel { background: var(--glass-panel); box-shadow: var(--glass-rim), var(--glass-shadow); }
+.glass-todo-summary { --muted-foreground: #62636a; background: var(--glass-panel); border: 1px solid var(--glass-outline); box-shadow: var(--glass-rim), var(--glass-shadow-control); backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation)); -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation)); }
+.dark .glass-todo-summary { --muted-foreground: #a4a4a8; }
+/* A nested scroll edge needs the rows in its backdrop sampling root. */
+.glass-scroll-panel { backdrop-filter: none; -webkit-backdrop-filter: none; }
+.glass-popover { background: var(--glass-popover); border-color: color-mix(in srgb, var(--foreground) 10%, transparent); border-radius: 16px !important; box-shadow: var(--glass-rim), 0 24px 64px -24px rgba(0, 0, 0, .55), 0 4px 16px rgba(0, 0, 0, .18); }
+.glass-control { background: var(--glass-control); border: 1px solid var(--glass-outline); border-radius: 9999px; box-shadow: var(--glass-rim), var(--glass-shadow-control); }
+.glass-composer { position: relative; isolation: isolate; border-radius: 9999px; }
+.glass-composer::before {
+  content: ""; position: absolute; inset: 0; z-index: -1; border: 1px solid var(--glass-outline); border-radius: inherit;
+  background: var(--glass-composer-fill); box-shadow: var(--glass-rim), var(--glass-shadow-control);
+  backdrop-filter: blur(var(--glass-composer-blur)) saturate(var(--glass-saturation));
+  -webkit-backdrop-filter: blur(var(--glass-composer-blur)) saturate(var(--glass-saturation));
+}
+.glass-composer:focus-within::before { border-color: color-mix(in srgb, var(--ring) 28%, var(--glass-outline)); }
+.glass-action { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 44px; height: 44px; border: 1px solid var(--glass-outline); border-radius: 9999px !important; background: var(--glass-control); box-shadow: var(--glass-rim), var(--glass-shadow-control); transition: transform 150ms, background-color 150ms, box-shadow 150ms; }
+.glass-action:hover:not(:disabled) { background: color-mix(in srgb, var(--glass-control) 94%, white); box-shadow: var(--glass-rim), var(--glass-shadow-control), 0 0 0 1px var(--glass-edge); }
+.glass-action:active:not(:disabled) { transform: scale(.96); }
+.glass-action:focus-visible, .glass-control:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.glass-action:disabled { opacity: .55; cursor: not-allowed; }
+.glass-send { background: var(--primary); color: #061b2c; border-color: rgba(255, 255, 255, .42); }
+.glass-send:hover:not(:disabled) { background: color-mix(in srgb, var(--primary) 85%, white); }
+.glass-send:disabled { background: var(--glass-control); color: var(--muted-foreground); opacity: .72; }
+.glass-panel .glass-control, .glass-panel .glass-action { background: var(--glass-inset); border-color: var(--glass-outline); box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none; }
+.glass-panel .glass-composer::before { background: var(--glass-inset); box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none; }
+.glass-panel .glass-popover { background: var(--glass-solid); backdrop-filter: none; -webkit-backdrop-filter: none; }
+.glass-panel .glass-action:hover:not(:disabled) { background: color-mix(in srgb, var(--glass-inset) 94%, white); box-shadow: none; }
+.glass-solid-mode .glass-panel, .glass-solid-mode .glass-popover, .glass-solid-mode .glass-control, .glass-solid-mode .glass-action, .glass-solid-mode .glass-todo-summary, .glass-solid-mode .glass-composer::before { background: var(--glass-solid); box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none; }
+.glass-solid-mode .scroll-edge-overlay { background: var(--glass-solid); backdrop-filter: none; -webkit-backdrop-filter: none; }
+.glass-solid-mode .glass-send:not(:disabled) { background: var(--primary); }
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass-panel, .glass-popover, .glass-control, .glass-action, .glass-todo-summary { background-color: var(--glass-solid); box-shadow: none; }
+  .glass-composer::before { background: var(--glass-solid); box-shadow: none; }
+  .scroll-edge-overlay { background: var(--glass-solid); }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .glass-panel, .glass-popover, .glass-control, .glass-action, .glass-todo-summary { background-color: var(--glass-solid); box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none; }
+  .glass-composer::before { background: var(--glass-solid); box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none; }
+  .scroll-edge-overlay { background: var(--glass-solid); backdrop-filter: none; -webkit-backdrop-filter: none; }
+  .glass-send { background-color: var(--primary); }
+  .glass-send:disabled { background: var(--glass-solid); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .glass-bar, .glass-panel, .glass-popover, .glass-control, .glass-action { transition: none; animation: none; }
+}
 }
 
 /* ── Drag regions for macOS traffic lights ─────────────────────────────── */
@@ -430,7 +559,7 @@ input[type="search"]::-webkit-search-cancel-button { -webkit-appearance: none; }
  * made the tinted strips look like a stripe laid over the window rather than
  * the frame of it — the gutters read as a seam.
  */
-[data-voice-recording="true"] .app-chrome-field {
+html[data-voice-recording="true"] .app-chrome-field {
   background-color: color-mix(in oklab, var(--destructive) 16%, var(--background));
   background-image:
     linear-gradient(
@@ -477,6 +606,13 @@ input[type="search"]::-webkit-search-cancel-button { -webkit-appearance: none; }
   background-attachment: fixed;
   animation: recording-drift 14s ease-in-out infinite;
   transition: background-color 180ms ease-out;
+}
+
+/* Recording tint wins over the normal glass fill without changing the
+   viewport-anchored gradient on the chrome strips. */
+[data-voice-recording="true"] .app-chrome.glass-bar,
+[data-voice-recording="true"] .app-chrome.glass-panel {
+  background-color: color-mix(in oklab, var(--destructive) 16%, var(--background));
 }
 
 @keyframes recording-drift {

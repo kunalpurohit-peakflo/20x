@@ -1,10 +1,11 @@
-import { Settings, Users, Server, Workflow, Wrench, KeyRound, Building2, Puzzle, Cable, Mic, Gauge, Terminal, X } from 'lucide-react'
+import { Settings, Users, Server, Workflow, Wrench, KeyRound, Building2, Puzzle, Cable, Mic, Gauge, Terminal, X, Palette } from 'lucide-react'
 import * as Tabs from '@radix-ui/react-tabs'
 import { useUIStore } from '@/stores/ui-store'
 import { SettingsTab } from '@/types'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
 import { GeneralSettings } from './tabs/GeneralSettings'
+import { AppearanceSettings } from './tabs/AppearanceSettings'
 import { AgentsSettings } from './tabs/AgentsSettings'
 import { HarnessesTab } from './tabs/HarnessesTab'
 import { ToolsMcpSettings } from './tabs/ToolsMcpSettings'
@@ -19,6 +20,7 @@ import { UsageSettings } from './tabs/UsageSettings'
 
 const ICON_MAP = {
   Settings,
+  Palette,
   Users,
   Server,
   KeyRound,
@@ -37,6 +39,7 @@ export function SettingsWorkspace() {
 
   const tabs = [
     { value: SettingsTab.GENERAL, label: 'General', iconName: 'Settings' },
+    { value: SettingsTab.APPEARANCE, label: 'Appearance', iconName: 'Palette' },
     { value: SettingsTab.AGENTS, label: 'Agents', iconName: 'Users' },
     { value: SettingsTab.HARNESSES, label: 'Harnesses', iconName: 'Terminal' },
     { value: SettingsTab.TOOLS_MCP, label: 'Tools & MCP', iconName: 'Server' },
@@ -53,7 +56,7 @@ export function SettingsWorkspace() {
   return (
     <div className="h-full flex flex-col min-h-0">
       {/* Header */}
-      <div className="shrink-0 px-6 py-4 border-b border-border bg-background flex items-start justify-between">
+      <div className="shrink-0 px-6 py-4 glass-bar border-b flex items-start justify-between">
         <div>
           <h1 className="text-lg font-semibold text-foreground">Settings</h1>
           <p className="text-sm text-muted-foreground mt-0.5">
@@ -70,10 +73,13 @@ export function SettingsWorkspace() {
         value={settingsTab}
         onValueChange={(value) => setSettingsTab(value as typeof settingsTab)}
         className="flex-1 flex min-h-0"
-        orientation="horizontal"
+        orientation="vertical"
       >
         {/* Left Navigation Sidebar */}
-        <Tabs.List className="shrink-0 w-60 border-r border-border bg-background/50 py-4 space-y-1 px-3">
+        <Tabs.List
+          aria-label="Settings sections"
+          className="glass-panel m-3 mr-0 w-60 shrink-0 self-stretch overflow-y-auto rounded-2xl border border-border/60 p-2 shadow-sm"
+        >
           {tabs.map(({ value, label, iconName }) => {
             const Icon = ICON_MAP[iconName as keyof typeof ICON_MAP]
             return (
@@ -81,11 +87,11 @@ export function SettingsWorkspace() {
                 key={value}
                 value={value}
                 className={cn(
-                  'w-full flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md transition-colors',
-                  'hover:bg-accent hover:text-accent-foreground',
+                  'w-full flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-lg transition-colors',
+                  'hover:bg-accent/70 hover:text-foreground',
                   'data-[state=active]:bg-accent data-[state=active]:text-foreground',
-                  'data-[state=inactive]:text-muted-foreground',
-                  'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/40'
+                  'data-[state=inactive]:text-foreground/70',
+                  'focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring'
                 )}
               >
                 <Icon className="h-4 w-4 shrink-0" />
@@ -100,6 +106,10 @@ export function SettingsWorkspace() {
           <div className="max-w-4xl mx-auto px-6 py-6">
             <Tabs.Content value={SettingsTab.GENERAL} className="focus-visible:outline-none space-y-6">
               <GeneralSettings />
+            </Tabs.Content>
+
+            <Tabs.Content value={SettingsTab.APPEARANCE} className="focus-visible:outline-none space-y-6">
+              <AppearanceSettings />
             </Tabs.Content>
 
             <Tabs.Content value={SettingsTab.AGENTS} className="focus-visible:outline-none space-y-6">

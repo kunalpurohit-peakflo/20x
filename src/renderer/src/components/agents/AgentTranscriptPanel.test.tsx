@@ -5,8 +5,13 @@ import { SessionStatus } from '@/stores/agent-store'
 import { useArtifactStore } from '@/stores/artifact-store'
 import { ArtifactContentKind, ArtifactType, type Artifact } from '@shared/artifacts'
 
+const virtualizerOptions = vi.hoisted(() => vi.fn())
+
 vi.mock('@tanstack/react-virtual', () => ({
-  useVirtualizer: ({ count }: { count: number }) => ({
+  useVirtualizer: (options: { count: number; paddingStart?: number; paddingEnd?: number }) => {
+    virtualizerOptions(options)
+    const { count } = options
+    return ({
     getTotalSize: () => count * 120,
     getVirtualItems: () => Array.from({ length: count }, (_, index) => ({
       index,
@@ -16,13 +21,73 @@ vi.mock('@tanstack/react-virtual', () => ({
     })),
     scrollToIndex: vi.fn(),
     measureElement: vi.fn()
-  })
+  })}
 }))
 
 describe('AgentTranscriptPanel drag and drop attachments', () => {
   afterEach(() => {
     cleanup()
     vi.clearAllMocks()
+  })
+
+  it('includes header and composer clearance in the virtualized scroll height', () => {
+    render(
+      <AgentTranscriptPanel
+        messages={[{ id: 'latest', role: 'assistant', content: 'Newest answer', timestamp: new Date(), partType: 'text' }]}
+        status={SessionStatus.IDLE}
+        onStop={() => undefined}
+        onSend={() => undefined}
+      />
+    )
+
+    expect(virtualizerOptions.mock.lastCall?.[0]).toMatchObject({ paddingStart: 48, paddingEnd: 64, scrollPaddingEnd: 64 })
+    fireEvent.click(screen.getByRole('button', { name: 'Search transcript' }))
+    expect(virtualizerOptions.mock.lastCall?.[0]).toMatchObject({ paddingStart: 96, paddingEnd: 64 })
+  })
+
+  it('uses the task header without duplicating the transcript title, and opens search from it', async () => {
+    const { rerender } = render(
+      <AgentTranscriptPanel embeddedHeader searchRequest={0} messages={[]} status={SessionStatus.IDLE} onStop={() => undefined} onSend={() => undefined} />
+    )
+
+    expect(screen.queryByText('Agent transcript')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Search transcript' })).not.toBeInTheDocument()
+    expect(virtualizerOptions.mock.lastCall?.[0]).toMatchObject({ paddingStart: 16, paddingEnd: 64 })
+
+    rerender(
+      <AgentTranscriptPanel embeddedHeader searchRequest={1} messages={[]} status={SessionStatus.IDLE} onStop={() => undefined} onSend={() => undefined} />
+    )
+    expect(await screen.findByPlaceholderText('Search transcript...')).toBeInTheDocument()
+    expect(virtualizerOptions.mock.lastCall?.[0]).toMatchObject({ paddingStart: 80, paddingEnd: 64 })
+  })
+
+  it('keeps the floating task header and pinned todos in the virtualized scroll clearance', () => {
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      return { height: this.classList.contains('glass-bar') ? 88 : 0 } as DOMRect
+    })
+
+    try {
+      const { container } = render(
+        <AgentTranscriptPanel
+          embeddedHeader
+          externalHeaderHeight={48}
+          messages={[{
+            id: 'todo', role: 'assistant', content: '', timestamp: new Date(), partType: 'todowrite',
+            tool: { name: 'todowrite', status: 'completed', todos: [{ id: 'one', content: 'Draft plan', status: 'in_progress' }] }
+          }]}
+          status={SessionStatus.IDLE}
+          onStop={() => undefined}
+          onSend={() => undefined}
+        />
+      )
+
+      expect(container.querySelector('.glass-todo-summary')).toHaveTextContent('Tasks')
+      expect(container.querySelector('.glass-todo-summary')?.closest('.glass-bar')).toBeTruthy()
+      expect(virtualizerOptions.mock.lastCall?.[0]).toMatchObject({ paddingStart: 100, paddingEnd: 64 })
+      expect(container.querySelector('.scroll-edge-overlay')).toHaveStyle({ height: '144px' })
+    } finally {
+      rect.mockRestore()
+    }
   })
 
   it('adds dropped files as pending attachments and sends them with the message', async () => {

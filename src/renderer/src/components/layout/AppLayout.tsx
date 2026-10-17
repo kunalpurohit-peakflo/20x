@@ -26,6 +26,7 @@ const OrchestratorPanel = lazy(() => import('@/components/orchestrator/Orchestra
 import { useTasks } from '@/hooks/use-tasks'
 import { useUIStore } from '@/stores/ui-store'
 import { useCanvasStore } from '@/stores/canvas-store'
+import { useThemeStore } from '@/stores/theme-store'
 import { useAgentStore } from '@/stores/agent-store'
 import { useAgentAutoStart } from '@/hooks/use-agent-auto-start'
 import { useOverdueNotifications } from '@/hooks/use-overdue-notifications'
@@ -70,6 +71,8 @@ export function AppLayout() {
   const sidebarView = useUIStore((s) => s.sidebarView)
   const setSidebarView = useUIStore((s) => s.setSidebarView)
   const activeModal = useUIStore((s) => s.activeModal)
+  const desktopBackdrop = useThemeStore((s) => s.desktopBackdrop)
+  const glassOpacity = useThemeStore((s) => s.glassOpacity)
   const editingTaskId = useUIStore((s) => s.editingTaskId)
   const deletingTaskId = useUIStore((s) => s.deletingTaskId)
   const openCreateModal = useUIStore((s) => s.openCreateModal)
@@ -710,11 +713,34 @@ export function AppLayout() {
     window.addEventListener('keydown', listener)
     return () => window.removeEventListener('keydown', listener)
   }, [])
+
+  const backdropEnabled = desktopBackdrop && glassOpacity < 100
+  useEffect(() => {
+    const setBackdrop = window.electronAPI?.app?.setDesktopBackdrop
+    if (!isMac || !setBackdrop) return
+    const reducedTransparency = window.matchMedia('(prefers-reduced-transparency: reduce)')
+    let cancelled = false
+    const update = (): void => {
+      const enabled = backdropEnabled && !reducedTransparency.matches
+      document.documentElement.classList.remove('native-desktop-backdrop')
+      void setBackdrop(enabled).then((active) => {
+        if (!cancelled && enabled && active) document.documentElement.classList.add('native-desktop-backdrop')
+      }).catch(() => { /* Keep solid page backgrounds if native vibrancy is unavailable. */ })
+    }
+    update()
+    reducedTransparency.addEventListener('change', update)
+    return () => {
+      cancelled = true
+      reducedTransparency.removeEventListener('change', update)
+      document.documentElement.classList.remove('native-desktop-backdrop')
+      void setBackdrop(false)
+    }
+  }, [backdropEnabled])
   return (
     <>
       {completionDialog}
       {/* ── Top bar: drag region with logo (left) + nav switcher (center) + actions (right) ── */}
-      <div className="app-chrome drag-region bg-background h-8 flex-shrink-0 flex items-center justify-center px-3 pt-2.5 windows-titlebar-pad">
+      <div className="app-chrome glass-bar drag-region h-8 flex-shrink-0 flex items-center justify-center px-3 pt-2.5 windows-titlebar-pad">
         {/* Logo + wordmark + update indicator — pinned left. The white logo mark
             always sits on a brand-gradient tile, so it stays visible in both themes. */}
         <div className="no-drag absolute left-3 flex items-center gap-1.5 macos-titlebar-pad">
@@ -771,7 +797,7 @@ export function AppLayout() {
             captureAnalyticsEvent('command_palette_toggled', { source: 'top_bar' })
           }}
           title="Search or run a command"
-          className="no-drag flex h-7 w-[230px] max-w-[34vw] items-center gap-2 rounded-lg border border-border/60 bg-muted/40 px-2.5 text-[11px] text-muted-foreground shadow-xs transition-colors hover:bg-accent hover:text-foreground cursor-pointer"
+          className="no-drag glass-control flex h-7 w-[230px] max-w-[34vw] items-center gap-2 px-2.5 text-[11px] text-muted-foreground shadow-xs transition-colors hover:bg-accent hover:text-foreground cursor-pointer focus-visible:ring-2 focus-visible:ring-ring"
         >
           <Search className="h-3 w-3 shrink-0" />
           <span className="flex-1 truncate text-left">Search or run a command…</span>
@@ -811,7 +837,7 @@ export function AppLayout() {
       {/* ── Content area: left rail + optional sidebar + workspace + orchestrator ── */}
       <div className="app-chrome-field flex flex-1 min-h-0 overflow-hidden bg-background">
         {/* Primary navigation — slim vertical icon rail */}
-        <nav className="app-chrome no-drag flex w-9 flex-shrink-0 flex-col items-center gap-0.5 bg-background py-1.5">
+        <nav className="app-chrome no-drag flex w-10 flex-shrink-0 flex-col items-center gap-0.5 py-2 my-2 ml-2">
           {NAV_ITEMS.map(({ key, label, icon: Icon }, i) => {
             const active = sidebarView === key && activeModal !== 'settings'
             return (
@@ -858,7 +884,7 @@ export function AppLayout() {
         )}
 
         {/* Workspace — floats as a rounded card, shrinks when orchestrator is open */}
-        <main className="flex flex-col flex-1 min-w-0 overflow-hidden rounded-2xl border border-border bg-card shadow-card m-2 transition-all duration-200">
+        <main className="canvas-workspace-surface flex flex-col flex-1 min-w-0 overflow-hidden rounded-2xl border border-border bg-card shadow-card m-2 transition-all duration-200">
           <div className="flex-1 h-0 overflow-hidden relative">
             {/* Canvas — always mounted so iframes/terminals survive navigation */}
             <div

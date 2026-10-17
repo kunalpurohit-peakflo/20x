@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { App } from './App'
 import './styles/globals.css'
 import { initAnalytics } from '@/lib/analytics'
+import { applyGlassOpacity, readGlassOpacity } from '@shared/glass-settings'
 
 initAnalytics('mobile')
 
@@ -15,6 +16,7 @@ initAnalytics('mobile')
     const dark = stored === 'dark' || ((stored === 'system' || !stored) && prefersDark)
     document.documentElement.classList.toggle('dark', dark)
     document.documentElement.style.colorScheme = dark ? 'dark' : 'light'
+    applyGlassOpacity(readGlassOpacity())
   } catch {
     /* keep the default dark class from index.html */
   }

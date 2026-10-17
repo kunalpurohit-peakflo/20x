@@ -9,7 +9,7 @@ import { useTaskStore } from '@/stores/task-store'
 import { useUserStore } from '@/stores/user-store'
 import { useSkillStore } from '@/stores/skill-store'
 import { useAgentSchedulerStore } from '@/stores/agent-scheduler-store'
-import { isSnoozed } from '@/lib/utils'
+import { cn, isSnoozed } from '@/lib/utils'
 import { TaskStatus, TASK_STATUSES, TASK_PRIORITIES } from '@/types'
 import type { WorkfloTask, TaskPriority } from '@/types'
 
@@ -177,11 +177,12 @@ export function Sidebar({ tasks, selectedTaskId, overdueCount, onSelectTask, onC
     // radius, same hairline, same shadow. Sitting flush against the rail while
     // the work had rounded corners read as unfinished.
     <aside
-      className="app-chrome relative flex flex-col shrink-0 overflow-hidden rounded-2xl border border-border bg-card text-sidebar-foreground shadow-card my-2 ml-2"
+      className="app-chrome glass-panel glass-scroll-panel relative flex flex-col shrink-0 overflow-hidden rounded-2xl border text-sidebar-foreground my-2 ml-2"
       style={{ width: sidebarWidth }}
     >
       {sidebarView === 'tasks' ? (
         <>
+          <div className={cn('relative z-10 shrink-0', filtersOpen ? '-mb-[278px]' : '-mb-[176px]')}>
           <div className="no-drag flex items-center justify-between px-4 pt-4 pb-3">
             <div className="flex items-center gap-2">
               <h2 className="text-[13px] font-semibold uppercase tracking-wider text-muted-foreground">Tasks</h2>
@@ -193,21 +194,21 @@ export function Sidebar({ tasks, selectedTaskId, overdueCount, onSelectTask, onC
             </div>
             <div className="flex items-center gap-1">
               {sources.length > 0 && (
-                <Button size="sm" variant="ghost" onClick={handleSyncAll} disabled={isSyncingAll || syncingIds.size > 0} title="Sync all sources">
+                <Button size="icon" variant="ghost" onClick={handleSyncAll} disabled={isSyncingAll || syncingIds.size > 0} title="Sync all sources" className="glass-action !h-[32px] !w-[32px]">
                   {isSyncingAll ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
                 </Button>
               )}
               <Button
-                size="sm"
+                size="icon"
                 variant={isAutoStartEnabled ? 'default' : 'ghost'}
                 onClick={toggleAutoStart}
                 title={isAutoStartEnabled ? 'Disable auto-run' : 'Enable auto-run'}
+                className={cn('glass-action !h-[32px] !w-[32px]', isAutoStartEnabled && 'text-[#061b2c]')}
               >
                 {isAutoStartEnabled ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
               </Button>
-              <Button size="sm" onClick={onCreateTask}>
-                <Plus className="h-3.5 w-3.5" />
-                New
+              <Button size="icon" variant="ghost" onClick={onCreateTask} className="glass-action !h-[32px] !w-[32px]" title="Create task" aria-label="Create task">
+                <Plus className="h-4 w-4" />
               </Button>
             </div>
           </div>
@@ -221,7 +222,7 @@ export function Sidebar({ tasks, selectedTaskId, overdueCount, onSelectTask, onC
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Search tasks..."
-                className="w-full rounded-lg border border-input bg-card pl-9 pr-8 py-2 text-sm shadow-xs placeholder:text-muted-foreground focus:border-ring focus:ring-2 focus:ring-ring/20 transition-all"
+                className="glass-control h-[44px] w-full pl-10 pr-8 text-sm placeholder:text-[var(--glass-placeholder)] focus:ring-2 focus:ring-ring/20 transition-all"
               />
               {searchQuery && (
                 <button
@@ -234,10 +235,11 @@ export function Sidebar({ tasks, selectedTaskId, overdueCount, onSelectTask, onC
             </div>
           </div>
 
-          <div className="no-drag px-3 pb-3 flex items-center gap-2">
+          <div className="no-drag px-3 pb-3">
+            <div className="flex min-h-10 items-center gap-1 rounded-xl border border-[var(--glass-outline)] bg-[var(--glass-inset)] px-2">
             <button
               onClick={() => setFiltersOpen(!filtersOpen)}
-              className="flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent cursor-pointer"
+              className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-xs text-foreground hover:bg-accent/40 cursor-pointer"
             >
               <ChevronDown className={`h-3 w-3 transition-transform ${filtersOpen ? 'rotate-180' : ''}`} />
               Filters
@@ -251,12 +253,13 @@ export function Sidebar({ tasks, selectedTaskId, overdueCount, onSelectTask, onC
             <select
               value={sortField}
               onChange={(e) => setSortField(e.target.value as SortField)}
-              className="rounded-md border border-input bg-transparent px-2 py-1.5 text-xs text-muted-foreground cursor-pointer"
+              className="rounded-lg !border-0 !bg-transparent px-2 py-1.5 text-xs text-foreground cursor-pointer"
             >
               {sortOptions.map((opt) => (
                 <option key={opt.value} value={opt.value}>{opt.label}</option>
               ))}
             </select>
+            </div>
           </div>
 
           {filtersOpen && (
@@ -313,10 +316,9 @@ export function Sidebar({ tasks, selectedTaskId, overdueCount, onSelectTask, onC
               )}
             </div>
           )}
+          </div>
 
-          <div className="mx-3 border-t" />
-
-          <div className="flex-1 overflow-y-auto pt-1">
+          <div className={cn('flex-1 overflow-y-auto', filtersOpen ? 'pt-[286px]' : 'pt-[184px]')}>
             <TaskList
               tasks={tasks}
               selectedTaskId={selectedTaskId}
@@ -327,6 +329,7 @@ export function Sidebar({ tasks, selectedTaskId, overdueCount, onSelectTask, onC
               onLoadMoreCompleted={loadMoreCompleted}
             />
           </div>
+          <div aria-hidden="true" className={cn('scroll-edge-overlay', filtersOpen ? 'h-[278px]' : 'h-[176px]')} />
 
           <div className="px-4 py-2.5 border-t text-xs text-muted-foreground tabular-nums">
             {activeCount} active
@@ -355,7 +358,7 @@ export function Sidebar({ tasks, selectedTaskId, overdueCount, onSelectTask, onC
                 value={skillSearchQuery}
                 onChange={(e) => setSkillSearchQuery(e.target.value)}
                 placeholder="Search skills..."
-                className="w-full rounded-lg border border-input bg-card pl-9 pr-8 py-2 text-sm shadow-xs placeholder:text-muted-foreground focus:border-ring focus:ring-2 focus:ring-ring/20 transition-all"
+                className="glass-control w-full pl-9 pr-8 py-2 text-sm shadow-xs placeholder:text-[var(--glass-placeholder)] focus:ring-2 focus:ring-ring/20 transition-all"
               />
               {skillSearchQuery && (
                 <button

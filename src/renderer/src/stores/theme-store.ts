@@ -1,8 +1,11 @@
 import { create } from 'zustand'
+import { applyGlassOpacity, GLASS_OPACITY_STORAGE_KEY, readGlassOpacity } from '@shared/glass-settings'
 
 export type ThemeMode = 'light' | 'dark' | 'system'
 
 const STORAGE_KEY = 'ui-theme'
+const DESKTOP_BACKDROP_STORAGE_KEY = 'ui-desktop-backdrop'
+const LEGACY_CANVAS_BACKDROP_STORAGE_KEY = 'ui-canvas-desktop-backdrop'
 
 function systemPrefersDark(): boolean {
   return typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches
@@ -25,7 +28,11 @@ interface ThemeState {
   mode: ThemeMode
   /** The concrete theme currently painted. */
   resolved: 'light' | 'dark'
+  glassOpacity: number
+  desktopBackdrop: boolean
   setMode: (mode: ThemeMode) => void
+  setGlassOpacity: (value: number) => void
+  setDesktopBackdrop: (enabled: boolean) => void
   /** Flip between light and dark, pinning an explicit preference. */
   toggle: () => void
 }
@@ -37,11 +44,18 @@ const initialMode: ThemeMode = (() => {
     return 'dark'
   }
 })()
+const initialGlassOpacity = readGlassOpacity()
+const initialDesktopBackdrop = (() => {
+  try {
+    return (localStorage.getItem(DESKTOP_BACKDROP_STORAGE_KEY) ?? localStorage.getItem(LEGACY_CANVAS_BACKDROP_STORAGE_KEY)) === 'true'
+  } catch { return false }
+})()
 
 export const useThemeStore = create<ThemeState>((set, get) => {
   // Apply immediately (the index.html pre-paint script already set the class to
   // avoid FOUC — this keeps the store authoritative once JS boots).
   const resolved = applyMode(initialMode)
+  applyGlassOpacity(initialGlassOpacity)
 
   // Keep "system" mode reactive to OS-level changes.
   if (typeof window !== 'undefined') {
@@ -55,6 +69,17 @@ export const useThemeStore = create<ThemeState>((set, get) => {
   return {
     mode: initialMode,
     resolved,
+    glassOpacity: initialGlassOpacity,
+    desktopBackdrop: initialDesktopBackdrop,
+    setDesktopBackdrop: (enabled) => {
+      try { localStorage.setItem(DESKTOP_BACKDROP_STORAGE_KEY, String(enabled)) } catch { /* ignore */ }
+      set({ desktopBackdrop: enabled })
+    },
+    setGlassOpacity: (value) => {
+      const next = applyGlassOpacity(value)
+      try { localStorage.setItem(GLASS_OPACITY_STORAGE_KEY, String(next)) } catch { /* ignore */ }
+      set({ glassOpacity: next })
+    },
     setMode: (mode) => {
       try { localStorage.setItem(STORAGE_KEY, mode) } catch { /* ignore */ }
       set({ mode, resolved: applyMode(mode) })

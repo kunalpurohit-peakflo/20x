@@ -6,6 +6,7 @@ import { UsageHeroSection } from '../components/UsageHeroSection'
 import { AcpAgentsSection } from '../components/AcpAgentsSection'
 import { HarnessMaintenanceSection } from '../components/HarnessMaintenanceSection'
 import { PushSettings } from '../components/PushSettings'
+import { applyGlassOpacity, GLASS_OPACITY_STORAGE_KEY, readGlassOpacity } from '@shared/glass-settings'
 
 interface TaskSource {
   id: string
@@ -29,6 +30,7 @@ interface SettingsPageProps {
 }
 
 export function SettingsPage({ onNavigate }: SettingsPageProps) {
+  const [glassOpacity, setGlassOpacity] = useState(readGlassOpacity)
   const [sources, setSources] = useState<TaskSource[]>([])
   const [plugins, setPlugins] = useState<PluginMeta[]>([])
   const [syncingIds, setSyncingIds] = useState<Set<string>>(new Set())
@@ -83,10 +85,16 @@ export function SettingsPage({ onNavigate }: SettingsPageProps) {
     }
   }, [sources])
 
+  const changeGlassOpacity = (value: number) => {
+    const next = applyGlassOpacity(value)
+    setGlassOpacity(next)
+    try { localStorage.setItem(GLASS_OPACITY_STORAGE_KEY, String(next)) } catch { /* ignore */ }
+  }
+
   return (
     <div className="h-full flex flex-col">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-border/30 shrink-0">
+      <div className="glass-bar relative z-10 flex items-center justify-between px-4 py-3 border-b shrink-0">
         <button
           onClick={() => onNavigate({ page: 'list' })}
           className="flex items-center gap-1 text-sm text-muted-foreground"
@@ -101,6 +109,14 @@ export function SettingsPage({ onNavigate }: SettingsPageProps) {
       </div>
 
       <div className="flex-1 overflow-y-auto p-4 space-y-6">
+        <section className="rounded-2xl bg-card p-4 space-y-2" aria-label="Appearance">
+          <div className="flex items-center justify-between">
+            <label htmlFor="mobile-glass-opacity" className="text-sm font-semibold">Glass opacity</label>
+            <output htmlFor="mobile-glass-opacity" className="text-xs tabular-nums text-muted-foreground">{glassOpacity}%</output>
+          </div>
+          <input id="mobile-glass-opacity" type="range" min="40" max="100" value={glassOpacity} onChange={(event) => changeGlassOpacity(Number(event.target.value))} className="w-full accent-primary" />
+          <p className="text-xs text-muted-foreground">Lower values reveal more content. At 100%, blur turns off.</p>
+        </section>
         {/* Error banner */}
         {error && (
           <div className="flex items-center justify-between bg-destructive/10 text-destructive text-xs rounded-md px-3 py-2">

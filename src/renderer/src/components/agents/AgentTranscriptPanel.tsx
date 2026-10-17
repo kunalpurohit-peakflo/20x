@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react'
+import React, { useRef, useEffect, useLayoutEffect, useState, useMemo, useCallback } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { StopCircle, Loader2, Terminal, Send, ChevronRight, ChevronDown, Wrench, AlertTriangle, CheckCircle2, Circle, Clock, RotateCcw, ListTodo, FileText, ArrowDown, ArrowUp, Paperclip, Search, X, Image as ImageIcon, GitPullRequest, MonitorPlay } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
@@ -244,6 +244,15 @@ function HighlightedText({ text, query }: { text: string; query?: string }) {
 
 interface AgentTranscriptPanelProps {
   title?: string
+  /** Controls supplied by a containing panel for the single standalone header. */
+  headerLeading?: React.ReactNode
+  headerTrailing?: React.ReactNode
+  /** TaskWorkspace already has a task header; show only the search row here. */
+  embeddedHeader?: boolean
+  /** Height of the task header floating over this transcript. */
+  externalHeaderHeight?: number
+  /** Increment to open search from the containing task header. */
+  searchRequest?: number
   messages: AgentMessage[]
   status: SessionStatus
   onStop: () => void
@@ -772,10 +781,10 @@ function TodoSummary({ todos }: { todos: NonNullable<AgentMessage['tool']>['todo
   }
 
   return (
-    <div className="border-b border-border/50 shrink-0">
+    <div className="glass-todo-summary pointer-events-auto mx-3 mb-2 shrink-0 overflow-hidden rounded-xl">
       <button
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-2 px-4 py-2 text-xs hover:bg-white/5 transition-colors"
+        className="w-full flex items-center gap-2 px-4 py-2 text-xs hover:bg-accent/30 transition-colors"
       >
         {expanded
           ? <ChevronDown className="h-3 w-3 text-muted-foreground shrink-0" />
@@ -829,6 +838,11 @@ function mergeAttachments(current: ComposerAttachment[], added: ComposerAttachme
 
 export function AgentTranscriptPanel({
   title = 'Agent transcript',
+  headerLeading,
+  headerTrailing,
+  embeddedHeader = false,
+  externalHeaderHeight = 0,
+  searchRequest = 0,
   messages,
   status,
   onStop,
@@ -847,8 +861,11 @@ export function AgentTranscriptPanel({
   // The user sent and the backend is still resuming — status still reads idle.
   const isStarting = !!pendingSend && status !== SessionStatus.WORKING && status !== SessionStatus.WAITING_APPROVAL
   const scrollRef = useRef<HTMLDivElement>(null)
+  const topOverlayRef = useRef<HTMLDivElement>(null)
+  const [topOverlayHeight, setTopOverlayHeight] = useState(0)
   const panelRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const [inputHasValue, setInputHasValue] = useState(false)
   const searchInputRef = useRef<HTMLInputElement>(null)
   const [isSearchOpen, setIsSearchOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
@@ -856,6 +873,11 @@ export function AgentTranscriptPanel({
   const [pendingAttachments, setPendingAttachments] = useState<ComposerAttachment[]>([])
   const [isDragOverComposer, setIsDragOverComposer] = useState(false)
   const [debugCopyToast, setDebugCopyToast] = useState(false)
+  useEffect(() => {
+    if (searchRequest === 0) return
+    setIsSearchOpen(true)
+    requestAnimationFrame(() => searchInputRef.current?.focus())
+  }, [searchRequest])
   const taskArtifacts = useArtifactStore((state) => taskId ? (state.artifactsByTask[taskId] || EMPTY_ARTIFACTS) : EMPTY_ARTIFACTS)
   const selectArtifactTab = useArtifactStore((state) => state.selectTab)
   const handleOpenArtifact = useCallback((artifact: Artifact) => {
@@ -989,6 +1011,18 @@ export function AgentTranscriptPanel({
     return null
   }, [messages, status])
   const showErrorBanner = !!lastErrorMessage && lastErrorMessage.partType !== 'error'
+  const floatingTop = !showErrorBanner && !systemStatus
+
+  useLayoutEffect(() => {
+    const element = topOverlayRef.current
+    if (!element) { setTopOverlayHeight(0); return }
+    const measure = () => setTopOverlayHeight(Math.ceil(element.getBoundingClientRect().height))
+    measure()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(measure)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [embeddedHeader, externalHeaderHeight, isSearchOpen, latestTodos])
 
   const atBottomRef = useRef(true)
   const scrollRafRef = useRef<number | null>(null)
@@ -1046,6 +1080,11 @@ export function AgentTranscriptPanel({
   const virtualizer = useVirtualizer({
     count: transcriptItems.length,
     getScrollElement: () => scrollRef.current,
+    paddingStart: floatingTop
+      ? topOverlayHeight > 0 ? topOverlayHeight + 12 : externalHeaderHeight + (embeddedHeader ? (isSearchOpen ? 80 : 16) : (isSearchOpen ? 96 : 48))
+      : 16,
+    paddingEnd: onSend ? 64 : 16,
+    scrollPaddingEnd: onSend ? 64 : 16,
     // Transcript rows can change indexes when adjacent tool/reasoning parts are
     // grouped. Keep measured heights attached to the message/group itself,
     // rather than allowing an index to inherit the previous row's height.
@@ -1161,6 +1200,7 @@ export function AgentTranscriptPanel({
       const attachmentsAtSend = pendingAttachments
       const sent = onSend(value, attachmentsAtSend.length > 0 ? { attachments: attachmentsAtSend } : undefined)
       inputRef.current!.value = ''
+      setInputHasValue(false)
       // Reset textarea height back to single row
       inputRef.current!.style.height = 'auto'
       setPendingAttachments([])
@@ -1169,7 +1209,10 @@ export function AgentTranscriptPanel({
       // The text goes back into the box and the failure is announced.
       void Promise.resolve(sent).catch((error: unknown) => {
         console.error('[AgentTranscriptPanel] Message send failed:', error)
-        if (inputRef.current && !inputRef.current.value) inputRef.current.value = value
+        if (inputRef.current && !inputRef.current.value) {
+          inputRef.current.value = value
+          setInputHasValue(true)
+        }
         setPendingAttachments(attachmentsAtSend)
         const detail = error instanceof Error && error.message ? error.message.trim() : String(error ?? '').trim()
         // Surface the real failure (e.g. provider "name must be at most 64
@@ -1234,29 +1277,34 @@ export function AgentTranscriptPanel({
   }
 
   return (
-    <div ref={panelRef} tabIndex={-1} className={cn('flex flex-col min-h-0 bg-background border-l border-border relative', className)}>
+    <div ref={panelRef} tabIndex={-1} className={cn('native-backdrop-page flex flex-col min-h-0 bg-background border-l border-border relative', className)}>
       {/* Debug copy toast — only visible briefly after copy */}
       {debugCopyToast && (
         <div className="absolute top-12 left-1/2 -translate-x-1/2 z-50 bg-card border border-border rounded-md px-3 py-1.5 text-xs text-foreground shadow-lg animate-in fade-in duration-150">
           Debug info copied to clipboard
         </div>
       )}
-      {/* Header — windows-titlebar-safe adds right padding on Windows to avoid title bar overlay */}
+      {/* TaskWorkspace supplies the shared task header; standalone panels keep their own. */}
+      {(!embeddedHeader || externalHeaderHeight > 0 || isSearchOpen || latestTodos) && (
+        <div ref={topOverlayRef} className="glass-bar pointer-events-none relative z-10 shrink-0" style={floatingTop && topOverlayHeight > 0 ? { marginBottom: -topOverlayHeight } : undefined}>
+      {externalHeaderHeight > 0 && <div aria-hidden="true" style={{ height: externalHeaderHeight }} />}
+      {!embeddedHeader && (
       <div
-        className="flex items-center justify-between px-4 py-3 border-b border-border/60 shrink-0 windows-titlebar-safe"
+        className="windows-titlebar-safe pointer-events-auto flex h-[36px] items-center justify-between gap-3 px-3"
         onContextMenu={handleHeaderContextMenu}
         title="Right-click to copy debug info"
       >
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 items-center gap-2">
           <Terminal className="h-4 w-4 text-muted-foreground" />
-          <span className="text-sm font-medium">
+          <span className="truncate text-sm font-medium">
             {title}
             <span className="ml-2 text-xs font-mono text-muted-foreground">
               ({messages.length})
             </span>
           </span>
+          {headerLeading}
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex shrink-0 items-center gap-3">
           <span className={`text-xs flex items-center gap-1 ${getStatusColor()}`}>
             {(isStarting || status === SessionStatus.WORKING) && <Loader2 className="h-3 w-3 animate-spin" />}
             {getStatusLabel()}
@@ -1272,8 +1320,9 @@ export function AgentTranscriptPanel({
                   return nextOpen
                 })
               }}
-              className="h-7 px-2"
+              className="glass-action !h-[24px] !w-[24px] p-0"
               title="Search transcript"
+              aria-label="Search transcript"
             >
               <Search className="h-3.5 w-3.5" />
             </Button>
@@ -1282,23 +1331,26 @@ export function AgentTranscriptPanel({
                 variant="ghost"
                 size="sm"
                 onClick={onRestart}
-                className="h-7 px-2"
+                className="glass-action !h-[24px] !w-[24px] p-0"
                 title="Restart session"
+                aria-label="Restart session"
               >
                 <RotateCcw className="h-3.5 w-3.5" />
               </Button>
             )}
             {(status === SessionStatus.WORKING || status === SessionStatus.WAITING_APPROVAL) && (
-              <Button variant="ghost" size="sm" onClick={onStop} className="h-7 px-2" title="Stop session">
+              <Button variant="ghost" size="sm" onClick={onStop} className="glass-action !h-[24px] !w-[24px] p-0" title="Stop session" aria-label="Stop session">
                 <StopCircle className="h-3.5 w-3.5" />
               </Button>
             )}
           </div>
+          {headerTrailing}
         </div>
       </div>
+      )}
 
       {isSearchOpen && (
-        <div className="flex items-center gap-2 border-b border-border/50 px-4 py-2 shrink-0">
+        <div className="pointer-events-auto flex min-h-16 items-center gap-2 px-4 py-2 shrink-0">
           <div className="relative min-w-0 flex-1">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
             <input
@@ -1314,20 +1366,21 @@ export function AgentTranscriptPanel({
                 }
               }}
               placeholder="Search transcript..."
-              className="h-8 w-full rounded-md border border-input bg-transparent pl-8 pr-3 text-xs text-foreground placeholder:text-muted-foreground focus:border-ring focus:outline-none focus:ring-1 focus:ring-ring/30"
+              className="glass-control h-[36px] w-full pl-10 pr-16 text-sm text-foreground placeholder:text-[var(--glass-placeholder)] focus:outline-none focus:ring-2 focus:ring-ring/30"
             />
+            <span className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-[11px] tabular-nums text-muted-foreground">
+              {normalizedSearchQuery ? `${searchResultIndexes.length ? activeSearchResult + 1 : 0}/${searchResultIndexes.length}` : '0/0'}
+            </span>
           </div>
-          <span className="w-16 shrink-0 text-right text-[11px] tabular-nums text-muted-foreground">
-            {normalizedSearchQuery ? `${searchResultIndexes.length ? activeSearchResult + 1 : 0}/${searchResultIndexes.length}` : '0/0'}
-          </span>
           <Button
             type="button"
             variant="ghost"
             size="icon"
             onClick={() => goToSearchResult(-1)}
             disabled={searchResultIndexes.length === 0}
-            className="h-8 w-8"
+            className="glass-action !h-[28px] !w-[28px]"
             title="Previous result"
+            aria-label="Previous result"
           >
             <ArrowUp className="h-3.5 w-3.5" />
           </Button>
@@ -1337,14 +1390,18 @@ export function AgentTranscriptPanel({
             size="icon"
             onClick={() => goToSearchResult(1)}
             disabled={searchResultIndexes.length === 0}
-            className="h-8 w-8"
+            className="glass-action !h-[28px] !w-[28px]"
             title="Next result"
+            aria-label="Next result"
           >
             <ArrowDown className="h-3.5 w-3.5" />
           </Button>
-          <Button type="button" variant="ghost" size="icon" onClick={closeSearch} className="h-8 w-8" title="Close search">
+          <Button type="button" variant="ghost" size="icon" onClick={closeSearch} className="glass-action !h-[28px] !w-[28px]" title="Close search" aria-label="Close search">
             <X className="h-3.5 w-3.5" />
           </Button>
+        </div>
+      )}
+      {floatingTop && latestTodos && <TodoSummary todos={latestTodos} />}
         </div>
       )}
 
@@ -1365,14 +1422,14 @@ export function AgentTranscriptPanel({
       )}
 
       {/* Pinned todo summary */}
-      {latestTodos && <TodoSummary todos={latestTodos} />}
+      {!floatingTop && latestTodos && <TodoSummary todos={latestTodos} />}
 
       {/* Messages */}
       <div className="relative flex-1 min-h-0">
         <div
           ref={scrollRef}
           onScroll={handleScroll}
-          className="h-full overflow-y-auto p-4 text-sm"
+          className="h-full overflow-y-auto px-4 text-sm"
         >
           {messages.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-muted-foreground text-xs">
@@ -1436,27 +1493,30 @@ export function AgentTranscriptPanel({
             </>
           )}
         </div>
+        {floatingTop && topOverlayHeight > 0 && (
+          <div aria-hidden="true" className="scroll-edge-overlay" style={{ height: topOverlayHeight + 56 }} />
+        )}
 
         {/* Scroll to bottom button */}
         {showScrollToBottom && messages.length > 0 && (
           <button
             onClick={scrollToBottom}
-            className="absolute bottom-3 right-3 flex items-center gap-1.5 rounded-full bg-card border border-border/50 px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:border-border shadow-lg transition-all duration-200 opacity-80 hover:opacity-100"
+            className="glass-action absolute bottom-24 right-4 z-20 !h-[28px] !w-[28px] text-muted-foreground hover:text-foreground"
             title="Scroll to bottom"
+            aria-label="Scroll to bottom"
           >
-            <ArrowDown className="h-3 w-3" />
-            <span>Bottom</span>
+            <ArrowDown className="h-4 w-4" />
           </button>
         )}
       </div>
 
       {/* Input + Footer */}
-      <div className="border-t border-border shrink-0">
+      <div className={cn('glass-bar glass-composer-rail pointer-events-none relative z-10 shrink-0', onSend && '-mt-[64px]')}>
         {onSend && (
           <div
             data-testid="transcript-composer"
             data-voice-composer={composerKey}
-            className={`relative px-4 py-3 space-y-2.5 transition-colors ${isDragOverComposer ? 'bg-primary/5' : ''}`}
+            className={`pointer-events-auto relative px-4 py-4 space-y-2.5 transition-colors ${isDragOverComposer ? 'bg-primary/5' : ''}`}
             onDragOver={handleComposerDragOver}
             onDragEnter={handleComposerDragOver}
             onDragLeave={handleComposerDragLeave}
@@ -1491,35 +1551,30 @@ export function AgentTranscriptPanel({
               </div>
             )}
             <div className="flex items-end gap-2">
-              <textarea
-                ref={inputRef}
-                rows={1}
-                disabled={isStarting}
-                placeholder={isStarting ? 'Starting agent…' : 'Write a message...'}
-                className="flex-1 bg-input border border-border rounded-lg px-3 py-1.5 text-sm text-foreground placeholder:text-muted-foreground focus:border-primary focus:ring-2 focus:ring-primary/30 resize-none overflow-hidden max-h-32 min-h-[32px] disabled:opacity-60"
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault()
-                    handleSend()
-                  }
-                }}
-                onInput={autoResize}
-              />
-              <VoiceMicButton mode="dictation" onSubmit={handleSend} />
               {onPickAttachments && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                onClick={handleAddAttachments}
-                className="h-[32px] w-[32px] shrink-0 rounded-lg"
-                title="Attach files"
-                aria-label="Attach files"
-              >
-                <Paperclip className="h-4 w-4" />
-              </Button>
-            )}
-              <Button variant="default" size="icon" onClick={handleSend} className="h-[32px] w-[32px] shrink-0 rounded-lg" aria-label="Send message">
+                <Button type="button" variant="ghost" size="icon" onClick={handleAddAttachments} className="glass-action !h-[32px] !w-[32px]" title="Attach files" aria-label="Attach files">
+                  <Paperclip className="h-4 w-4" />
+                </Button>
+              )}
+              <div className="glass-composer flex min-w-0 flex-1 items-center">
+                <textarea
+                  ref={inputRef}
+                  rows={1}
+                  disabled={isStarting}
+                  placeholder={isStarting ? 'Starting agent…' : 'Write a message...'}
+                  className="w-full min-h-[32px] bg-transparent px-5 py-[5px] leading-[22px] text-sm text-foreground placeholder:text-[var(--glass-placeholder)] focus:outline-none resize-none overflow-hidden max-h-32 disabled:opacity-60"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault()
+                      handleSend()
+                    }
+                  }}
+                  onInput={(event) => { autoResize(); setInputHasValue(!!event.currentTarget.value.trim()) }}
+                  onChange={(event) => setInputHasValue(!!event.currentTarget.value.trim())}
+                />
+              </div>
+              <VoiceMicButton mode="dictation" onSubmit={handleSend} className="glass-action !h-[32px] !w-[32px] !rounded-full" />
+              <Button variant="default" size="icon" onClick={handleSend} disabled={isStarting || !inputHasValue} className="glass-action glass-send !h-[32px] !w-[32px] disabled:!bg-[var(--glass-control)] disabled:!text-muted-foreground" aria-label="Send message">
                 <Send className="h-4 w-4" />
               </Button>
             </div>
