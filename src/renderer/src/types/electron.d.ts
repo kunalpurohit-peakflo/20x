@@ -1,6 +1,7 @@
 import type { BrowserRecordingManifest } from '@shared/browser-recording'
 import type { BrowserImportRequest, BrowserImportResult, BrowserImportSource } from '@shared/browser-session-import'
 import type { UiCommand } from '@shared/ui-commands'
+import type { TaskRunDuration } from '@shared/task-run-duration'
 import type {
   WorkfloTask,
   CreateTaskDTO,
@@ -254,6 +255,7 @@ interface ElectronAPI {
   }
   tasks: {
     getWorkspaceDir: (taskId: string) => Promise<string>
+    getRunDurations: (taskIds: string[]) => Promise<Record<string, TaskRunDuration>>
   }
   /** The preload bridge always exposes every artifact capability, including
    * the desktop-only file clipboard action. */
