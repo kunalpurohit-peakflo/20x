@@ -68,6 +68,11 @@ export const api = {
     test: () => post<{ success: boolean }>('/api/push/test')
   },
   tasks: {
+    open: () => get<unknown[]>('/api/tasks/open'),
+    completedPage: (params: { offset: number; limit: number; query?: string }) =>
+      get<{ tasks: unknown[]; total: number }>(`/api/tasks/completed?${new URLSearchParams({
+        offset: String(params.offset), limit: String(params.limit), ...(params.query ? { query: params.query } : {})
+      })}`),
     list: (params?: Record<string, string>) => {
       const qs = params ? '?' + new URLSearchParams(params).toString() : ''
       return get<unknown[]>(`/api/tasks${qs}`)
@@ -76,7 +81,7 @@ export const api = {
     create: (data: unknown) => post<unknown>('/api/tasks', data),
     update: (id: string, data: unknown) => post<unknown>(`/api/tasks/${encodeURIComponent(id)}`, data),
     complete: (id: string, completeAtSource = true) =>
-      post<{ completed: boolean; status?: string }>(`/api/tasks/${encodeURIComponent(id)}/complete`, { completeAtSource }),
+      post<{ completed: boolean; status?: string; task?: unknown }>(`/api/tasks/${encodeURIComponent(id)}/complete`, { completeAtSource }),
     reorderSubtasks: (parentId: string, orderedIds: string[]) =>
       post<{ success: boolean }>('/api/tasks/reorder-subtasks', { parentId, orderedIds }),
     markReviewSeen: (id: string) => post<unknown>(`/api/tasks/${encodeURIComponent(id)}/review-seen`),
