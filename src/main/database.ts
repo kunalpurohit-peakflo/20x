@@ -5,6 +5,7 @@ import { join } from 'path'
 import { existsSync, mkdirSync, rmSync } from 'fs'
 import { createId } from '@paralleldrive/cuid2'
 import { TaskStatus } from '../shared/constants'
+import { desktopBrandName } from './brand'
 import type { ReasoningEffort } from '../shared/reasoning-effort'
 import type { SpeedMode } from '../shared/ultrafast'
 import { startTaskApiServer } from './task-api-server'
@@ -3344,10 +3345,10 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
       const snapshot = this.getSetting(`workflo-task:${id}`)
       const remote = snapshot ? JSON.parse(snapshot) : undefined
       if (task && data.status !== task.status && isWorkfloLinkedTask(this, task)) {
-        throw new Error('Workflo controls task status. Use a server task action.')
+        throw new Error(`${desktopBrandName()} controls task status. Use a server task action.`)
       }
       if (task && data.status !== task.status && remote?.status === 'completed') {
-        throw new Error('This task is completed in Workflo.')
+        throw new Error(`This task is completed in ${desktopBrandName()}.`)
       }
     }
     if (data.status === TaskStatus.Completed && origin !== 'workflo-server' && !manualCompletion && !approvedStatusWrite) {

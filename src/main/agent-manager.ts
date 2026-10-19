@@ -1,5 +1,6 @@
 import { finishSessionFeedback, updateTaskFromUser } from './session-feedback'
 import { serverTaskSnapshot } from './workflo-task-sync'
+import { desktopBrandName, displayMcpServerName, mcpRuntimeName } from './brand'
 import { EventEmitter } from 'events'
 import { spawn } from 'child_process'
 import { join } from 'path'
@@ -1544,7 +1545,7 @@ export class AgentManager extends EventEmitter {
         const taskManagement = this.buildTaskManagementMcpConfig(opts)
         if (taskManagement) result[mcpServer.name] = taskManagement
       } else if (mcpServer.type === 'local') {
-        result[mcpServer.name] = {
+        result[mcpRuntimeName(mcpServer)] = {
           type: 'stdio',
           command: mcpServer.command,
           args: mcpServer.args,
@@ -1586,7 +1587,7 @@ export class AgentManager extends EventEmitter {
           }
         }
 
-        result[mcpServer.name] = {
+        result[mcpRuntimeName(mcpServer)] = {
           type: 'http',
           url: finalUrl,
           headers: finalHeaders
@@ -2083,7 +2084,7 @@ export class AgentManager extends EventEmitter {
       const enabledTools = typeof entry === 'string' ? undefined : (entry as AgentMcpServerEntry).enabledTools
       const server = this.db.getMcpServer(serverId)
       if (!server) continue
-      configured.set(server.name, { server, enabledTools })
+      configured.set(mcpRuntimeName(server), { server, enabledTools })
     }
 
     if (!injectedServers) return [...configured.values()]
@@ -2155,7 +2156,8 @@ export class AgentManager extends EventEmitter {
         for (const entry of documentedServers) {
           const { server: mcpServer, enabledTools } = entry
           const transport = AgentManager.describeMcpTransport(entry)
-          md += `### ${mcpServer.name}\n\n`
+          const displayName = displayMcpServerName(mcpServer)
+          md += `### ${displayName}${displayName === mcpServer.name ? '' : ` (runtime: ${mcpServer.name}; tool prefix: workflo)`}\n\n`
           md += `**Type:** ${transport.type}\n\n`
           md += `${transport.detail}\n\n`
 
@@ -2256,7 +2258,8 @@ export class AgentManager extends EventEmitter {
               ? mcpServer.tools.filter(t => enabledTools.includes(t.name))
               : mcpServer.tools
 
-            md += `### ${mcpServer.name} (${toolsToShow.length} tools)\n\n`
+            const displayName = displayMcpServerName(mcpServer)
+            md += `### ${displayName}${displayName === mcpServer.name ? '' : ` (runtime: ${mcpServer.name}; Pi prefix: workflo; Claude Code prefix: mcp___Workflo__Organisation_Workspace__)`} (${toolsToShow.length} tools)\n\n`
             md += `${toolsToShow.map((tool) => `\`${tool.name}\``).join(', ')}\n\n`
           }
         }
@@ -3986,12 +3989,12 @@ If a PR, deploy, or linked issue should be checked after this task, write \`hear
    * Uses promptAsync to send the initial prompt without blocking.
    */
   private assertLocalHelpAllowed(taskId: string): void {
-    if (this.db.getSetting(`workflo-upload:${taskId}`)) throw new Error('Wait for the Workflo task upload to finish.')
+    if (this.db.getSetting(`workflo-upload:${taskId}`)) throw new Error(`Wait for the ${desktopBrandName()} task upload to finish.`)
     const task = serverTaskSnapshot(this.db, taskId)
     if (!task) return
-    if (task.executionMode !== 'human') throw new Error('Agent-assigned tasks run through Workflo, not a local help session.')
+    if (task.executionMode !== 'human') throw new Error(`Agent-assigned tasks run through ${desktopBrandName()}, not a local help session.`)
     if (task.isRecurring || ['completed', 'cancelled', 'expired'].includes(task.status)) {
-      throw new Error('This Workflo task cannot start a help session.')
+      throw new Error(`This ${desktopBrandName()} task cannot start a help session.`)
     }
   }
 
