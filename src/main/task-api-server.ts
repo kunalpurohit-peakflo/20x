@@ -24,12 +24,16 @@ import type { AgentManager } from './agent-manager'
 import {
   UI_CANVAS_MAX_ZOOM,
   UI_CANVAS_MIN_ZOOM,
-  UI_COMMAND_CHANNEL,
+  UI_CANVAS_VIEW_MODES,
+  UI_COMMAND_TIMEOUT_MS,
+  UI_OPEN_TASK_TARGETS,
+  UI_VIEW_NAMES,
   isUiCanvasViewMode,
   isUiOpenTaskTarget,
   isUiViewName,
   type UiCommand,
-  type UiOpenTaskTarget
+  type UiCommandAck,
+  type UiCommandEnvelope
 } from '../shared/ui-commands'
 import { buildSimilarTasksQuery } from './task-search'
 import { limitsByInstance, summarizeAgentUsage } from './usage/agent-usage-summary'
@@ -83,12 +87,79 @@ let uiState: Record<string, unknown> = { available: false }
 export function setTaskApiUiState(state: Record<string, unknown> | null): void {
   // Null clears it. A closed window must not keep reporting a stale screen.
   uiState = state ? { ...state, available: true, updatedAt: Date.now() } : { available: false }
+  // Nothing will answer a command sent to a window that has gone.
+  if (!state) failPendingUiCommands('The 20x window closed before it confirmed the change')
+}
+
+/**
+ * Delivers one command to the window the user is looking at. Returns false
+ * when there is no such window. Wired in index.ts to the main window only, so
+ * a command and the `get_ui_state` it is checked against come from the same
+ * renderer.
+ */
+type UiCommandSender = (envelope: UiCommandEnvelope) => boolean
+let uiCommandSender: UiCommandSender | null = null
+
+export function setTaskApiUiCommandSender(fn: UiCommandSender | null): void {
+  uiCommandSender = fn
+}
+
+interface PendingUiCommand {
+  resolve: (ack: UiCommandAck | { timeout: true; reason: string }) => void
+  timer: ReturnType<typeof setTimeout>
+}
+const pendingUiCommands = new Map<string, PendingUiCommand>()
+
+function failPendingUiCommands(reason: string): void {
+  for (const [requestId, pending] of pendingUiCommands) {
+    clearTimeout(pending.timer)
+    pendingUiCommands.delete(requestId)
+    pending.resolve({ timeout: true, reason })
+  }
+}
+
+/**
+ * The renderer's answer to one command. The screen it carries is cached
+ * before the tool call returns, so a `get_ui_state` straight after already
+ * shows the result.
+ */
+export function resolveTaskApiUiCommand(ack: UiCommandAck): void {
+  if (!ack || typeof ack.requestId !== 'string') return
+  const pending = pendingUiCommands.get(ack.requestId)
+  if (!pending) return
+  clearTimeout(pending.timer)
+  pendingUiCommands.delete(ack.requestId)
+  if (ack.state) setTaskApiUiState(ack.state as unknown as Record<string, unknown>)
+  pending.resolve(ack)
+}
+
+interface PublishedPanel {
+  panelId?: string
+  taskId: string | null
+  x?: number
+  y?: number
+  width?: number
+  height?: number
 }
 
 /** The canvas panels the window last published, or none when it published none. */
-function readCanvasPanels(): Array<{ taskId: string | null }> {
-  const canvas = uiState.canvas as { panels?: Array<{ taskId: string | null }> } | undefined
+function readCanvasPanels(): PublishedPanel[] {
+  const canvas = uiState.canvas as { panels?: PublishedPanel[] } | undefined
   return Array.isArray(canvas?.panels) ? canvas.panels : []
+}
+
+/** The task's panel as the window last published it, in the shape get_ui_state uses. */
+function readTaskPanel(taskId: string): PublishedPanel | undefined {
+  return readCanvasPanels().find((panel) => panel.taskId === taskId)
+}
+
+function readViewport(): unknown {
+  return (uiState.canvas as { viewport?: unknown } | undefined)?.viewport ?? null
+}
+
+/** Error for an unknown task ID, naming the tools that find a real one. */
+function taskNotFound(taskId: string): { error: string } {
+  return { error: `Task not found: ${taskId}. Get a valid task_id from list_tasks, find_similar_tasks or get_ui_state.` }
 }
 
 /**
@@ -107,20 +178,48 @@ function resolveOpenTaskTarget(): 'workspace' | 'canvas' | 'modal' {
 
 /** Refuses when that task has no panel, so a move cannot silently do nothing. */
 function requireCanvasPanel(taskId: string): { error: string } | null {
-  if (readCanvasPanels().some((panel) => panel.taskId === taskId)) return null
-  return { error: 'That task has no panel on the canvas. Open it there first.' }
+  if (readTaskPanel(taskId)) return null
+  return { error: 'That task has no panel on the canvas. Call open_task with where="canvas" first.' }
 }
 
 /**
- * Pushes one command to the window.
+ * Pushes one command to the window and waits for it to say what it did.
  *
- * A command that reaches no window is a failure, not a success: an agent that
- * is told "done" would go on to describe a screen the user never saw.
+ * A command that reaches no window, that the window refuses, or that the
+ * window never confirms is a failure, not a success: an agent that is told
+ * "done" would go on to describe a screen the user never saw.
  */
-function sendUiCommand(command: UiCommand): { success: true; command: string } | { error: string } {
-  if (!uiState.available) return { error: 'No 20x window is open' }
-  if (!notifyRenderer) return { error: 'The window cannot be reached' }
-  notifyRenderer(UI_COMMAND_CHANNEL, command)
+async function sendUiCommand(command: UiCommand): Promise<{ success: true; command: string } | { error: string }> {
+  if (!uiState.available) return { error: 'No 20x window is open. Ask the user to open 20x, then try again.' }
+  if (!uiCommandSender) return { error: 'The 20x window cannot be reached. Ask the user to check that 20x is open.' }
+
+  const requestId = randomUUID()
+  const answer = new Promise<UiCommandAck | { timeout: true; reason: string }>((resolve) => {
+    const timer = setTimeout(() => {
+      pendingUiCommands.delete(requestId)
+      resolve({ timeout: true, reason: `The 20x window did not confirm the change within ${UI_COMMAND_TIMEOUT_MS / 1000}s` })
+    }, UI_COMMAND_TIMEOUT_MS)
+    pendingUiCommands.set(requestId, { resolve, timer })
+  })
+
+  let delivered = false
+  try {
+    delivered = uiCommandSender({ requestId, command })
+  } catch (err) {
+    console.error('[TaskApiServer] UI command send failed:', err)
+  }
+  if (!delivered) {
+    const pending = pendingUiCommands.get(requestId)
+    if (pending) {
+      clearTimeout(pending.timer)
+      pendingUiCommands.delete(requestId)
+    }
+    return { error: 'The 20x window cannot be reached. Ask the user to check that 20x is open.' }
+  }
+
+  const ack = await answer
+  if ('timeout' in ack) return { error: ack.reason }
+  if (!ack.applied) return { error: ack.detail || 'The window did not apply the change' }
   return { success: true, command: command.kind }
 }
 
@@ -978,72 +1077,93 @@ export async function handleRoute(db: DatabaseManager, route: string, params: Re
 
     case '/navigate': {
       if (!isUiViewName(params.view)) {
-        return { error: 'view must be one of dashboard, tasks, canvas, skills, settings' }
+        return { error: `view must be one of ${UI_VIEW_NAMES.join(', ')}. To show one task, use open_task.` }
       }
-      return sendUiCommand({
+      const result = await sendUiCommand({
         kind: 'navigate',
         view: params.view,
         settingsTab: params.settings_tab ? String(params.settings_tab) : undefined
       })
+      return 'error' in result ? result : { ...result, view: params.view }
     }
 
     case '/open_task': {
       if (!params.task_id) return { error: 'task_id is required' }
       const taskId = String(params.task_id)
       const task = db.getTask(taskId)
-      if (!task) return { error: 'Task not found' }
+      if (!task) return taskNotFound(taskId)
 
-      const requested: UiOpenTaskTarget = params.where === undefined ? 'auto' : String(params.where) as UiOpenTaskTarget
+      // Null and '' mean "not given", like an omitted field.
+      const requested = params.where === undefined || params.where === null || params.where === ''
+        ? 'auto'
+        : String(params.where).trim().toLowerCase()
       if (!isUiOpenTaskTarget(requested)) {
-        return { error: 'where must be one of auto, workspace, canvas, modal' }
+        return { error: `where must be one of ${UI_OPEN_TASK_TARGETS.join(', ')}. Omit it to follow the user's screen.` }
       }
       const where = requested === 'auto' ? resolveOpenTaskTarget() : requested
-      const result = sendUiCommand({ kind: 'open_task', taskId, where })
-      return 'error' in result ? result : { ...result, where, task_title: task.title }
+      const result = await sendUiCommand({ kind: 'open_task', taskId, where })
+      if ('error' in result) return result
+      if (where !== 'canvas') return { ...result, where, task_id: taskId, task_title: task.title }
+      // The window answered with its screen, so the panel it placed is known.
+      const panel = readTaskPanel(taskId)
+      if (!panel) {
+        return { error: 'The window reported the task opened, but no canvas panel was published for it. Call get_ui_state and try again.' }
+      }
+      return { ...result, where, task_id: taskId, task_title: task.title, panel }
     }
 
     case '/move_task_panel': {
       if (!params.task_id) return { error: 'task_id is required' }
       const x = Number(params.x)
       const y = Number(params.y)
-      if (!Number.isFinite(x) || !Number.isFinite(y)) return { error: 'x and y must be numbers' }
+      if (params.x === undefined || params.y === undefined || !Number.isFinite(x) || !Number.isFinite(y)) {
+        return { error: 'x and y must be numbers in canvas coordinates (the same space as panel x/y in get_ui_state)' }
+      }
       const taskId = String(params.task_id)
-      if (!db.getTask(taskId)) return { error: 'Task not found' }
+      if (!db.getTask(taskId)) return taskNotFound(taskId)
       const missing = requireCanvasPanel(taskId)
       if (missing) return missing
-      return sendUiCommand({ kind: 'move_task_panel', taskId, x, y })
+      const result = await sendUiCommand({ kind: 'move_task_panel', taskId, x, y })
+      return 'error' in result ? result : { ...result, task_id: taskId, panel: readTaskPanel(taskId) }
     }
 
     case '/close_task_panel': {
       if (!params.task_id) return { error: 'task_id is required' }
       const taskId = String(params.task_id)
       const missing = requireCanvasPanel(taskId)
-      if (missing) return missing
-      return sendUiCommand({ kind: 'close_task_panel', taskId })
+      if (missing) return { error: 'That task has no panel on the canvas, so there is nothing to close. Check get_ui_state for the open panels.' }
+      const result = await sendUiCommand({ kind: 'close_task_panel', taskId })
+      return 'error' in result ? result : { ...result, task_id: taskId }
     }
 
     case '/set_canvas_view': {
-      if (!isUiCanvasViewMode(params.mode)) {
-        return { error: 'mode must be one of fit_all, reset, zoom' }
+      // Zoom alone means "zoom"; nothing at all means the safe default, fit_all.
+      const hasZoom = params.zoom !== undefined && params.zoom !== null && params.zoom !== ''
+      const mode = params.mode === undefined || params.mode === null || params.mode === ''
+        ? (hasZoom ? 'zoom' : 'fit_all')
+        : params.mode
+      if (!isUiCanvasViewMode(mode)) {
+        return { error: `mode must be one of ${UI_CANVAS_VIEW_MODES.join(', ')}. Omit it to fit every panel.` }
       }
       let zoom: number | undefined
-      if (params.mode === 'zoom') {
+      if (mode === 'zoom') {
         zoom = Number(params.zoom)
-        if (!Number.isFinite(zoom) || zoom < UI_CANVAS_MIN_ZOOM || zoom > UI_CANVAS_MAX_ZOOM) {
+        if (!hasZoom || !Number.isFinite(zoom) || zoom < UI_CANVAS_MIN_ZOOM || zoom > UI_CANVAS_MAX_ZOOM) {
           return { error: `zoom must be a number between ${UI_CANVAS_MIN_ZOOM} and ${UI_CANVAS_MAX_ZOOM}` }
         }
       }
-      if (params.mode === 'fit_all' && readCanvasPanels().length === 0) {
-        return { error: 'The canvas is empty' }
+      if (mode === 'fit_all' && readCanvasPanels().length === 0) {
+        return { error: 'The canvas is empty, so there is nothing to fit. Add a panel with open_task where="canvas".' }
       }
-      return sendUiCommand({ kind: 'set_canvas_view', mode: params.mode, zoom })
+      const result = await sendUiCommand({ kind: 'set_canvas_view', mode, zoom })
+      return 'error' in result ? result : { ...result, mode, viewport: readViewport() }
     }
 
     case '/open_artifact': {
       if (!params.task_id) return { error: 'task_id is required' }
       if (!params.artifact_id) return { error: 'artifact_id is required' }
       const taskId = String(params.task_id)
-      if (!db.getTask(taskId)) return { error: 'Task not found' }
+      if (!db.getTask(taskId)) return taskNotFound(taskId)
 
       const artifactId = String(params.artifact_id)
       // A tab that names nothing shows an empty panel, so the artifact has to
