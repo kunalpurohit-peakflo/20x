@@ -1201,7 +1201,7 @@ function deserializeInstalledPlugin(row: InstalledPluginRow): InstalledPluginRec
  * 9 → 10: harness_instances table; agent config account_home → harness_instance_id
  * 10 → 11: tasks.review_entered_at + tasks.review_seen_at (review seen/unseen)
  */
-const SCHEMA_VERSION = 11
+export const SCHEMA_VERSION = 11
 
 export class DatabaseManager {
   public db!: Database.Database
@@ -4098,7 +4098,9 @@ Remember: Be helpful, concise, and proactive. Learn from history, but adapt to c
     const rows = this.db.prepare(
       `SELECT * FROM secrets WHERE id IN (${placeholders}) ORDER BY name ASC`
     ).all(...ids) as SecretRow[]
-    return rows.map(deserializeSecretWithValue)
+    // A secret with no value yet (one that arrived by data import) is left out,
+    // so an empty variable never hides the same variable from the user's shell.
+    return rows.map(deserializeSecretWithValue).filter((secret) => secret.value !== '')
   }
 
   createSecret(data: CreateSecretData): SecretRecord | undefined {

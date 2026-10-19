@@ -12,6 +12,7 @@ import {
   type LinkFn,
   type LinkType
 } from './harness-instances'
+import { isWindows } from '../../test/helpers/can-symlink'
 
 let root: string
 
@@ -32,7 +33,7 @@ function isLink(path: string): boolean {
 }
 
 describe('home directories', () => {
-  it('honours an inherited CODEX_HOME and CLAUDE_CONFIG_DIR as the real default home', () => {
+  it.skipIf(isWindows)('honours an inherited CODEX_HOME and CLAUDE_CONFIG_DIR as the real default home', () => {
     expect(realHomeFor('codex', { CODEX_HOME: '/opt/codex' }, '/home/u')).toBe('/opt/codex')
     expect(realHomeFor('claude-code', { CLAUDE_CONFIG_DIR: '/opt/claude' }, '/home/u')).toBe('/opt/claude')
   })
@@ -42,7 +43,7 @@ describe('home directories', () => {
     expect(realHomeFor('claude-code', { CODEX_HOME: '' }, '/home/u')).toBe(join('/home/u', '.claude'))
   })
 
-  it('uses the stored path for a custom instance and the real default for the implicit one', () => {
+  it.skipIf(isWindows)('uses the stored path for a custom instance and the real default for the implicit one', () => {
     expect(instanceHomeFor('codex', undefined, { CODEX_HOME: '/opt/codex' }, '/home/u')).toBe('/opt/codex')
     expect(instanceHomeFor('codex', '/accounts/work', {}, '/home/u')).toBe('/accounts/work')
   })
@@ -55,7 +56,7 @@ describe('home directories', () => {
 })
 
 describe('shared session history', () => {
-  it('links Codex sessions and config to the real default home and keeps its own login', () => {
+  it.skipIf(isWindows)('links Codex sessions and config to the real default home and keeps its own login', () => {
     const real = join(root, 'codex-default')
     const instance = join(root, 'codex-work')
     mkdirSync(real)
@@ -74,7 +75,7 @@ describe('shared session history', () => {
     expect(existsSync(join(instance, 'models_cache.json'))).toBe(false)
   })
 
-  it('links Claude session history but not the login or the live session registry', () => {
+  it.skipIf(isWindows)('links Claude session history but not the login or the live session registry', () => {
     const real = join(root, 'claude-default')
     const instance = join(root, 'claude-personal')
     mkdirSync(real)
@@ -89,7 +90,7 @@ describe('shared session history', () => {
     expect(existsSync(join(instance, 'settings.json'))).toBe(false)
   })
 
-  it('is idempotent', () => {
+  it.skipIf(isWindows)('is idempotent', () => {
     const real = join(root, 'codex-default')
     const instance = join(root, 'codex-work')
     linkSharedHistory({ harness: 'codex', instanceHome: instance, realHome: real, platform: 'linux' })
@@ -112,7 +113,7 @@ describe('shared session history', () => {
     expect(readFileSync(join(instance, 'sessions', 'rollout.jsonl'), 'utf8')).toBe('{}')
   })
 
-  it('marks the instance not shareable when a shared path links somewhere else', () => {
+  it.skipIf(isWindows)('marks the instance not shareable when a shared path links somewhere else', () => {
     const real = join(root, 'claude-default')
     const instance = join(root, 'claude-personal')
     const elsewhere = join(root, 'elsewhere')
@@ -127,7 +128,7 @@ describe('shared session history', () => {
     expect(readlinkSync(join(instance, 'projects'))).toBe(elsewhere)
   })
 
-  it('replaces an empty real directory, since no session can be lost', () => {
+  it.skipIf(isWindows)('replaces an empty real directory, since no session can be lost', () => {
     const real = join(root, 'codex-default')
     const instance = join(root, 'codex-work')
     mkdirSync(join(instance, 'archived_sessions'), { recursive: true })
@@ -185,7 +186,7 @@ describe('shared session history', () => {
 })
 
 describe('Codex thread state', () => {
-  it('links the root-level SQLite databases where thread state lives, not their companions', () => {
+  it.skipIf(isWindows)('links the root-level SQLite databases where thread state lives, not their companions', () => {
     const real = join(root, 'codex-default')
     const instance = join(root, 'codex-work')
     mkdirSync(real)
