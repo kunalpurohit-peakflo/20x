@@ -185,6 +185,70 @@ describe('shared session history', () => {
   })
 })
 
+describe('Windows file links without symlink privilege', () => {
+  const eperm = (): never => {
+    throw Object.assign(new Error('EPERM: operation not permitted, symlink'), { code: 'EPERM' })
+  }
+
+  it('hard-links shared settings files when file symlinks are refused', () => {
+    const real = join(root, 'codex-default')
+    const instance = join(root, 'codex-work')
+    mkdirSync(real)
+    writeFileSync(join(real, 'AGENTS.md'), 'rules')
+
+    const result = linkSharedHistory({
+      harness: 'codex',
+      instanceHome: instance,
+      realHome: real,
+      platform: 'win32',
+      link: (target, path, type) => (type === 'file' ? eperm() : symlinkSync(target, path, 'dir'))
+    })
+
+    expect(result.links.find((l) => l.name === 'AGENTS.md')?.status).toBe('linked')
+    expect(readFileSync(join(instance, 'AGENTS.md'), 'utf-8')).toBe('rules')
+    writeFileSync(join(real, 'AGENTS.md'), 'changed')
+    expect(readFileSync(join(instance, 'AGENTS.md'), 'utf-8')).toBe('changed')
+  })
+
+  it('never hard-links a SQLite database, since its -wal file is named by path', () => {
+    const real = join(root, 'codex-default')
+    const instance = join(root, 'codex-work')
+    mkdirSync(real)
+    writeFileSync(join(real, 'state_5.sqlite'), 'db')
+
+    const result = linkSharedHistory({
+      harness: 'codex',
+      instanceHome: instance,
+      realHome: real,
+      platform: 'win32',
+      link: (target, path, type) => (type === 'file' ? eperm() : symlinkSync(target, path, 'dir'))
+    })
+
+    expect(result.links.find((l) => l.name === 'state_5.sqlite')?.status).toBe('failed')
+    expect(existsSync(join(instance, 'state_5.sqlite'))).toBe(false)
+  })
+
+  it('does not fall back off Windows or for other errors', () => {
+    const real = join(root, 'codex-default')
+    mkdirSync(real)
+    writeFileSync(join(real, 'AGENTS.md'), 'rules')
+    const run = (platform: NodeJS.Platform, code: string, instance: string) =>
+      linkSharedHistory({
+        harness: 'codex',
+        instanceHome: instance,
+        realHome: real,
+        platform,
+        link: (target, path, type) => {
+          if (type === 'file') throw Object.assign(new Error(code), { code })
+          symlinkSync(target, path, 'dir')
+        }
+      }).links.find((l) => l.name === 'AGENTS.md')?.status
+
+    expect(run('darwin', 'EPERM', join(root, 'a'))).toBe('failed')
+    expect(run('win32', 'ENOSPC', join(root, 'b'))).toBe('failed')
+  })
+})
+
 describe('Codex thread state', () => {
   it.skipIf(isWindows)('links the root-level SQLite databases where thread state lives, not their companions', () => {
     const real = join(root, 'codex-default')
